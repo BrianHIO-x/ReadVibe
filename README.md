@@ -35,7 +35,6 @@ ReadVibe 是一个使用 Flutter 构建的 Android 本地小说阅读器。它�
     └── analysis_options.yaml
 ```
 
-当前仓库没有 `test/` 目录，也不包含 `flutter_test` 依赖。未经用户明确要求，不重新创建自动化测试，不使用测试通过数量作为交付依据。
 
 ## 文档导航
 
@@ -45,7 +44,6 @@ ReadVibe 是一个使用 Flutter 构建的 Android 本地小说阅读器。它�
 - [`ReadVibe/docs/UI_OPTIMIZATION.md`](ReadVibe/docs/UI_OPTIMIZATION.md)：阅读页稳定性、进度、翻页、性能与回归检查说明。
 - [`ReadVibe/windows/README.md`](ReadVibe/windows/README.md)：Windows 端为何不能构建，以及以后如何恢复。
 
-任何代码、配置、资源、版本、构建产物或交互变化后，都必须逐一检查并同步修正上述全部 Markdown。详细规则见根目录和应用目录的两个 `AGENTS.md`。
 
 ## 产品原则
 
@@ -53,7 +51,7 @@ ReadVibe 是一个使用 Flutter 构建的 Android 本地小说阅读器。它�
 
 - 书籍正文、书架元数据、阅读进度和阅读设置保存在设备本地。
 - 当前不提供账号、云同步或远程服务器。
-- Android 系统云备份已禁用，避免私人书籍正文被自动备份到设备账号。
+- Android 系统云备份已禁用。
 - 卸载应用通常会同时删除书籍、进度和导入字体。
 
 ### 小说阅读优先
@@ -126,7 +124,7 @@ ReadVibe 是一个使用 Flutter 构建的 Android 本地小说阅读器。它�
 
 ### 阅读设置
 
-- 字号：14、16、18、20、24。
+- 字号：16、18、20、22、24。
 - 行距：1.4、1.6、1.8、2.0、2.2。
 - 字重：细、常规、粗。
 - 页边距：窄、中、宽，默认中档。
@@ -155,10 +153,6 @@ ReadVibe 是一个使用 Flutter 构建的 Android 本地小说阅读器。它�
 | 平台 | 状态 |
 |---|---|
 | Android arm64-v8a | 当前唯一正式维护与发布目标 |
-| Android 32 位 | 不支持 |
-| Android x86/x86_64 | 不支持 |
-| Windows | 仅占位说明，当前不能构建 |
-| iOS / macOS / Linux / Web | 平台工程已删除，当前不维护 |
 
 ## 快速开始
 
@@ -197,7 +191,7 @@ APK 清单必须显示 `versionName='0.1.7'` 和 `native-code: 'arm64-v8a'`。�
 
 ## 当前边界
 
-ReadVibe 仍是 `v0.1` 阶段的本地小说阅读器 demo，暂未实现：
+ReadVibe 仍是demo阶段的本地小说阅读器，暂未实现：
 
 - 真实封面图片提取和管理；
 - 书签、批注和全文搜索；
