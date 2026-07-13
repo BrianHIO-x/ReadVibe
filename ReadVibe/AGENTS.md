@@ -15,7 +15,7 @@ cd D:\0_Study\0_Stdio\0_Codex_work\1.ReadVibe_Project\ReadVibe
 
 ## 二、每次变更必须同步全部 Markdown
 
-- 每次修改代码、配置、资源、依赖、版本、构建产物、功能或交互后，都必须检查并同步修正整个仓库中的全部 `.md`，不得只修改 `ReadVibe/README.md` 或当前任务直接提到的文档。
+- 每次修改代码、配置、资源、依赖、版本、构建产物、功能或交互后，都必须逐一检查并同步修正整个仓库中的全部 `.md`，不得只修改 `ReadVibe/README.md` 或当前任务直接提到的文档。
 - 当前必须逐一核对：
   - `../AGENTS.md`
   - `../README.md`
@@ -28,7 +28,9 @@ cd D:\0_Study\0_Stdio\0_Codex_work\1.ReadVibe_Project\ReadVibe
 - 交付前执行：
 
 ```powershell
-rg --files -g '*.md' -g '!build/**' -g '!.dart_tool/**'
+Push-Location ..
+rg --files -g '*.md' -g '!**/build/**' -g '!**/.dart_tool/**'
+Pop-Location
 ```
 
 然后检查旧版本号、被禁止的公开版本后缀、已删除测试说明和失效路径。
