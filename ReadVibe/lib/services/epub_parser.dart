@@ -78,6 +78,7 @@ Book _parseEpubSync(String filePath, String fileName) {
       .toList();
 
   final chapters = <Chapter>[];
+  String? activeVolumeTitle;
   for (final itemId in spineIds) {
     final contentPath = manifest[itemId];
     if (contentPath == null) continue;
@@ -95,10 +96,20 @@ Book _parseEpubSync(String filePath, String fileName) {
     } else if (plainText.startsWith('$chapterTitle\n')) {
       plainText = plainText.substring(chapterTitle.length).trimLeft();
     }
+    if (isVolumeChapterTitle(chapterTitle)) {
+      activeVolumeTitle = chapterTitle;
+    }
     if (plainText.isEmpty) continue;
 
     chapters.add(
-      Chapter(index: chapters.length, title: chapterTitle, content: plainText),
+      Chapter(
+        index: chapters.length,
+        title: chapterTitle,
+        content: plainText,
+        volumeTitle: isStandaloneChapterTitle(chapterTitle)
+            ? null
+            : activeVolumeTitle,
+      ),
     );
   }
 

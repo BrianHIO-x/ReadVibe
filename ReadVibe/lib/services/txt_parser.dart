@@ -30,7 +30,9 @@ final _chapterPatterns = [
   RegExp(r'^第[一二两三四五六七八九十百千万零〇０-９0-9]+[章回节卷集部篇]'),
   RegExp(r'^卷[一二两三四五六七八九十百千万零〇０-９0-9]+'),
   RegExp(r'^(?:Chapter|Part)\s*[0-9０-９IVXLCDM]+', caseSensitive: false),
-  RegExp(r'^(?:序章|楔子|引子|前言|后记|尾声)'),
+  RegExp(
+    r'^(?:内容简介|作品简介|书籍简介|作者简介|编辑推荐|内容提要|出版说明|简介|序言|序章|楔子|引子|前言|后记|尾声|附录)(?:$|[\s　:：—（(【\[-])',
+  ),
   RegExp(
     r'^番外(?:第?[一二两三四五六七八九十百千万零〇０-９0-9]+[章节篇]?|[一二两三四五六七八九十百千万零〇０-９0-9]+)?',
   ),
@@ -86,7 +88,12 @@ String? detectTxtChapterTitle(String sourceLine) =>
 /// excluded because they never existed in the source file.
 Book upgradeLegacyTxtBook(Book book) {
   if (book.format != BookFormat.txt ||
-      book.txtParserVersion >= currentTxtParserVersion ||
+      // Parser v2 already discarded empty volume marker lines, and the app
+      // does not retain the original imported TXT. Reparsing its reconstructed
+      // chapters cannot recover those titles, so only the older pre-v2 parser
+      // is migrated automatically. Re-importing the original file creates v3
+      // chapters with complete volume metadata.
+      book.txtParserVersion >= 2 ||
       book.chapters.isEmpty) {
     return book;
   }
@@ -180,6 +187,7 @@ List<Chapter> extractTxtChapters(List<String> lines) {
   }
 
   final chapters = <Chapter>[];
+  String? activeVolumeTitle;
 
   // Never discard text before the first detected heading. It may be a preface,
   // publication information, or (as in the reported book) real opening prose.
@@ -198,6 +206,10 @@ List<Chapter> extractTxtChapters(List<String> lines) {
         ? chapterStarts[i + 1].index
         : lines.length;
     final content = normalizeTxtContent(lines.getRange(start + 1, end));
+    final title = chapterStarts[i].title;
+    if (isVolumeChapterTitle(title)) {
+      activeVolumeTitle = title;
+    }
 
     // Adjacent table-of-contents entries and duplicate headings used to create
     // selectable chapters with a completely blank page. Empty entries are not
@@ -206,8 +218,9 @@ List<Chapter> extractTxtChapters(List<String> lines) {
     chapters.add(
       Chapter(
         index: chapters.length,
-        title: chapterStarts[i].title,
+        title: title,
         content: content,
+        volumeTitle: isStandaloneChapterTitle(title) ? null : activeVolumeTitle,
       ),
     );
   }

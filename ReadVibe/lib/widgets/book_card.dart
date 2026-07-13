@@ -3,6 +3,7 @@ import '../theme/app_theme.dart';
 import '../theme/app_spacing.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
+import '../services/word_count_service.dart';
 import 'pressable_scale.dart';
 
 /// A book card displayed on the library shelf
@@ -54,11 +55,12 @@ class BookCard extends StatelessWidget {
       if (book.author.isNotEmpty) book.author,
       '$totalChapters 章${progress != null ? ' · 已读 ${(progressPercent * 100).toInt()}%' : ''}',
     ].join(' · ');
+    final wordCountLine = formatBookWordCount(book.wordCount);
 
     return Semantics(
       button: true,
       label:
-          '$metaLine。${book.title}${book.author.isNotEmpty ? '，作者 ${book.author}' : ''}',
+          '$metaLine。$wordCountLine。${book.title}${book.author.isNotEmpty ? '，作者 ${book.author}' : ''}',
       child: Material(
         color: Colors.transparent,
         borderRadius: BorderRadius.circular(AppRadius.md),
@@ -230,6 +232,28 @@ class BookCard extends StatelessWidget {
                     style: TextStyle(fontSize: 12, color: palette.secondary),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: AppSpacing.xs),
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.text_snippet_outlined,
+                        size: 14,
+                        color: palette.secondary,
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          wordCountLine,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: palette.secondary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: AppSpacing.xs),
                   ClipRRect(

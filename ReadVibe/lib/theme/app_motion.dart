@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 
 import 'app_theme.dart';
@@ -48,9 +49,9 @@ class AppMotion {
   /// the book is the emotional centre of the reader.
   static const bookOpen = Duration(milliseconds: 680);
 
-  /// Book closing route transition. Slightly shorter than opening, but it
-  /// follows the same choreography in reverse so the model stays consistent.
-  static const bookClose = Duration(milliseconds: 520);
+  /// Book closing route transition. It deliberately uses the exact opening
+  /// duration so popping the route is a frame-for-frame reverse timeline.
+  static const bookClose = bookOpen;
 
   /// Low-frequency route/dialog transition.
   static const slow = Duration(milliseconds: 360);
@@ -91,11 +92,12 @@ class AppMotion {
 ///
 /// Popping the route runs the same timeline backwards, so closing feels like
 /// folding that page shut and returning it to the shelf.
-Route<T> buildFadeScaleRoute<T>(
+PageRouteBuilder<T> buildFadeScaleRoute<T>(
   WidgetBuilder builder, {
   RouteSettings? settings,
   Rect? sourceRect,
   ui.Image? coverImage,
+  ValueListenable<ReaderThemeColors>? transitionColors,
 }) {
   return PageRouteBuilder<T>(
     settings: settings,
@@ -108,6 +110,7 @@ Route<T> buildFadeScaleRoute<T>(
         animation: animation,
         sourceRect: sourceRect,
         coverImage: coverImage,
+        transitionColors: transitionColors,
         child: child,
       );
     },
@@ -118,12 +121,14 @@ class _BookRouteTransition extends StatelessWidget {
   final Animation<double> animation;
   final Rect? sourceRect;
   final ui.Image? coverImage;
+  final ValueListenable<ReaderThemeColors>? transitionColors;
   final Widget child;
 
   const _BookRouteTransition({
     required this.animation,
     required this.sourceRect,
     required this.coverImage,
+    required this.transitionColors,
     required this.child,
   });
 
@@ -131,8 +136,12 @@ class _BookRouteTransition extends StatelessWidget {
   Widget build(BuildContext context) {
     final routeChild = RepaintBoundary(child: child);
 
+    final repaint = transitionColors == null
+        ? animation
+        : Listenable.merge([animation, transitionColors]);
+
     return AnimatedBuilder(
-      animation: animation,
+      animation: repaint,
       child: routeChild,
       builder: (context, child) {
         final screenSize = MediaQuery.sizeOf(context);
@@ -143,6 +152,16 @@ class _BookRouteTransition extends StatelessWidget {
         final progress = _clamp01(animation.value);
         final fullRect = Offset.zero & screenSize;
         final startRect = _resolveStartRect(sourceRect, fullRect);
+        final routeColors = transitionColors?.value;
+        final systemIsDark = Theme.of(context).brightness == Brightness.dark;
+        final backgroundColor =
+            routeColors?.background ??
+            (systemIsDark ? const Color(0xFF1A1816) : AppTheme.background);
+        final pageColor = routeColors?.headerBg ?? backgroundColor;
+        final borderColor =
+            routeColors?.border ??
+            (systemIsDark ? const Color(0xFF3A3530) : AppTheme.border);
+        final isDark = backgroundColor.computeLuminance() < 0.35;
 
         final pickupProgress = _interval(
           progress,
@@ -218,6 +237,10 @@ class _BookRouteTransition extends StatelessWidget {
                       contentProgress: contentProgress,
                       coverOpenProgress: coverOpenProgress,
                       coverImage: coverImage,
+                      backgroundColor: backgroundColor,
+                      pageColor: pageColor,
+                      borderColor: borderColor,
+                      isDark: isDark,
                       child: child ?? const SizedBox.shrink(),
                     ),
                   ),
@@ -237,6 +260,10 @@ class _BookRouteFrame extends StatelessWidget {
   final double contentProgress;
   final double coverOpenProgress;
   final ui.Image? coverImage;
+  final Color backgroundColor;
+  final Color pageColor;
+  final Color borderColor;
+  final bool isDark;
   final Widget child;
 
   const _BookRouteFrame({
@@ -245,13 +272,15 @@ class _BookRouteFrame extends StatelessWidget {
     required this.contentProgress,
     required this.coverOpenProgress,
     required this.coverImage,
+    required this.backgroundColor,
+    required this.pageColor,
+    required this.borderColor,
+    required this.isDark,
     required this.child,
   });
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final pageColor = isDark ? const Color(0xFF1A1816) : AppTheme.background;
     final contentOpacity = _lerpDouble(0.0, 1.0, contentProgress);
     final pageOpacity =
         1.0 - _interval(coverOpenProgress, 0.86, 1.0, Curves.easeOutCubic);
@@ -259,7 +288,7 @@ class _BookRouteFrame extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
       child: ColoredBox(
-        color: pageColor,
+        color: backgroundColor,
         child: Stack(
           fit: StackFit.expand,
           clipBehavior: Clip.hardEdge,
@@ -281,6 +310,8 @@ class _BookRouteFrame extends StatelessWidget {
                 child: _OpeningPage(
                   coverImage: coverImage,
                   openProgress: coverOpenProgress,
+                  fallbackColor: pageColor,
+                  borderColor: borderColor,
                   isDark: isDark,
                 ),
               ),
@@ -294,11 +325,15 @@ class _BookRouteFrame extends StatelessWidget {
 class _OpeningPage extends StatelessWidget {
   final ui.Image? coverImage;
   final double openProgress;
+  final Color fallbackColor;
+  final Color borderColor;
   final bool isDark;
 
   const _OpeningPage({
     required this.coverImage,
     required this.openProgress,
+    required this.fallbackColor,
+    required this.borderColor,
     required this.isDark,
   });
 
@@ -306,10 +341,6 @@ class _OpeningPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final angle = -math.pi / 2 * openProgress;
     final foldShadow = math.sin(openProgress * math.pi).abs();
-    final fallbackColor = isDark
-        ? const Color(0xFF2A2623)
-        : AppTheme.surfaceWarm;
-
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -321,10 +352,7 @@ class _OpeningPage extends StatelessWidget {
           child: DecoratedBox(
             decoration: BoxDecoration(
               color: fallbackColor,
-              border: Border.all(
-                color: isDark ? const Color(0xFF3A3530) : AppTheme.border,
-                width: 0.7,
-              ),
+              border: Border.all(color: borderColor, width: 0.7),
             ),
             child: Stack(
               fit: StackFit.expand,

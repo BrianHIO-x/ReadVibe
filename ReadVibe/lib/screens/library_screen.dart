@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import '../theme/app_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
@@ -11,6 +13,7 @@ import '../services/font_service.dart';
 import '../services/storage_service.dart';
 import '../services/txt_parser.dart';
 import '../services/epub_parser.dart';
+import '../services/word_count_service.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../widgets/book_card.dart';
@@ -25,6 +28,8 @@ class LibraryScreen extends StatefulWidget {
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
+
+enum _BookAction { rename, delete }
 
 /// Note on animation lifecycle: [_emptyIconController] runs an infinite
 /// repeat() while the shelf is empty. Any widget test that mounts this
@@ -43,6 +48,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   bool _openingBook = false;
   bool _settingsOpen = false;
   int _loadSerial = 0;
+  final Queue<String> _wordCountQueue = Queue<String>();
+  final Set<String> _queuedWordCountBookIds = <String>{};
+  bool _wordCountWorkerRunning = false;
 
   late final AnimationController _gridEntranceController;
   late final AnimationController _emptyIconController;
@@ -126,12 +134,61 @@ class _LibraryScreenState extends State<LibraryScreen>
             _emptyIconController.repeat(reverse: true);
           }
         }
+        _scheduleMissingWordCounts(books);
       }
     } catch (e) {
       debugPrint('Failed to load library: $e');
       if (mounted && serial == _loadSerial) {
         setState(() => _loading = false);
         _showError('书架加载失败，请重新打开应用后重试');
+      }
+    }
+  }
+
+  void _scheduleMissingWordCounts(Iterable<Book> books) {
+    for (final book in books) {
+      if (book.wordCount != null || !_queuedWordCountBookIds.add(book.id)) {
+        continue;
+      }
+      _wordCountQueue.addLast(book.id);
+    }
+    if (!_wordCountWorkerRunning && _wordCountQueue.isNotEmpty) {
+      unawaited(_drainWordCountQueue());
+    }
+  }
+
+  Future<void> _drainWordCountQueue() async {
+    if (_wordCountWorkerRunning) return;
+    _wordCountWorkerRunning = true;
+    try {
+      while (_wordCountQueue.isNotEmpty) {
+        final bookId = _wordCountQueue.removeFirst();
+        try {
+          if (!mounted || !_books.any((book) => book.id == bookId)) continue;
+          final book = await _storage.getBook(bookId);
+          if (book == null) continue;
+          final wordCount = await WordCountService().count(book);
+          await _storage.saveBookWordCount(bookId, wordCount);
+          if (!mounted) continue;
+          final index = _books.indexWhere((item) => item.id == bookId);
+          if (index >= 0 && _books[index].wordCount != wordCount) {
+            setState(() {
+              _books[index] = _books[index].copyWith(wordCount: wordCount);
+            });
+          }
+        } on Object catch (error, stackTrace) {
+          // Word count is supplemental shelf metadata. A damaged book must not
+          // block opening another book or interrupt normal shelf interaction.
+          debugPrint('Failed to count book text for $bookId: $error');
+          debugPrintStack(stackTrace: stackTrace);
+        } finally {
+          _queuedWordCountBookIds.remove(bookId);
+        }
+      }
+    } finally {
+      _wordCountWorkerRunning = false;
+      if (mounted && _wordCountQueue.isNotEmpty) {
+        unawaited(_drainWordCountQueue());
       }
     }
   }
@@ -340,6 +397,169 @@ class _LibraryScreenState extends State<LibraryScreen>
     unawaited(dialog.whenComplete(() => _settingsOpen = false));
   }
 
+  Future<void> _showBookActions(Book book) async {
+    final colors = AppTheme.getReaderTheme(
+      _settings.theme,
+      systemBrightness: MediaQuery.platformBrightnessOf(context),
+    );
+    final action = await showModalBottomSheet<_BookAction>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.34),
+      builder: (sheetContext) => SafeArea(
+        child: Container(
+          margin: const EdgeInsets.all(AppSpacing.md),
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.sm,
+            AppSpacing.lg,
+            AppSpacing.sm,
+            AppSpacing.sm,
+          ),
+          decoration: BoxDecoration(
+            color: colors.headerBg,
+            borderRadius: BorderRadius.circular(AppRadius.pill),
+            border: Border.all(color: colors.border),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.18),
+                blurRadius: 24,
+                offset: const Offset(0, 10),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+                child: Text(
+                  book.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: colors.text,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              ListTile(
+                leading: Icon(Icons.edit_outlined, color: colors.accent),
+                title: Text('修改书籍名称', style: TextStyle(color: colors.text)),
+                subtitle: Text(
+                  '只修改书架显示名称，不改动原文件',
+                  style: TextStyle(color: colors.secondary),
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                ),
+                onTap: () => Navigator.pop(sheetContext, _BookAction.rename),
+              ),
+              ListTile(
+                leading: Icon(Icons.delete_outline, color: colors.accent),
+                title: Text('删除书籍', style: TextStyle(color: colors.text)),
+                subtitle: Text(
+                  '删除正文、进度和目录状态',
+                  style: TextStyle(color: colors.secondary),
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                ),
+                onTap: () => Navigator.pop(sheetContext, _BookAction.delete),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case _BookAction.rename:
+        await _renameBook(book);
+      case _BookAction.delete:
+        _confirmDeleteBook(book);
+    }
+  }
+
+  Future<void> _renameBook(Book book) async {
+    final controller = TextEditingController(text: book.title);
+    final formKey = GlobalKey<FormState>();
+    final colors = AppTheme.getReaderTheme(
+      _settings.theme,
+      systemBrightness: MediaQuery.platformBrightnessOf(context),
+    );
+    final renamed = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: colors.headerBg,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+        ),
+        title: Text('修改书籍名称', style: TextStyle(color: colors.text)),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: controller,
+            autofocus: true,
+            maxLength: 120,
+            maxLines: 2,
+            textInputAction: TextInputAction.done,
+            style: TextStyle(color: colors.text),
+            decoration: InputDecoration(
+              hintText: '请输入新的书籍名称',
+              hintStyle: TextStyle(color: colors.secondary),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(AppRadius.md),
+                borderSide: BorderSide(color: colors.border),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(AppRadius.md),
+                borderSide: BorderSide(color: colors.accent, width: 1.5),
+              ),
+            ),
+            validator: (value) =>
+                value == null || value.trim().isEmpty ? '书籍名称不能为空' : null,
+            onFieldSubmitted: (_) {
+              if (formKey.currentState?.validate() == true) {
+                Navigator.pop(dialogContext, controller.text.trim());
+              }
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: Text('取消', style: TextStyle(color: colors.secondary)),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: colors.accent),
+            onPressed: () {
+              if (formKey.currentState?.validate() == true) {
+                Navigator.pop(dialogContext, controller.text.trim());
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (!mounted || renamed == null || renamed == book.title) return;
+    try {
+      await _storage.renameBook(book.id, renamed);
+      if (!mounted) return;
+      final index = _books.indexWhere((item) => item.id == book.id);
+      if (index >= 0) {
+        setState(() => _books[index] = _books[index].copyWith(title: renamed));
+      }
+      _showMessage('书籍名称已修改');
+    } on Object catch (error) {
+      _showError(error is FormatException ? error.message : '修改名称失败，请稍后重试');
+    }
+  }
+
   void _confirmDeleteBook(Book book) {
     showGeneralDialog(
       context: context,
@@ -422,25 +642,65 @@ class _LibraryScreenState extends State<LibraryScreen>
       }
       if (!mounted) return;
 
-      try {
-        await Navigator.of(context).push(
-          buildFadeScaleRoute<void>(
-            (_) => ReaderScreen(book: readableBook),
-            sourceRect: sourceRect,
-            coverImage: coverImage,
-          ),
+      final transitionColors = ValueNotifier<ReaderThemeColors>(
+        AppTheme.getReaderTheme(
+          _settings.theme,
+          systemBrightness: MediaQuery.platformBrightnessOf(context),
+        ),
+      );
+      void syncReaderSettings(ReaderSettings settings) {
+        if (!mounted) return;
+        final needsShelfRebuild =
+            _settings.theme != settings.theme ||
+            _settings.effectiveFontFamily != settings.effectiveFontFamily;
+        final colors = AppTheme.getReaderTheme(
+          settings.theme,
+          systemBrightness: MediaQuery.platformBrightnessOf(context),
         );
+        if (!identical(transitionColors.value, colors)) {
+          transitionColors.value = colors;
+        }
+        if (needsShelfRebuild) {
+          setState(() => _settings = settings);
+        } else {
+          _settings = settings;
+        }
+      }
+
+      try {
+        final readerRoute = buildFadeScaleRoute<void>(
+          (_) => ReaderScreen(
+            book: readableBook,
+            transitionColors: transitionColors,
+            onSettingsChanged: syncReaderSettings,
+          ),
+          sourceRect: sourceRect,
+          coverImage: coverImage,
+          transitionColors: transitionColors,
+        );
+        await Navigator.of(context).push(readerRoute);
+        // Navigator.push completes as soon as pop is requested, before the
+        // reverse transition has even started. The route still paints the
+        // cover snapshot and listens to transitionColors while closing, so
+        // both resources must stay alive until the overlay is truly removed.
+        await readerRoute.completed;
       } catch (error, stackTrace) {
         // The custom book-opening route is an enhancement, not a reason a
         // reader should fail to open. Fall back to a normal Material route.
         debugPrint('Book opening animation failed: $error');
         debugPrintStack(stackTrace: stackTrace);
         if (!mounted) return;
-        await Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ReaderScreen(book: readableBook),
+        final fallbackRoute = MaterialPageRoute<void>(
+          builder: (_) => ReaderScreen(
+            book: readableBook,
+            transitionColors: transitionColors,
+            onSettingsChanged: syncReaderSettings,
           ),
         );
+        await Navigator.of(context).push(fallbackRoute);
+        await fallbackRoute.completed;
+      } finally {
+        transitionColors.dispose();
       }
     } on Object catch (error, stackTrace) {
       debugPrint('Failed to load book content: $error');
@@ -485,7 +745,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
-    return DefaultTextStyle.merge(
+    final content = DefaultTextStyle.merge(
       style: TextStyle(fontFamily: _settings.effectiveFontFamily),
       child: Scaffold(
         backgroundColor: colors.background,
@@ -593,6 +853,10 @@ class _LibraryScreenState extends State<LibraryScreen>
         ),
       ),
     );
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: AppTheme.systemUiOverlayStyle(colors),
+      child: content,
+    );
   }
 
   Widget _buildEmptyState(ReaderThemeColors colors) {
@@ -681,7 +945,7 @@ class _LibraryScreenState extends State<LibraryScreen>
               colors: colors,
               coverKey: coverKey,
               onTap: () => _openBookFromCover(book, coverKey),
-              onLongPress: () => _confirmDeleteBook(book),
+              onLongPress: () => _showBookActions(book),
             ),
           );
 

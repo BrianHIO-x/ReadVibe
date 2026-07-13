@@ -64,7 +64,7 @@ extension ReaderPageTurnModeInfo on ReaderPageTurnMode {
 }
 
 class ReaderSettings {
-  static const schemaVersion = 2;
+  static const schemaVersion = 3;
   static const systemFontFamily = 'system';
   static const builtinSerifFamily = 'SourceHanSerifSC';
 
@@ -81,7 +81,7 @@ class ReaderSettings {
   final ReaderPageTurnMode pageTurnMode;
 
   const ReaderSettings({
-    this.fontSize = 18.0,
+    this.fontSize = 20.0,
     this.lineHeight = 1.8,
     this.theme = ReaderThemeMode.system,
     this.fontWeight = ReaderFontWeight.regular,
@@ -166,12 +166,7 @@ class ReaderSettings {
         ? rawSchemaVersion.toInt()
         : 1;
     return ReaderSettings(
-      fontSize: _finiteDouble(
-        json['fontSize'],
-        fallback: 18.0,
-        min: 12.0,
-        max: 32.0,
-      ),
+      fontSize: _normalizeFontSize(json['fontSize']),
       lineHeight: _finiteDouble(
         json['lineHeight'],
         fallback: 1.8,
@@ -196,7 +191,7 @@ class ReaderSettings {
       ),
       // The pre-v2 default was "blank line". Migrate old records once so an
       // existing installation receives the new "no blank line" default too.
-      paragraphSpacing: storedSchemaVersion < schemaVersion
+      paragraphSpacing: storedSchemaVersion < 2
           ? ReaderParagraphSpacing.none
           : ReaderParagraphSpacing.values.firstWhere(
               (s) => s.name == json['paragraphSpacing'],
@@ -208,6 +203,15 @@ class ReaderSettings {
       ),
     );
   }
+}
+
+double _normalizeFontSize(Object? value) {
+  const supported = <double>[16, 18, 20, 22, 24];
+  final parsed = _finiteDouble(value, fallback: 20, min: 12, max: 32);
+  return supported.reduce(
+    (best, candidate) =>
+        (candidate - parsed).abs() < (best - parsed).abs() ? candidate : best,
+  );
 }
 
 /// Reading progress for a specific book

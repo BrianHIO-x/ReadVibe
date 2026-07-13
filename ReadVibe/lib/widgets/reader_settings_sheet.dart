@@ -283,6 +283,6 @@ class ReaderSettingsSheet extends StatelessWidget {
     );
   }
 
-  static const _fontSizes = [14.0, 16.0, 18.0, 20.0, 24.0];
+  static const _fontSizes = [16.0, 18.0, 20.0, 22.0, 24.0];
   static const _lineHeights = [1.4, 1.6, 1.8, 2.0, 2.2];
 }

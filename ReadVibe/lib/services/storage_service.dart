@@ -13,6 +13,7 @@ import 'txt_parser.dart';
 const _kBooksKey = 'readvibe_books';
 const _kSettingsKey = 'readvibe_settings';
 const _kProgressPrefix = 'readvibe_progress_';
+const _kTocCollapsedPrefix = 'readvibe_toc_collapsed_';
 const _kChapterPrefix = 'readvibe_chapters_';
 // Large novels can exceed 10 MB. A two-second deadline was too aggressive on
 // slower phones and could make a valid saved book appear unreadable.
@@ -140,6 +141,39 @@ class StorageService {
     });
   }
 
+  Future<void> renameBook(String bookId, String title) async {
+    final normalizedTitle = title.trim();
+    if (bookId.isEmpty || normalizedTitle.isEmpty) {
+      throw const FormatException('书籍名称不能为空');
+    }
+    if (normalizedTitle.length > 120) {
+      throw const FormatException('书籍名称不能超过 120 个字符');
+    }
+
+    await _enqueueLibraryMutation(() async {
+      final prefs = await SharedPreferences.getInstance();
+      final metadata = _readBookMetadata(prefs);
+      final index = metadata.indexWhere((book) => book['id'] == bookId);
+      if (index < 0) throw StateError('书籍不存在或已删除');
+      metadata[index]['title'] = normalizedTitle;
+      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+    });
+  }
+
+  Future<void> saveBookWordCount(String bookId, int wordCount) async {
+    if (bookId.isEmpty || wordCount < 0) return;
+    await _enqueueLibraryMutation(() async {
+      final prefs = await SharedPreferences.getInstance();
+      final metadata = _readBookMetadata(prefs);
+      final index = metadata.indexWhere((book) => book['id'] == bookId);
+      // A background count may finish after the user deletes the book. Never
+      // recreate deleted metadata just to save a stale result.
+      if (index < 0) return;
+      metadata[index]['wordCount'] = wordCount.clamp(0, 0x7fffffffffffffff);
+      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+    });
+  }
+
   Future<void> deleteBook(String bookId) async {
     await _enqueueLibraryMutation(() async {
       final prefs = await SharedPreferences.getInstance();
@@ -147,8 +181,11 @@ class StorageService {
         ..removeWhere((book) => book['id'] == bookId);
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
       final progressKey = '$_kProgressPrefix$bookId';
+      final tocCollapsedKey = '$_kTocCollapsedPrefix$bookId';
       _invalidatePreferenceWrite(progressKey);
+      _invalidatePreferenceWrite(tocCollapsedKey);
       await prefs.remove(progressKey);
+      await prefs.remove(tocCollapsedKey);
       await prefs.remove('$_kChapterPrefix$bookId');
 
       final file = await _chapterFile(bookId);
@@ -291,6 +328,40 @@ class StorageService {
       '$_kProgressPrefix${progress.bookId}',
       jsonEncode(progress.toJson()),
     );
+  }
+
+  Future<Set<String>> getCollapsedTocGroups(String bookId) async {
+    if (bookId.isEmpty) return <String>{};
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('$_kTocCollapsedPrefix$bookId');
+    if (raw == null) return <String>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return <String>{};
+      return decoded
+          .whereType<String>()
+          .map((value) => value.trim())
+          .where((value) => value.isNotEmpty && value.length <= 256)
+          .take(512)
+          .toSet();
+    } on Object {
+      return <String>{};
+    }
+  }
+
+  Future<void> saveCollapsedTocGroups(
+    String bookId,
+    Set<String> groupIds,
+  ) async {
+    if (bookId.isEmpty) return;
+    final values =
+        groupIds
+            .map((value) => value.trim())
+            .where((value) => value.isNotEmpty && value.length <= 256)
+            .take(512)
+            .toList()
+          ..sort();
+    await _setLatestString('$_kTocCollapsedPrefix$bookId', jsonEncode(values));
   }
 
   static const _defaultSettings = ReaderSettings();
@@ -468,7 +539,17 @@ List<Chapter> _chaptersFromJson(String raw) {
     if (title is! String || content is! String) {
       throw const FormatException('章节数据格式错误');
     }
-    return Chapter(index: index, title: title, content: content);
+    final rawVolumeTitle = map['volumeTitle'];
+    final volumeTitle =
+        rawVolumeTitle is String && rawVolumeTitle.trim().isNotEmpty
+        ? rawVolumeTitle.trim()
+        : null;
+    return Chapter(
+      index: index,
+      title: title,
+      content: content,
+      volumeTitle: volumeTitle,
+    );
   }).toList();
 }
 
@@ -480,6 +561,7 @@ String _chaptersToJson(List<Chapter> chapters) {
             'index': chapter.index,
             'title': chapter.title,
             'content': chapter.content,
+            if (chapter.volumeTitle != null) 'volumeTitle': chapter.volumeTitle,
           },
         )
         .toList(),

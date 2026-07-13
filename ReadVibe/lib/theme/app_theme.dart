@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/reader_settings.dart';
 import 'app_spacing.dart';
 
@@ -73,6 +74,21 @@ class AppTheme {
               : ReaderThemeMode.warm)
         : mode;
     return readerThemes[resolved]!;
+  }
+
+  static SystemUiOverlayStyle systemUiOverlayStyle(ReaderThemeColors colors) {
+    final isDark = colors.background.computeLuminance() < 0.35;
+    final iconBrightness = isDark ? Brightness.light : Brightness.dark;
+    return SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarBrightness: isDark ? Brightness.dark : Brightness.light,
+      statusBarIconBrightness: iconBrightness,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarDividerColor: Colors.transparent,
+      systemNavigationBarIconBrightness: iconBrightness,
+      systemStatusBarContrastEnforced: false,
+      systemNavigationBarContrastEnforced: false,
+    );
   }
 
   // ── App-wide ThemeData ────────────────────────────────

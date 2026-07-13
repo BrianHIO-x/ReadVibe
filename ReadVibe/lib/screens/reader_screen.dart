@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
     show RenderRepaintBoundary, ScrollCacheExtent, SelectedContent;
@@ -15,6 +16,8 @@ import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../services/font_service.dart';
 import '../services/storage_service.dart';
+import '../services/system_text_action_service.dart';
+import '../services/word_count_service.dart';
 import '../widgets/chapter_list.dart';
 import '../widgets/reader_settings_sheet.dart';
 import '../widgets/pressable_scale.dart';
@@ -23,8 +26,15 @@ import '../widgets/reading_progress_bar.dart';
 /// Reader screen — displays book content with settings overlay
 class ReaderScreen extends StatefulWidget {
   final Book book;
+  final ValueListenable<ReaderThemeColors>? transitionColors;
+  final ValueChanged<ReaderSettings>? onSettingsChanged;
 
-  const ReaderScreen({super.key, required this.book});
+  const ReaderScreen({
+    super.key,
+    required this.book,
+    this.transitionColors,
+    this.onSettingsChanged,
+  });
 
   @override
   State<ReaderScreen> createState() => _ReaderScreenState();
@@ -63,6 +73,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _closingReader = false;
   double _viewPaddingTop = 0;
   ReadingProgress? _currentProgress;
+  Set<String> _collapsedTocGroupIds = <String>{};
   double? _pendingScrollOffset;
   double? _pendingScrollProgress;
   bool _preferPendingScrollProgress = false;
@@ -75,7 +86,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   _ScrollSnapshot? _pageTurnOriginSnapshot;
   final GlobalKey _currentPageBoundaryKey = GlobalKey();
   ui.Image? _pageTurnSnapshot;
+  Future<bool>? _pageTurnSnapshotCapture;
   int _pageTurnSnapshotSerial = 0;
+  late final ValueNotifier<int?> _wordCountNotifier;
   _ScrollSnapshot _lastScrollSnapshot = const _ScrollSnapshot(
     offset: 0,
     progress: 0,
@@ -91,6 +104,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     super.initState();
     _chapterIndex = 0;
     _settings = const ReaderSettings();
+    _wordCountNotifier = ValueNotifier<int?>(_book.wordCount);
     _scrollController = _createScrollController();
     WidgetsBinding.instance.addObserver(this);
     // Keep screen on while reading — the user should not have to tap to
@@ -109,6 +123,18 @@ class _ReaderScreenState extends State<ReaderScreen>
             _setPageDragOffset(animation.value);
           });
     _loadInitialState();
+    if (_book.wordCount == null) unawaited(_ensureBookWordCount());
+  }
+
+  Future<void> _ensureBookWordCount() async {
+    try {
+      final wordCount = await WordCountService().count(_book);
+      await _storage.saveBookWordCount(_book.id, wordCount);
+      if (mounted) _wordCountNotifier.value = wordCount;
+    } on Object catch (error, stackTrace) {
+      debugPrint('Failed to count reader text: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
   }
 
   ScrollController _createScrollController([double initialOffset = 0]) {
@@ -202,6 +228,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _hideStatusBarForReader() {
     if (!mounted || _closingReader) return;
+    _applySystemBarStyle();
     // Bottom gesture navigation stays visible; only the top status bar is
     // hidden for the immersive reading surface.
     _ignorePlatformFuture(
@@ -215,6 +242,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _showStatusBar() {
     if (!mounted) return;
+    _applySystemBarStyle();
     _ignorePlatformFuture(
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
       'show status bar',
@@ -222,10 +250,22 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _showLibrarySystemBars() {
+    _applySystemBarStyle();
     _ignorePlatformFuture(
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
       'restore library system bars',
     );
+  }
+
+  void _applySystemBarStyle() {
+    final colors =
+        widget.transitionColors?.value ??
+        AppTheme.getReaderTheme(
+          _settings.theme,
+          systemBrightness:
+              WidgetsBinding.instance.platformDispatcher.platformBrightness,
+        );
+    SystemChrome.setSystemUIOverlayStyle(AppTheme.systemUiOverlayStyle(colors));
   }
 
   void _ignorePlatformFuture(Future<void> future, String operation) {
@@ -257,9 +297,11 @@ class _ReaderScreenState extends State<ReaderScreen>
       final results = await Future.wait<Object?>([
         _storage.getSettings(),
         _storage.getProgress(_book.id),
+        _storage.getCollapsedTocGroups(_book.id),
       ]);
       savedSettings = results[0] as ReaderSettings;
       savedProgress = results[1] as ReadingProgress?;
+      _collapsedTocGroupIds = Set<String>.from(results[2] as Set<String>);
     } on Object catch (error, stackTrace) {
       debugPrint('Failed to load reader state: $error');
       debugPrintStack(stackTrace: stackTrace);
@@ -280,6 +322,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!mounted) return;
 
     _settings = loadedSettings;
+    widget.onSettingsChanged?.call(loadedSettings);
     if (loadedSettings.fontFamily != savedSettings.fontFamily) {
       _persistSettings(loadedSettings);
     }
@@ -409,6 +452,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _settingsApplyTimer?.cancel();
     if (!_closingReader) unawaited(_saveProgress());
     _discardPageTurnSnapshot();
+    _wordCountNotifier.dispose();
     _pageTurnController.dispose();
     _pageDragOffsetNotifier.dispose();
     _scrollController.removeListener(_scheduleProgressSave);
@@ -430,6 +474,13 @@ class _ReaderScreenState extends State<ReaderScreen>
         state == AppLifecycleState.detached) {
       unawaited(_saveProgress());
     }
+  }
+
+  @override
+  void didChangePlatformBrightness() {
+    if (!_settingsLoaded) return;
+    widget.onSettingsChanged?.call(_settings);
+    _applySystemBarStyle();
   }
 
   void _scheduleProgressSave() {
@@ -568,50 +619,81 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageDragOffsetNotifier.value = value;
   }
 
-  Future<void> _capturePageTurnSnapshot() async {
-    if (!mounted ||
-        _settings.pageTurnMode != ReaderPageTurnMode.book ||
-        _pageDragOffset != 0) {
-      return;
+  Future<bool> _capturePageTurnSnapshot() {
+    if (!mounted || _settings.pageTurnMode != ReaderPageTurnMode.book) {
+      return Future<bool>.value(false);
     }
+    if (_pageTurnSnapshot != null) return Future<bool>.value(true);
+    final existing = _pageTurnSnapshotCapture;
+    if (existing != null) return existing;
 
     final serial = ++_pageTurnSnapshotSerial;
-    final expectedChapterIndex = _chapterIndex;
-    try {
-      var boundary = _currentPageBoundaryKey.currentContext?.findRenderObject();
-      if (boundary is! RenderRepaintBoundary) return;
-      if (boundary.debugNeedsPaint) {
-        await WidgetsBinding.instance.endOfFrame;
-        if (!mounted || serial != _pageTurnSnapshotSerial) return;
-        boundary = _currentPageBoundaryKey.currentContext?.findRenderObject();
-        if (boundary is! RenderRepaintBoundary || boundary.debugNeedsPaint) {
-          return;
-        }
-      }
+    final chapterIndex = _chapterIndex;
+    late final Future<bool> operation;
+    operation = _performPageTurnSnapshotCapture(serial, chapterIndex)
+        .whenComplete(() {
+          if (identical(_pageTurnSnapshotCapture, operation)) {
+            _pageTurnSnapshotCapture = null;
+          }
+        });
+    _pageTurnSnapshotCapture = operation;
+    return operation;
+  }
 
+  Future<bool> _performPageTurnSnapshotCapture(
+    int serial,
+    int chapterIndex,
+  ) async {
+    try {
       final pixelRatio = math.min(MediaQuery.devicePixelRatioOf(context), 2.0);
+      RenderRepaintBoundary? boundary;
+      // A setting or menu rebuild may leave the repaint boundary dirty for one
+      // frame. Wait for paint instead of permanently blocking every drag.
+      for (var attempt = 0; attempt < 3; attempt++) {
+        if (!mounted ||
+            serial != _pageTurnSnapshotSerial ||
+            chapterIndex != _chapterIndex ||
+            _settings.pageTurnMode != ReaderPageTurnMode.book) {
+          return false;
+        }
+        final renderObject = _currentPageBoundaryKey.currentContext
+            ?.findRenderObject();
+        if (renderObject is RenderRepaintBoundary &&
+            !renderObject.debugNeedsPaint) {
+          boundary = renderObject;
+          break;
+        }
+        WidgetsBinding.instance.scheduleFrame();
+        await WidgetsBinding.instance.endOfFrame;
+      }
+      if (boundary == null) return false;
+
       final image = await boundary.toImage(pixelRatio: pixelRatio);
       if (!mounted ||
           serial != _pageTurnSnapshotSerial ||
-          expectedChapterIndex != _chapterIndex ||
+          chapterIndex != _chapterIndex ||
           _settings.pageTurnMode != ReaderPageTurnMode.book) {
         image.dispose();
-        return;
+        return false;
       }
 
       final previousImage = _pageTurnSnapshot;
       _pageTurnSnapshot = image;
       previousImage?.dispose();
-      if (_pageDragOffset != 0) setState(() {});
-    } on Object {
-      // Snapshot capture is a visual enhancement. If the render layer is
-      // being rebuilt at the same moment, the page still turns normally and
-      // the next gesture captures a fresh frame.
+      // The drag may currently be using the smooth safety path. Rebuild once
+      // so the same offset continues as a real mirrored page curl.
+      setState(() {});
+      return true;
+    } on Object catch (error, stackTrace) {
+      debugPrint('Failed to capture the visible page for book turn: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      return false;
     }
   }
 
   void _discardPageTurnSnapshot() {
     _pageTurnSnapshotSerial++;
+    _pageTurnSnapshotCapture = null;
     final image = _pageTurnSnapshot;
     _pageTurnSnapshot = null;
     image?.dispose();
@@ -642,6 +724,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _queueSettingsApply(ReaderSettings newSettings) {
+    widget.onSettingsChanged?.call(newSettings);
     _pendingSettingsApply = newSettings;
     _settingsApplyTimer?.cancel();
     _settingsApplyTimer = Timer(AppMotion.settingApplyDelay, () {
@@ -866,6 +949,10 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _handleHorizontalDragUpdate(DragUpdateDetails details, double width) {
     if (width <= 0) return;
+    if (_settings.pageTurnMode == ReaderPageTurnMode.book &&
+        _pageTurnSnapshot == null) {
+      unawaited(_capturePageTurnSnapshot());
+    }
     _pageCurlAnchorY = details.localPosition.dy;
     final proposed = (_pageDragOffset + details.delta.dx).clamp(-width, width);
     final targetIndex = _pageDragTargetIndex ?? _targetIndexForOffset(proposed);
@@ -972,11 +1059,30 @@ class _ReaderScreenState extends State<ReaderScreen>
           currentChapter: _chapterIndex,
           scrollController: scrollController,
           colors: themeColors,
+          wordCountListenable: _wordCountNotifier,
+          collapsedGroupIds: _collapsedTocGroupIds,
+          onGroupExpansionChanged: _handleTocGroupExpansionChanged,
           onSelect: (index) {
             _openChapter(index);
           },
         ),
       ),
+    );
+  }
+
+  void _handleTocGroupExpansionChanged(String groupId, bool expanded) {
+    if (expanded) {
+      _collapsedTocGroupIds.remove(groupId);
+    } else {
+      _collapsedTocGroupIds.add(groupId);
+    }
+    unawaited(
+      _storage
+          .saveCollapsedTocGroups(_book.id, _collapsedTocGroupIds)
+          .catchError((Object error, StackTrace stack) {
+            debugPrint('Failed to save directory expansion state: $error');
+            debugPrintStack(stackTrace: stack);
+          }),
     );
   }
 
@@ -1045,7 +1151,21 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   Widget build(BuildContext context) {
     if (!_settingsLoaded) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      final loadingColors =
+          widget.transitionColors?.value ??
+          AppTheme.getReaderTheme(
+            ReaderThemeMode.system,
+            systemBrightness: MediaQuery.platformBrightnessOf(context),
+          );
+      return AnnotatedRegion<SystemUiOverlayStyle>(
+        value: AppTheme.systemUiOverlayStyle(loadingColors),
+        child: Scaffold(
+          backgroundColor: loadingColors.background,
+          body: Center(
+            child: CircularProgressIndicator(color: loadingColors.accent),
+          ),
+        ),
+      );
     }
 
     final themeColors = AppTheme.getReaderTheme(
@@ -1054,7 +1174,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
 
     if (_book.chapters.isEmpty) {
-      return Scaffold(
+      final content = Scaffold(
         backgroundColor: themeColors.background,
         body: SafeArea(
           child: Center(
@@ -1094,6 +1214,10 @@ class _ReaderScreenState extends State<ReaderScreen>
           ),
         ),
       );
+      return AnnotatedRegion<SystemUiOverlayStyle>(
+        value: AppTheme.systemUiOverlayStyle(themeColors),
+        child: content,
+      );
     }
 
     final fontFamily = _settings.effectiveFontFamily;
@@ -1108,7 +1232,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         : viewPadding.top;
     final horizontalPadding = _settings.pageMargin.horizontalPadding;
 
-    return PopScope(
+    final content = PopScope(
       canPop: _closingReader,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
@@ -1306,6 +1430,10 @@ class _ReaderScreenState extends State<ReaderScreen>
         ),
       ),
     );
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: AppTheme.systemUiOverlayStyle(themeColors),
+      child: content,
+    );
   }
 
   Widget _buildPageTurnView({
@@ -1356,7 +1484,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     return ValueListenableBuilder<double>(
       valueListenable: _pageDragOffsetNotifier,
       builder: (context, offset, _) {
-        if (_settings.pageTurnMode == ReaderPageTurnMode.book) {
+        if (_settings.pageTurnMode == ReaderPageTurnMode.book &&
+            _pageTurnSnapshot != null) {
           return _buildBookTurnPages(
             width: width,
             dragOffset: offset,
@@ -1563,7 +1692,10 @@ class _ReaderScreenState extends State<ReaderScreen>
         // Keep the reading subtree identical while menus open and close.
         // Reparenting this ListView used to detach its ScrollPosition and
         // recreate it at the controller's initial offset.
-        child: _DoubleTapFilteredSelectionArea(child: scrollView),
+        child: _DoubleTapFilteredSelectionArea(
+          colors: themeColors,
+          child: scrollView,
+        ),
       ),
     );
   }
@@ -1621,8 +1753,12 @@ class _ReaderScreenState extends State<ReaderScreen>
 
 class _DoubleTapFilteredSelectionArea extends StatefulWidget {
   final Widget child;
+  final ReaderThemeColors colors;
 
-  const _DoubleTapFilteredSelectionArea({required this.child});
+  const _DoubleTapFilteredSelectionArea({
+    required this.child,
+    required this.colors,
+  });
 
   @override
   State<_DoubleTapFilteredSelectionArea> createState() =>
@@ -1645,6 +1781,7 @@ class _DoubleTapFilteredSelectionAreaState
   Offset? _lastTapUpPosition;
   bool _suppressSelection = false;
   bool _clearScheduled = false;
+  SelectedContent? _selectedContent;
   Timer? _suppressionTimer;
 
   void _handlePointerDown(PointerDownEvent event) {
@@ -1715,6 +1852,7 @@ class _DoubleTapFilteredSelectionAreaState
   }
 
   void _handleSelectionChanged(SelectedContent? content) {
+    _selectedContent = content;
     if (content == null || !_suppressSelection || _clearScheduled) return;
     _clearScheduled = true;
     scheduleMicrotask(() {
@@ -1722,6 +1860,92 @@ class _DoubleTapFilteredSelectionAreaState
       if (!mounted || !_suppressSelection) return;
       _selectionAreaKey.currentState?.selectableRegion.clearSelection();
     });
+  }
+
+  ContextMenuButtonItem? _buttonOfType(
+    List<ContextMenuButtonItem> buttons,
+    ContextMenuButtonType type,
+  ) {
+    for (final button in buttons) {
+      if (button.type == type) return button;
+    }
+    return null;
+  }
+
+  Future<void> _runSystemTextAction(
+    BuildContext context,
+    SelectableRegionState state, {
+    required bool translate,
+  }) async {
+    final selectedText = _selectedContent?.plainText.trim();
+    ContextMenuController.removeAny();
+    if (selectedText == null || selectedText.isEmpty) return;
+    try {
+      final launched = translate
+          ? await SystemTextActionService.translate(selectedText)
+          : await SystemTextActionService.search(selectedText);
+      if (!launched && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            content: Text(translate ? '系统中没有可用的翻译服务' : '系统中没有可用的搜索服务'),
+          ),
+        );
+      }
+    } on PlatformException catch (error, stackTrace) {
+      debugPrint('Failed to launch a system text action: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            behavior: SnackBarBehavior.floating,
+            content: Text('无法调用系统文本服务'),
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _buildContextMenu(BuildContext context, SelectableRegionState state) {
+    final defaults = state.contextMenuButtonItems;
+    final copy = _buttonOfType(defaults, ContextMenuButtonType.copy);
+    final share = _buttonOfType(defaults, ContextMenuButtonType.share);
+    final selectAll = _buttonOfType(defaults, ContextMenuButtonType.selectAll);
+    final buttons = <ContextMenuButtonItem>[
+      if (copy != null) copy.copyWith(label: '复制'),
+      if (share != null) share.copyWith(label: '分享'),
+      if (selectAll != null) selectAll.copyWith(label: '全选'),
+      ContextMenuButtonItem(
+        label: '翻译',
+        onPressed: () =>
+            unawaited(_runSystemTextAction(context, state, translate: true)),
+      ),
+      ContextMenuButtonItem(
+        label: '搜索',
+        onPressed: () =>
+            unawaited(_runSystemTextAction(context, state, translate: false)),
+      ),
+    ];
+    final baseTheme = Theme.of(context);
+    return Theme(
+      data: baseTheme.copyWith(
+        colorScheme: baseTheme.colorScheme.copyWith(
+          primary: widget.colors.accent,
+          surface: widget.colors.headerBg,
+          onSurface: widget.colors.text,
+        ),
+        textButtonTheme: TextButtonThemeData(
+          style: TextButton.styleFrom(
+            foregroundColor: widget.colors.text,
+            textStyle: const TextStyle(fontWeight: FontWeight.w500),
+          ),
+        ),
+      ),
+      child: AdaptiveTextSelectionToolbar.buttonItems(
+        anchors: state.contextMenuAnchors,
+        buttonItems: buttons,
+      ),
+    );
   }
 
   @override
@@ -1741,6 +1965,7 @@ class _DoubleTapFilteredSelectionAreaState
       child: SelectionArea(
         key: _selectionAreaKey,
         onSelectionChanged: _handleSelectionChanged,
+        contextMenuBuilder: _buildContextMenu,
         child: GestureDetector(
           behavior: HitTestBehavior.translucent,
           // Winning this arena prevents the usual double-tap word selection.
@@ -1947,7 +2172,7 @@ class _BookCurlPainter extends CustomPainter {
           Offset.zero & size,
           Paint()
             ..filterQuality = FilterQuality.medium
-            ..color = Colors.white.withValues(alpha: 0.52 + 0.16 * strength),
+            ..color = Colors.white.withValues(alpha: 0.72 + 0.16 * strength),
         )
         ..restore();
     }
