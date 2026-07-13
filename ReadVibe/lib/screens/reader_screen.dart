@@ -3,7 +3,7 @@ import 'dart:collection';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter/rendering.dart' show ScrollCacheExtent, SelectedContent;
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../theme/app_theme.dart';
@@ -1491,17 +1491,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         // Keep the reading subtree identical while menus open and close.
         // Reparenting this ListView used to detach its ScrollPosition and
         // recreate it at the controller's initial offset.
-        child: SelectionArea(
-          child: GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            // This recognizer sits inside SelectionArea, so it wins the second
-            // tap before SelectableRegion can turn it into a word selection.
-            // Long-press selection, vertical scrolling and horizontal page
-            // turns remain handled by their existing recognizers.
-            onDoubleTap: () {},
-            child: scrollView,
-          ),
-        ),
+        child: _DoubleTapFilteredSelectionArea(child: scrollView),
       ),
     );
   }
@@ -1551,6 +1541,141 @@ class _ReaderScreenState extends State<ReaderScreen>
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DoubleTapFilteredSelectionArea extends StatefulWidget {
+  final Widget child;
+
+  const _DoubleTapFilteredSelectionArea({required this.child});
+
+  @override
+  State<_DoubleTapFilteredSelectionArea> createState() =>
+      _DoubleTapFilteredSelectionAreaState();
+}
+
+class _DoubleTapFilteredSelectionAreaState
+    extends State<_DoubleTapFilteredSelectionArea> {
+  static const _tapSlop = 18.0;
+  static const _doubleTapSlop = 100.0;
+  static const _doubleTapTimeout = Duration(milliseconds: 300);
+
+  final _selectionAreaKey = GlobalKey<SelectionAreaState>();
+  int? _pointer;
+  Offset? _downPosition;
+  Duration? _downTime;
+  bool _moved = false;
+  bool _secondTapCandidate = false;
+  Duration? _lastTapUpTime;
+  Offset? _lastTapUpPosition;
+  bool _suppressSelection = false;
+  bool _clearScheduled = false;
+  Timer? _suppressionTimer;
+
+  void _handlePointerDown(PointerDownEvent event) {
+    if (_pointer != null) return;
+    _pointer = event.pointer;
+    _downPosition = event.position;
+    _downTime = event.timeStamp;
+    _moved = false;
+    final lastTime = _lastTapUpTime;
+    final lastPosition = _lastTapUpPosition;
+    final gap = lastTime == null ? null : event.timeStamp - lastTime;
+    _secondTapCandidate =
+        gap != null &&
+        !gap.isNegative &&
+        gap <= _doubleTapTimeout &&
+        lastPosition != null &&
+        (event.position - lastPosition).distance <= _doubleTapSlop;
+    if (_secondTapCandidate) {
+      _lastTapUpTime = null;
+      _lastTapUpPosition = null;
+      _suppressSelection = true;
+      _suppressionTimer?.cancel();
+      // A long press selects after this window has elapsed, so long-press copy
+      // remains available even when it begins shortly after a normal tap.
+      _suppressionTimer = Timer(
+        _doubleTapTimeout,
+        () => _suppressSelection = false,
+      );
+    }
+  }
+
+  void _handlePointerMove(PointerMoveEvent event) {
+    if (event.pointer != _pointer || _moved) return;
+    final downPosition = _downPosition;
+    if (downPosition != null &&
+        (event.position - downPosition).distance > _tapSlop) {
+      _moved = true;
+    }
+  }
+
+  void _handlePointerUp(PointerUpEvent event) {
+    if (event.pointer != _pointer) return;
+    final downTime = _downTime;
+    final shortTap =
+        !_moved &&
+        downTime != null &&
+        event.timeStamp - downTime <= const Duration(milliseconds: 600);
+    if (shortTap && !_secondTapCandidate) {
+      _lastTapUpTime = event.timeStamp;
+      _lastTapUpPosition = event.position;
+    } else if (!shortTap) {
+      _lastTapUpTime = null;
+      _lastTapUpPosition = null;
+    }
+    _clearPointerState();
+  }
+
+  void _handlePointerCancel(PointerCancelEvent event) {
+    if (event.pointer == _pointer) _clearPointerState();
+  }
+
+  void _clearPointerState() {
+    _pointer = null;
+    _downPosition = null;
+    _downTime = null;
+    _moved = false;
+    _secondTapCandidate = false;
+  }
+
+  void _handleSelectionChanged(SelectedContent? content) {
+    if (content == null || !_suppressSelection || _clearScheduled) return;
+    _clearScheduled = true;
+    scheduleMicrotask(() {
+      _clearScheduled = false;
+      if (!mounted || !_suppressSelection) return;
+      _selectionAreaKey.currentState?.selectableRegion.clearSelection();
+    });
+  }
+
+  @override
+  void dispose() {
+    _suppressionTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: _handlePointerDown,
+      onPointerMove: _handlePointerMove,
+      onPointerUp: _handlePointerUp,
+      onPointerCancel: _handlePointerCancel,
+      child: SelectionArea(
+        key: _selectionAreaKey,
+        onSelectionChanged: _handleSelectionChanged,
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          // Winning this arena prevents the usual double-tap word selection.
+          // The selection callback above is a second guard for platform gesture
+          // implementations that resolve the selectable region first.
+          onDoubleTap: () {},
+          child: widget.child,
         ),
       ),
     );
