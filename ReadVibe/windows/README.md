@@ -4,7 +4,7 @@
 
 `windows/` 当前不是 Flutter Windows 原生工程，只保留本说明文件作为平台占位。
 
-ReadVibe `v0.1.7` 的唯一正式目标端是 Android `arm64-v8a`。Windows Runner、CMake 配置、插件注册文件和桌面资源已经删除，因此以下命令当前不能使用：
+ReadVibe `v0.1.8` 的唯一正式目标端是 Android `arm64-v8a`。本版的真实镜像纸背翻页与 APK 字体资源精简都只针对 Android 发布产物；Windows Runner、CMake 配置、插件注册文件和桌面资源已经删除，因此以下命令当前不能使用：
 
 ```powershell
 flutter run -d windows

@@ -6,11 +6,13 @@ ReadVibe 是一个面向 Android 手机的本地离线小说阅读器 demo。应
 
 | 项目 | 当前值 |
 |---|---|
-| 公开版本 | `v0.1.7` |
+| 公开版本 | `v0.1.8` |
+| Android 基础构建号 | `9`；arm64 分包清单 `versionCode=2009` |
 | Android 目标 | `arm64-v8a` |
-| Release APK | `dist/ReadVibe-Android-v0.1.7-arm64-v8a.apk` |
-| 文件大小 | 51,261,470 字节，约 48.9 MiB |
-| SHA-256 | `B1A83E6C008BE3F115FD986BC63D1CDDF1C443D23A45A34FA6D89BF032DF2967` |
+| Release APK | `dist/ReadVibe-Android-v0.1.8-arm64-v8a.apk` |
+| 文件大小 | 37,405,495 字节，约 35.67 MiB |
+| 相比 v0.1.7 | 减少 13,855,975 字节，约 13.21 MiB / 27.03% |
+| SHA-256 | `9C052741484308E9FD0C5F0F3E44ACA85153305DD1BFF0126C7BA9BC37029496` |
 
 公开版本只能使用三段式语义版本。Android 内部升级编号单独维护，不能附加到公开版本号、APK 文件名或发布标题。
 
@@ -147,7 +149,9 @@ TXT 的默认阅读排版是：
 - 根据手指纵向落点变化的折痕倾斜；
 - 随翻页过程先展开再收拢的纸张背面；
 - 与阅读主题匹配的纸色；
-- 纸张背面淡化透印纹理；
+- 横向手势前捕获当前可见阅读页，纸背沿实时倾斜的折痕轴反射同一页标题和正文；
+- 镜像快照保留当前主题、内置宋体或用户字体以及实际滚动位置；
+- 滚动、菜单切换、设置重排和章节切换后释放旧快照，避免下一次翻页出现过期文字；
 - 目标页投影、当前页折痕阴影和纸背投影；
 - 卷边暗线、柔光和纸张厚度高光；
 - 上一章与下一章镜像几何；
@@ -169,6 +173,9 @@ TXT 的默认阅读排版是：
 ## 字体
 
 - “系统字体”和“内置宋体”始终作为并列选项存在。
+- 内置宋体文件为 `assets/fonts/SourceHanSerifSC-Regular.ttf`，由原完整可变字体固定为常规字重，仍保留 65,535 个 glyph 和 44,748 个 Unicode 映射。
+- 字体源资源由 59,925,144 字节降至 35,500,432 字节；Unicode cmap 对比为 0 缺失、0 新增，未通过裁字缩包。
+- “细 / 常规 / 粗”设置继续保留；选择内置宋体时，非常规字重由 Flutter 合成。
 - 可以导入 `.ttf` 或 `.otf`。
 - 导入前检查扩展名、文件存在性和大小。
 - 字体复制到应用文档目录后，通过 `FontLoader` 动态注册。
@@ -252,7 +259,7 @@ flutter run -d <设备编号>
 当前版本的 Android arm64 release 命令：
 
 ```powershell
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.1.7 --build-number 8
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.1.8 --build-number 9
 ```
 
 构建输出：
@@ -265,12 +272,12 @@ build\app\outputs\flutter-apk\app-arm64-v8a-release.apk
 
 ```powershell
 New-Item -ItemType Directory -Force -Path dist | Out-Null
-Copy-Item build\app\outputs\flutter-apk\app-arm64-v8a-release.apk dist\ReadVibe-Android-v0.1.7-arm64-v8a.apk -Force
+Copy-Item build\app\outputs\flutter-apk\app-arm64-v8a-release.apk dist\ReadVibe-Android-v0.1.8-arm64-v8a.apk -Force
 ```
 
 发布前核对：
 
-- `versionName` 为 `0.1.7`；
+- `versionName` 为 `0.1.8`，arm64 分包 `versionCode` 为 `2009`；
 - 原生 ABI 只有 `arm64-v8a`；
 - APK 文件名只包含公开三段式版本和 ABI；
 - `dist/` 不保留旧版同类 APK；
@@ -283,7 +290,9 @@ Copy-Item build\app\outputs\flutter-apk\app-arm64-v8a-release.apk dist\ReadVibe-
 - Android arm64 release 构建：通过。
 - APK 清单版本和 ABI：已核对。
 - 连接设备：`V2454A`，Android 16，arm64。
-- 真机安装：vivo 外部来源安全页要求在手机上人工勾选确认，ADB 不允许代替该安全操作，因此没有宣称 `v0.1.7` 交互已经完成真机验证；手机原有版本未被覆盖。
+- 字体覆盖核对：静态宋体与原可变宋体同为 65,535 个 glyph、44,748 个 Unicode 映射，差异为 0。
+- 包体核对：`v0.1.8` 为 37,405,495 字节，相比 `v0.1.7` 减少 27.03%。
+- 真机安装：此前 vivo 外部来源安全页要求在手机上人工勾选确认，ADB 不允许代替该安全操作；本次未绕过安全确认，因此没有宣称 `v0.1.8` 翻页背面和手势已经完成真机验证，手机原有版本未被覆盖。
 
 ## 当前未实现
 

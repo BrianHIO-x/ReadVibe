@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent, SelectedContent;
+import 'package:flutter/rendering.dart'
+    show RenderRepaintBoundary, ScrollCacheExtent, SelectedContent;
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../theme/app_theme.dart';
@@ -71,6 +73,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   int _overlayToggleSerial = 0;
   int? _pageTurnOriginChapterIndex;
   _ScrollSnapshot? _pageTurnOriginSnapshot;
+  final GlobalKey _currentPageBoundaryKey = GlobalKey();
+  ui.Image? _pageTurnSnapshot;
+  int _pageTurnSnapshotSerial = 0;
   _ScrollSnapshot _lastScrollSnapshot = const _ScrollSnapshot(
     offset: 0,
     progress: 0,
@@ -403,6 +408,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _saveTimer?.cancel();
     _settingsApplyTimer?.cancel();
     if (!_closingReader) unawaited(_saveProgress());
+    _discardPageTurnSnapshot();
     _pageTurnController.dispose();
     _pageDragOffsetNotifier.dispose();
     _scrollController.removeListener(_scheduleProgressSave);
@@ -428,6 +434,9 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _scheduleProgressSave() {
     if (!_settingsLoaded || _closingReader) return;
+    if (_pageDragOffset == 0 && !_pageTurnController.isAnimating) {
+      _discardPageTurnSnapshot();
+    }
     final snapshot = _currentScrollSnapshot();
     _recordCurrentChapterPosition(snapshot);
     _saveTimer?.cancel();
@@ -559,6 +568,55 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageDragOffsetNotifier.value = value;
   }
 
+  Future<void> _capturePageTurnSnapshot() async {
+    if (!mounted ||
+        _settings.pageTurnMode != ReaderPageTurnMode.book ||
+        _pageDragOffset != 0) {
+      return;
+    }
+
+    final serial = ++_pageTurnSnapshotSerial;
+    final expectedChapterIndex = _chapterIndex;
+    try {
+      var boundary = _currentPageBoundaryKey.currentContext?.findRenderObject();
+      if (boundary is! RenderRepaintBoundary) return;
+      if (boundary.debugNeedsPaint) {
+        await WidgetsBinding.instance.endOfFrame;
+        if (!mounted || serial != _pageTurnSnapshotSerial) return;
+        boundary = _currentPageBoundaryKey.currentContext?.findRenderObject();
+        if (boundary is! RenderRepaintBoundary || boundary.debugNeedsPaint) {
+          return;
+        }
+      }
+
+      final pixelRatio = math.min(MediaQuery.devicePixelRatioOf(context), 2.0);
+      final image = await boundary.toImage(pixelRatio: pixelRatio);
+      if (!mounted ||
+          serial != _pageTurnSnapshotSerial ||
+          expectedChapterIndex != _chapterIndex ||
+          _settings.pageTurnMode != ReaderPageTurnMode.book) {
+        image.dispose();
+        return;
+      }
+
+      final previousImage = _pageTurnSnapshot;
+      _pageTurnSnapshot = image;
+      previousImage?.dispose();
+      if (_pageDragOffset != 0) setState(() {});
+    } on Object {
+      // Snapshot capture is a visual enhancement. If the render layer is
+      // being rebuilt at the same moment, the page still turns normally and
+      // the next gesture captures a fresh frame.
+    }
+  }
+
+  void _discardPageTurnSnapshot() {
+    _pageTurnSnapshotSerial++;
+    final image = _pageTurnSnapshot;
+    _pageTurnSnapshot = null;
+    image?.dispose();
+  }
+
   void _resetPageDrag({bool rebuild = true}) {
     _pageTurnController.stop();
     _pageTurnAnimation = null;
@@ -566,6 +624,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageTurnOriginChapterIndex = null;
     _pageTurnOriginSnapshot = null;
     _setPageDragOffset(0);
+    _discardPageTurnSnapshot();
     if (!mounted) return;
     if (rebuild) {
       setState(() => _pageDragTargetIndex = null);
@@ -592,6 +651,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _settingsApplyTimer = null;
       if (pending == null) return;
       final snapshot = _currentScrollSnapshot();
+      _discardPageTurnSnapshot();
       if (_currentProgress != null) {
         _currentProgress = _currentProgress!.recordPosition(
           _chapterIndex,
@@ -625,6 +685,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       return;
     }
 
+    _discardPageTurnSnapshot();
     _saveTimer?.cancel();
     final currentSnapshot =
         _pageTurnOriginChapterIndex == _chapterIndex &&
@@ -696,6 +757,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _toggleOverlay() {
     if (_pageDragOffset != 0) return;
+    _discardPageTurnSnapshot();
     final expectedChapter = _chapterIndex;
     final controller = _scrollController;
     final snapshot = _currentScrollSnapshot();
@@ -737,6 +799,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     _readingTapOrigin = event.position;
     _readingTapStartedAt = event.timeStamp;
     _readingTapMoved = false;
+    if (_settings.pageTurnMode == ReaderPageTurnMode.book) {
+      unawaited(_capturePageTurnSnapshot());
+    }
   }
 
   void _handleReadingPointerMove(PointerMoveEvent event) {
@@ -788,6 +853,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     _pageTurnController.stop();
     _pageTurnAnimation = null;
+    if (_settings.pageTurnMode == ReaderPageTurnMode.book &&
+        _pageTurnSnapshot == null) {
+      unawaited(_capturePageTurnSnapshot());
+    }
     final snapshot = _currentScrollSnapshot();
     _pageTurnOriginChapterIndex = _chapterIndex;
     _pageTurnOriginSnapshot = snapshot;
@@ -1253,6 +1322,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       viewPadding: viewPadding,
       horizontalPadding: horizontalPadding,
       controller: _scrollController,
+      repaintBoundaryKey: _currentPageBoundaryKey,
     );
     final shouldBuildPrevious =
         _chapterIndex > 0 &&
@@ -1399,8 +1469,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                   progress: progress,
                   goingNext: goingNext,
                   backgroundColor: themeColors.background,
-                  inkColor: themeColors.text,
                   curlAnchorY: _pageCurlAnchorY,
+                  pageSnapshot: _pageTurnSnapshot,
                 ),
               ),
             ),
@@ -1420,6 +1490,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     required EdgeInsets viewPadding,
     required double horizontalPadding,
     ScrollController? controller,
+    Key? repaintBoundaryKey,
   }) {
     final paragraphs = _paragraphsFor(chapter);
     final paragraphGap =
@@ -1486,6 +1557,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
 
     return RepaintBoundary(
+      key: repaintBoundaryKey,
       child: ColoredBox(
         color: themeColors.background,
         // Keep the reading subtree identical while menus open and close.
@@ -1722,15 +1794,15 @@ class _BookCurlPainter extends CustomPainter {
   final double progress;
   final bool goingNext;
   final Color backgroundColor;
-  final Color inkColor;
   final double curlAnchorY;
+  final ui.Image? pageSnapshot;
 
   const _BookCurlPainter({
     required this.progress,
     required this.goingNext,
     required this.backgroundColor,
-    required this.inkColor,
     required this.curlAnchorY,
+    required this.pageSnapshot,
   });
 
   @override
@@ -1848,37 +1920,58 @@ class _BookCurlPainter extends CustomPainter {
     if (bounds.width <= 0.1 || bounds.height <= 0.1) return;
 
     final paper = Color.lerp(backgroundColor, Colors.white, 0.045)!;
-    final trailingShade = Color.lerp(paper, Colors.black, 0.16)!;
-    final softLight = Color.lerp(paper, Colors.white, 0.17)!;
-    final creaseShade = Color.lerp(paper, Colors.black, 0.23)!;
-    final paperGradient = LinearGradient(
+    canvas.drawPath(geometry.backPath, Paint()..color = paper);
+
+    final snapshot = pageSnapshot;
+    if (snapshot != null) {
+      // Reflect the exact visible reading surface around the crease. This
+      // makes the folded sheet show the current title, paragraphs, selected
+      // font and theme on its reverse side instead of a generic line pattern.
+      final creaseOrigin = Offset(geometry.creaseCenter, size.height / 2);
+      canvas
+        ..save()
+        ..clipPath(geometry.backPath)
+        ..translate(creaseOrigin.dx, creaseOrigin.dy)
+        ..rotate(geometry.creaseAngle)
+        ..scale(1, -1)
+        ..rotate(-geometry.creaseAngle)
+        ..translate(-creaseOrigin.dx, -creaseOrigin.dy)
+        ..drawImageRect(
+          snapshot,
+          Rect.fromLTWH(
+            0,
+            0,
+            snapshot.width.toDouble(),
+            snapshot.height.toDouble(),
+          ),
+          Offset.zero & size,
+          Paint()
+            ..filterQuality = FilterQuality.medium
+            ..color = Colors.white.withValues(alpha: 0.52 + 0.16 * strength),
+        )
+        ..restore();
+    }
+
+    final lightingGradient = LinearGradient(
       begin: goingNext ? Alignment.centerLeft : Alignment.centerRight,
       end: goingNext ? Alignment.centerRight : Alignment.centerLeft,
-      colors: [trailingShade, softLight, paper, creaseShade],
+      colors: [
+        Colors.black.withValues(alpha: 0.12 * strength),
+        Colors.white.withValues(alpha: 0.16 * strength),
+        Colors.transparent,
+        Colors.black.withValues(alpha: 0.18 * strength),
+      ],
       stops: const [0.0, 0.34, 0.70, 1.0],
     );
 
     canvas
       ..save()
       ..clipPath(geometry.backPath)
-      ..drawRect(bounds, Paint()..shader = paperGradient.createShader(bounds));
-
-    // A very faint reverse-side ink pattern prevents the curl from looking
-    // like an empty plastic strip while keeping the real text readable.
-    final ghostInk = Paint()
-      ..color = inkColor.withValues(alpha: 0.035 * strength)
-      ..strokeWidth = 0.8;
-    for (var line = 0; line < 8; line++) {
-      final y = size.height * (0.14 + line * 0.095);
-      final insetStart = bounds.width * (line.isEven ? 0.16 : 0.26);
-      final insetEnd = bounds.width * (line % 3 == 0 ? 0.22 : 0.10);
-      canvas.drawLine(
-        Offset(bounds.left + insetStart, y),
-        Offset(bounds.right - insetEnd, y),
-        ghostInk,
-      );
-    }
-    canvas.restore();
+      ..drawRect(
+        bounds,
+        Paint()..shader = lightingGradient.createShader(bounds),
+      )
+      ..restore();
 
     canvas.drawPath(
       geometry.backEdgePath,
@@ -1909,8 +2002,8 @@ class _BookCurlPainter extends CustomPainter {
     return oldDelegate.progress != progress ||
         oldDelegate.goingNext != goingNext ||
         oldDelegate.backgroundColor != backgroundColor ||
-        oldDelegate.inkColor != inkColor ||
-        oldDelegate.curlAnchorY != curlAnchorY;
+        oldDelegate.curlAnchorY != curlAnchorY ||
+        oldDelegate.pageSnapshot != pageSnapshot;
   }
 }
 
@@ -1920,6 +2013,7 @@ class _BookCurlGeometry {
   final Path creasePath;
   final Path backEdgePath;
   final double creaseCenter;
+  final double creaseAngle;
 
   const _BookCurlGeometry({
     required this.frontPath,
@@ -1927,6 +2021,7 @@ class _BookCurlGeometry {
     required this.creasePath,
     required this.backEdgePath,
     required this.creaseCenter,
+    required this.creaseAngle,
   });
 
   factory _BookCurlGeometry.calculate({
@@ -2049,6 +2144,7 @@ class _BookCurlGeometry {
       creasePath: creasePath,
       backEdgePath: backEdgePath,
       creaseCenter: (creaseTop + creaseBottom) / 2,
+      creaseAngle: math.atan2(height, creaseBottom - creaseTop),
     );
   }
 }

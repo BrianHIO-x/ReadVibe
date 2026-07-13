@@ -37,12 +37,12 @@ Pop-Location
 
 ## 三、版本与 APK
 
-- 当前公开版本：`v0.1.7`。
+- 当前公开版本：`v0.1.8`。
 - 用户可见版本号只能是三段式语义版本，不得附加 Android 内部构建编号。
 - `pubspec.yaml` 的 `version` 只写三段式版本。
 - Android `versionCode` 单独递增，只用于系统升级排序。
 - APK 文件名固定为 `ReadVibe-Android-v主版本.次版本.修订版本-arm64-v8a.apk`。
-- 当前正式产物：`dist/ReadVibe-Android-v0.1.7-arm64-v8a.apk`。
+- 当前正式产物：`dist/ReadVibe-Android-v0.1.8-arm64-v8a.apk`，37,405,495 字节，SHA-256 为 `9C052741484308E9FD0C5F0F3E44ACA85153305DD1BFF0126C7BA9BC37029496`。
 - 版本发布时同步更新 `pubspec.yaml`、`android/local.properties`、全部 Markdown、构建命令和 `dist/` 产物。
 
 ## 四、平台范围
@@ -62,7 +62,9 @@ Pop-Location
 - 每章同时保存像素偏移和阅读比例；离开章节前先保存离章快照，返回时恢复该章独立位置。
 - 上一章和下一章预览使用独立控制器，在离屏阶段恢复保存位置；翻页提交继承预览像素，不得先显示章首再跳转。
 - 平滑翻页和仿书籍翻页必须共用正确的相邻章节内容与进度。
-- 仿书籍翻页当前包含曲面折痕、纸张背面、透印纹理、动态阴影和边缘高光，不得退回简单矩形裁切效果。
+- 仿书籍翻页当前包含曲面折痕、真实阅读页镜像纸背、动态阴影和边缘高光，不得退回简单矩形裁切、通用线条或空白纸带效果。
+- 真实纸背必须来自当前可见正文快照；纵向滚动、菜单切换、设置重排或切章后旧快照必须释放，避免显示过期位置。
+- 内置宋体使用静态常规字重资源降低包体，但 glyph 数和 Unicode cmap 必须与原完整可变字体一致；禁止删减生僻字。
 
 ## 六、解析、存储和隐私
 
@@ -81,7 +83,7 @@ Pop-Location
 
 ```powershell
 flutter analyze
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.1.7 --build-number 8
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.1.8 --build-number 9
 ```
 
 - 构建后核对 APK 的 `versionName`、ABI、文件名、大小和 SHA-256。

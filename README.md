@@ -6,11 +6,13 @@ ReadVibe 是一个使用 Flutter 构建的 Android 本地小说阅读器。它�
 
 | 项目 | 当前值 |
 |---|---|
-| 公开版本 | `v0.1.7` |
+| 公开版本 | `v0.1.8` |
+| Android 基础构建号 | `9`；arm64 分包清单 `versionCode=2009` |
 | 正式目标端 | Android `arm64-v8a` |
-| APK | `ReadVibe/dist/ReadVibe-Android-v0.1.7-arm64-v8a.apk` |
-| APK 大小 | 51,261,470 字节，约 48.9 MiB |
-| SHA-256 | `B1A83E6C008BE3F115FD986BC63D1CDDF1C443D23A45A34FA6D89BF032DF2967` |
+| APK | `ReadVibe/dist/ReadVibe-Android-v0.1.8-arm64-v8a.apk` |
+| APK 大小 | 37,405,495 字节，约 35.67 MiB |
+| 相比 v0.1.7 | 减少 13,855,975 字节，约 13.21 MiB / 27.03% |
+| SHA-256 | `9C052741484308E9FD0C5F0F3E44ACA85153305DD1BFF0126C7BA9BC37029496` |
 | 静态检查 | `flutter analyze` 已通过 |
 | Release 构建 | Android arm64 release 已成功生成 |
 
@@ -119,7 +121,8 @@ ReadVibe 是一个使用 Flutter 构建的 Android 本地小说阅读器。它�
 
 - 折痕使用三次贝塞尔曲线。
 - 折痕倾斜方向跟随手指纵向落点。
-- 翻动页包含独立纸张背面和淡化透印纹理。
+- 横向手势开始前截取当前可见阅读页，纸张背面沿倾斜折痕轴显示章节标题与正文的真实镜像透印。
+- 快照继承当前字体、主题和滚动位置；滚动、菜单、设置或切章后立即失效，下一次手势重新采集。
 - 当前页、目标页和纸张背面分别使用动态明暗与投影。
 - 卷边绘制暗边、柔光和纸张厚度高光。
 - 向前、向后翻章使用镜像几何，并继续使用正确的相邻章节进度。
@@ -144,7 +147,7 @@ ReadVibe 是一个使用 Flutter 构建的 Android 本地小说阅读器。它�
 | EPUB 解析 | `archive`、XML、HTML、后台 isolate |
 | 书架与设置 | SharedPreferences |
 | 章节正文 | 应用文档目录中的 JSON 文件 |
-| 字体 | 本地文件复制与 Flutter `FontLoader` |
+| 字体 | 完整中文字形的静态内置宋体、本地文件复制与 Flutter `FontLoader` |
 | 翻页 | 手势驱动页面组合、CustomClipper、CustomPainter |
 | 发布 | Android arm64-v8a release APK |
 
@@ -175,17 +178,17 @@ flutter run -d <设备编号>
 构建当前 Android arm64 release：
 
 ```powershell
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.1.7 --build-number 8
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.1.8 --build-number 9
 ```
 
 复制为规范发布文件名：
 
 ```powershell
 New-Item -ItemType Directory -Force -Path dist | Out-Null
-Copy-Item build\app\outputs\flutter-apk\app-arm64-v8a-release.apk dist\ReadVibe-Android-v0.1.7-arm64-v8a.apk -Force
+Copy-Item build\app\outputs\flutter-apk\app-arm64-v8a-release.apk dist\ReadVibe-Android-v0.1.8-arm64-v8a.apk -Force
 ```
 
-APK 清单必须显示 `versionName='0.1.7'` 和 `native-code: 'arm64-v8a'`。正式对外发布前还需要配置并妥善保管正式签名；当前产物用于本地 demo 和真机预览。
+APK 清单必须显示 `versionName='0.1.8'`、`versionCode='2009'` 和 `native-code: 'arm64-v8a'`。正式对外发布前还需要配置并妥善保管正式签名；当前产物用于本地 demo 和真机预览。
 
 ## 验证口径
 
@@ -194,6 +197,7 @@ APK 清单必须显示 `versionName='0.1.7'` 和 `native-code: 'arm64-v8a'`。�
 - 如果手机厂商安全页要求人工确认安装，必须明确记录未完成的真机步骤，不得宣称已经通过。
 - 文档变更：全量盘点全部 Markdown，检查版本、路径、命令、功能、平台状态和交叉链接。
 - 当前不运行或恢复自动化测试，除非用户明确要求。
+- 本次 `v0.1.8` 已完成静态分析、arm64 release 构建、版本/ABI、大小和哈希核对；翻页背面与手势仍需在 vivo 真机人工安装后目视确认，不能写成已通过真机验证。
 
 ## 当前边界
 
