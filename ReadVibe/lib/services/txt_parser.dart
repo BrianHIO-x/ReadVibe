@@ -50,25 +50,41 @@ Book _parseTxtSync(String filePath, String fileName) {
   final file = File(filePath);
   final bytes = file.readAsBytesSync();
   final content = decodeTxtBytes(bytes);
-  if (content.trim().isEmpty) {
-    throw const FormatException('TXT 文件没有可阅读的正文');
+  return buildBookFromText(
+    content: content,
+    fileName: fileName,
+    format: BookFormat.txt,
+    fileSize: bytes.length,
+  );
+}
+
+/// Builds a chaptered local book from plain text extracted by any supported
+/// container. DOC and DOCX reuse exactly the same chapter rules as TXT so the
+/// directory and reading behavior stay consistent across import formats.
+Book buildBookFromText({
+  required String content,
+  required String fileName,
+  required BookFormat format,
+  required int fileSize,
+}) {
+  final normalized = content
+      .replaceAll('\u0000', '')
+      .replaceAll('\u0007', '\n');
+  if (normalized.trim().isEmpty) {
+    throw FormatException('${format.name.toUpperCase()} 文件没有可阅读的正文');
   }
   final cleanTitle = fileName
-      .replaceAll(RegExp(r'\.txt$', caseSensitive: false), '')
+      .replaceAll(RegExp(r'\.(?:txt|docx?|epub)$', caseSensitive: false), '')
       .trim();
-
-  final lines = splitTxtLines(content);
-  final chapters = extractTxtChapters(lines);
   final now = DateTime.now();
-
   return Book(
-    id: 'txt_${now.microsecondsSinceEpoch}',
+    id: '${format.name}_${now.microsecondsSinceEpoch}',
     title: cleanTitle.isEmpty ? '未命名书籍' : cleanTitle,
-    format: BookFormat.txt,
-    chapters: chapters,
+    format: format,
+    chapters: extractTxtChapters(splitTxtLines(normalized)),
     txtParserVersion: currentTxtParserVersion,
     importDate: now,
-    fileSize: bytes.length,
+    fileSize: fileSize,
   );
 }
 

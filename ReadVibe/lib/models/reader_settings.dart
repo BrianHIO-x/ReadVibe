@@ -10,7 +10,9 @@ enum ReaderFontWeight { light, regular, bold }
 
 enum ReaderParagraphSpacing { none, blankLine }
 
-enum ReaderPageTurnMode { smooth, book }
+enum ReaderReadingMode { chapter, simulation, continuous }
+
+enum SimulationPageTurnEffect { simulation, smooth }
 
 extension ReaderThemeModeInfo on ReaderThemeMode {
   String get label => switch (this) {
@@ -38,7 +40,7 @@ extension ReaderPageMarginInfo on ReaderPageMargin {
 extension ReaderFontWeightInfo on ReaderFontWeight {
   String get label => switch (this) {
     ReaderFontWeight.light => '细',
-    ReaderFontWeight.regular => '常规',
+    ReaderFontWeight.regular => '中',
     ReaderFontWeight.bold => '粗',
   };
 
@@ -56,15 +58,29 @@ extension ReaderParagraphSpacingInfo on ReaderParagraphSpacing {
   };
 }
 
-extension ReaderPageTurnModeInfo on ReaderPageTurnMode {
+extension ReaderReadingModeInfo on ReaderReadingMode {
   String get label => switch (this) {
-    ReaderPageTurnMode.smooth => '平滑',
-    ReaderPageTurnMode.book => '翻书',
+    ReaderReadingMode.chapter => '分章',
+    ReaderReadingMode.continuous => '滚动',
+    ReaderReadingMode.simulation => '仿真',
+  };
+
+  String get description => switch (this) {
+    ReaderReadingMode.chapter => '单章滚动，左右切换章节',
+    ReaderReadingMode.continuous => '全文纵向连续滚动',
+    ReaderReadingMode.simulation => '按屏分页，可选择翻页效果',
+  };
+}
+
+extension SimulationPageTurnEffectInfo on SimulationPageTurnEffect {
+  String get label => switch (this) {
+    SimulationPageTurnEffect.simulation => '仿真翻页',
+    SimulationPageTurnEffect.smooth => '平滑翻页',
   };
 }
 
 class ReaderSettings {
-  static const schemaVersion = 3;
+  static const schemaVersion = 5;
   static const systemFontFamily = 'system';
   static const builtinSerifFamily = 'SourceHanSerifSC';
 
@@ -78,7 +94,8 @@ class ReaderSettings {
   final String? importedFontPath;
   final ReaderPageMargin pageMargin;
   final ReaderParagraphSpacing paragraphSpacing;
-  final ReaderPageTurnMode pageTurnMode;
+  final ReaderReadingMode readingMode;
+  final SimulationPageTurnEffect simulationPageTurnEffect;
 
   const ReaderSettings({
     this.fontSize = 20.0,
@@ -91,7 +108,8 @@ class ReaderSettings {
     this.importedFontPath,
     this.pageMargin = ReaderPageMargin.medium,
     this.paragraphSpacing = ReaderParagraphSpacing.none,
-    this.pageTurnMode = ReaderPageTurnMode.smooth,
+    this.readingMode = ReaderReadingMode.chapter,
+    this.simulationPageTurnEffect = SimulationPageTurnEffect.simulation,
   });
 
   bool get usesSystemFont => fontFamily == systemFontFamily;
@@ -109,6 +127,29 @@ class ReaderSettings {
     return fontFamily;
   }
 
+  /// The bundled Song face is a static regular font. Android cannot create a
+  /// genuinely lighter outline from it, so requesting w300 and w400 looked
+  /// identical. Keep the natural face for `light`, move the former bold
+  /// rendering to the user-facing `medium` slot, and reserve a stronger
+  /// synthetic request for `bold`. System and imported fonts retain their
+  /// native weight mapping.
+  FontWeight get effectiveFontWeight {
+    if (!usesBuiltinSerif) return fontWeight.value;
+    return switch (fontWeight) {
+      ReaderFontWeight.light => FontWeight.w400,
+      ReaderFontWeight.regular => FontWeight.w600,
+      ReaderFontWeight.bold => FontWeight.w900,
+    };
+  }
+
+  /// A static font face only exposes a binary synthetic-bold result on some
+  /// Android renderers. Add one sharp, same-colour overprint for the heaviest
+  /// Song setting so it remains visibly distinct from the new medium slot.
+  List<Shadow>? effectiveFontShadows(Color color) {
+    if (!usesBuiltinSerif || fontWeight != ReaderFontWeight.bold) return null;
+    return [Shadow(color: color, offset: const Offset(0.38, 0))];
+  }
+
   ReaderSettings copyWith({
     double? fontSize,
     double? lineHeight,
@@ -120,7 +161,8 @@ class ReaderSettings {
     String? importedFontPath,
     ReaderPageMargin? pageMargin,
     ReaderParagraphSpacing? paragraphSpacing,
-    ReaderPageTurnMode? pageTurnMode,
+    ReaderReadingMode? readingMode,
+    SimulationPageTurnEffect? simulationPageTurnEffect,
   }) {
     return ReaderSettings(
       fontSize: fontSize ?? this.fontSize,
@@ -133,7 +175,9 @@ class ReaderSettings {
       importedFontPath: importedFontPath ?? this.importedFontPath,
       pageMargin: pageMargin ?? this.pageMargin,
       paragraphSpacing: paragraphSpacing ?? this.paragraphSpacing,
-      pageTurnMode: pageTurnMode ?? this.pageTurnMode,
+      readingMode: readingMode ?? this.readingMode,
+      simulationPageTurnEffect:
+          simulationPageTurnEffect ?? this.simulationPageTurnEffect,
     );
   }
 
@@ -149,7 +193,8 @@ class ReaderSettings {
     'importedFontPath': importedFontPath,
     'pageMargin': pageMargin.name,
     'paragraphSpacing': paragraphSpacing.name,
-    'pageTurnMode': pageTurnMode.name,
+    'readingMode': readingMode.name,
+    'simulationPageTurnEffect': simulationPageTurnEffect.name,
   };
 
   factory ReaderSettings.fromJson(Map<String, dynamic> json) {
@@ -197,9 +242,17 @@ class ReaderSettings {
               (s) => s.name == json['paragraphSpacing'],
               orElse: () => ReaderParagraphSpacing.none,
             ),
-      pageTurnMode: ReaderPageTurnMode.values.firstWhere(
-        (m) => m.name == json['pageTurnMode'],
-        orElse: () => ReaderPageTurnMode.smooth,
+      readingMode: ReaderReadingMode.values.firstWhere(
+        (mode) => mode.name == json['readingMode'],
+        orElse: () => json['pageTurnMode'] == 'book'
+            ? ReaderReadingMode.simulation
+            : ReaderReadingMode.chapter,
+      ),
+      simulationPageTurnEffect: SimulationPageTurnEffect.values.firstWhere(
+        (effect) => effect.name == json['simulationPageTurnEffect'],
+        orElse: () => json['pageTurnMode'] == 'smooth'
+            ? SimulationPageTurnEffect.smooth
+            : SimulationPageTurnEffect.simulation,
       ),
     );
   }

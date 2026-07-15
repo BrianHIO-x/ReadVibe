@@ -1,5 +1,5 @@
 name: readvibe
-description: "ReadVibe - a private, offline TXT and EPUB reader."
+description: "ReadVibe - a private, offline TXT, EPUB, DOCX, and DOC reader."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -14,7 +14,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.3.0
+version: 0.5.4
 
 environment:
   sdk: ^3.12.2
@@ -62,16 +62,14 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  assets:
+    - assets/images/ai/
+
   fonts:
     - family: SourceHanSerifSC
       fonts:
         - asset: assets/fonts/SourceHanSerifSC-Regular.ttf
           weight: 400
-
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

@@ -33,12 +33,22 @@
             android:name="flutterEmbedding"
             android:value="2" />
     </application>
-    <!-- Required to query activities that can process text, see:
-         https://developer.android.com/training/package-visibility and
-         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
-
-         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <!-- Android exposes the real handlers for the system text intents below.
+         Flutter filters those results to the product allowlists, and the
+         native launch path validates the selected explicit component again. -->
     <queries>
+        <package android:name="com.deepseek.chat"/>
+        <package android:name="com.openai.chatgpt"/>
+        <package android:name="com.google.android.apps.bard"/>
+        <package android:name="com.anthropic.claude"/>
+        <package android:name="com.microsoft.copilot"/>
+        <package android:name="ai.perplexity.app.android"/>
+        <package android:name="com.microsoft.emmx"/>
+        <package android:name="com.android.chrome"/>
+        <intent>
+            <action android:name="android.intent.action.SEND"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
@@ -46,9 +56,6 @@
         <intent>
             <action android:name="android.intent.action.TRANSLATE"/>
             <data android:mimeType="text/plain"/>
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.WEB_SEARCH"/>
         </intent>
         <intent>
             <action android:name="android.intent.action.VIEW"/>

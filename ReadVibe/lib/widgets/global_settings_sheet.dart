@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/reader_settings.dart';
+import '../services/system_text_action_service.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'font_settings_section.dart';
@@ -78,6 +79,43 @@ class GlobalSettingsSheet extends StatelessWidget {
                         color: colors.secondary,
                         fontSize: 12,
                         height: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.xl),
+                    Text(
+                      '外部应用',
+                      style: TextStyle(
+                        color: colors.text,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    Text(
+                      '翻译和搜索可以记住所选应用。清除后，下次操作会重新显示受控应用列表。',
+                      style: TextStyle(
+                        color: colors.secondary,
+                        fontSize: 12,
+                        height: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        await SystemTextActionService.clearDefaults();
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            behavior: SnackBarBehavior.floating,
+                            content: Text('已清除翻译和搜索的默认应用'),
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.restart_alt_rounded, size: 18),
+                      label: const Text('重新选择默认应用'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: colors.accent,
+                        side: BorderSide(color: colors.border),
                       ),
                     ),
                   ],

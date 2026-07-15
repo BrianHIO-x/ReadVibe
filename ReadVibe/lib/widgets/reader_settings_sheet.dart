@@ -131,15 +131,48 @@ class ReaderSettingsSheet extends StatelessWidget {
                 ),
                 const SizedBox(height: AppSpacing.md),
 
-                // ── Page Turn Mode ────────────────────────
-                _buildLabel('翻页'),
+                // ── Reading Mode ──────────────────────────
+                _buildLabel('阅读模式'),
                 const SizedBox(height: AppSpacing.xs),
-                _buildSegmentedControl<ReaderPageTurnMode>(
-                  options: ReaderPageTurnMode.values,
-                  selectedValue: settings.pageTurnMode,
+                _buildSegmentedControl<ReaderReadingMode>(
+                  options: _readingModes,
+                  selectedValue: settings.readingMode,
                   labelBuilder: (mode) => mode.label,
                   onSelect: (mode) =>
-                      onChange(settings.copyWith(pageTurnMode: mode)),
+                      onChange(settings.copyWith(readingMode: mode)),
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                _RollingModeDescription(
+                  mode: settings.readingMode,
+                  color: colors.secondary,
+                ),
+                AnimatedSize(
+                  duration: AppMotion.control,
+                  curve: AppMotion.controlCurve,
+                  alignment: Alignment.topCenter,
+                  child: settings.readingMode == ReaderReadingMode.simulation
+                      ? Padding(
+                          padding: const EdgeInsets.only(top: AppSpacing.md),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _buildLabel('翻页效果'),
+                              const SizedBox(height: AppSpacing.xs),
+                              _buildSegmentedControl<SimulationPageTurnEffect>(
+                                options: SimulationPageTurnEffect.values,
+                                selectedValue:
+                                    settings.simulationPageTurnEffect,
+                                labelBuilder: (effect) => effect.label,
+                                onSelect: (effect) => onChange(
+                                  settings.copyWith(
+                                    simulationPageTurnEffect: effect,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : const SizedBox.shrink(),
                 ),
                 const SizedBox(height: AppSpacing.md),
 
@@ -285,4 +318,112 @@ class ReaderSettingsSheet extends StatelessWidget {
 
   static const _fontSizes = [16.0, 18.0, 20.0, 22.0, 24.0];
   static const _lineHeights = [1.4, 1.6, 1.8, 2.0, 2.2];
+  static const _readingModes = [
+    ReaderReadingMode.chapter,
+    ReaderReadingMode.simulation,
+    ReaderReadingMode.continuous,
+  ];
+}
+
+/// Rolls the old mode hint out and the new hint in as one continuous strip.
+/// Opacity stays constant throughout, avoiding the washed-out midpoint of a
+/// cross-fade while the segmented highlight is moving to its new slot.
+class _RollingModeDescription extends StatefulWidget {
+  final ReaderReadingMode mode;
+  final Color color;
+
+  const _RollingModeDescription({required this.mode, required this.color});
+
+  @override
+  State<_RollingModeDescription> createState() =>
+      _RollingModeDescriptionState();
+}
+
+class _RollingModeDescriptionState extends State<_RollingModeDescription>
+    with SingleTickerProviderStateMixin {
+  static const _lineHeight = 18.0;
+  late final AnimationController _controller;
+  late ReaderReadingMode _currentMode;
+  ReaderReadingMode? _previousMode;
+  int _direction = 1;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentMode = widget.mode;
+    _controller = AnimationController(
+      vsync: this,
+      duration: AppMotion.control,
+      value: 1,
+    )..addStatusListener(_handleStatus);
+  }
+
+  @override
+  void didUpdateWidget(covariant _RollingModeDescription oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.mode == _currentMode) return;
+    final oldIndex = ReaderSettingsSheet._readingModes.indexOf(_currentMode);
+    final newIndex = ReaderSettingsSheet._readingModes.indexOf(widget.mode);
+    _previousMode = _currentMode;
+    _currentMode = widget.mode;
+    _direction = newIndex >= oldIndex ? 1 : -1;
+    _controller.forward(from: 0);
+  }
+
+  void _handleStatus(AnimationStatus status) {
+    if (status != AnimationStatus.completed || _previousMode == null) return;
+    setState(() => _previousMode = null);
+  }
+
+  @override
+  void dispose() {
+    _controller
+      ..removeStatusListener(_handleStatus)
+      ..dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: _lineHeight,
+      width: double.infinity,
+      child: ClipRect(
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, child) {
+            final progress = AppMotion.controlCurve.transform(
+              _controller.value,
+            );
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                if (_previousMode case final previous?)
+                  Transform.translate(
+                    offset: Offset(0, -_direction * _lineHeight * progress),
+                    child: _buildText(previous),
+                  ),
+                Transform.translate(
+                  offset: Offset(0, _direction * _lineHeight * (1 - progress)),
+                  child: _buildText(_currentMode),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildText(ReaderReadingMode mode) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Text(
+        mode.description,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 12, height: 1.25, color: widget.color),
+      ),
+    );
+  }
 }

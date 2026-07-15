@@ -163,7 +163,7 @@ class BookCard extends StatelessWidget {
                             right: 0,
                             bottom: 0,
                             child: Padding(
-                              padding: const EdgeInsets.all(AppSpacing.lg),
+                              padding: const EdgeInsets.all(AppSpacing.md),
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -172,10 +172,10 @@ class BookCard extends StatelessWidget {
                                     book.title,
                                     style: TextStyle(
                                       fontFamily: 'Georgia',
-                                      fontSize: 16,
+                                      fontSize: 14,
                                       fontWeight: FontWeight.w600,
                                       color: palette.text,
-                                      height: 1.3,
+                                      height: 1.25,
                                     ),
                                     maxLines: 3,
                                     overflow: TextOverflow.ellipsis,
@@ -185,7 +185,7 @@ class BookCard extends StatelessWidget {
                                     Text(
                                       book.author,
                                       style: TextStyle(
-                                        fontSize: 12,
+                                        fontSize: 11,
                                         color: palette.secondary,
                                       ),
                                       maxLines: 1,
@@ -198,11 +198,11 @@ class BookCard extends StatelessWidget {
                           ),
                           // 5. Format badge
                           Positioned(
-                            top: AppSpacing.sm,
-                            right: AppSpacing.sm,
+                            top: AppSpacing.xs,
+                            right: AppSpacing.xs,
                             child: Container(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: AppSpacing.sm,
+                                horizontal: 6,
                                 vertical: 2,
                               ),
                               decoration: BoxDecoration(
@@ -214,7 +214,7 @@ class BookCard extends StatelessWidget {
                               child: Text(
                                 book.format.name.toUpperCase(),
                                 style: const TextStyle(
-                                  fontSize: 11,
+                                  fontSize: 9,
                                   fontWeight: FontWeight.w600,
                                   color: Colors.white,
                                 ),
@@ -225,11 +225,11 @@ class BookCard extends StatelessWidget {
                       ),
                     ),
                   ),
-                  const SizedBox(height: AppSpacing.sm),
+                  const SizedBox(height: 6),
                   // Meta line: author + chapter count / progress
                   Text(
                     metaLine,
-                    style: TextStyle(fontSize: 12, color: palette.secondary),
+                    style: TextStyle(fontSize: 11, color: palette.secondary),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -238,7 +238,7 @@ class BookCard extends StatelessWidget {
                     children: [
                       Icon(
                         Icons.text_snippet_outlined,
-                        size: 14,
+                        size: 12,
                         color: palette.secondary,
                       ),
                       const SizedBox(width: 4),
@@ -246,7 +246,7 @@ class BookCard extends StatelessWidget {
                         child: Text(
                           wordCountLine,
                           style: TextStyle(
-                            fontSize: 12,
+                            fontSize: 11,
                             color: palette.secondary,
                           ),
                           maxLines: 1,

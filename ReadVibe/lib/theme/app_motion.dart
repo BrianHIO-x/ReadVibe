@@ -30,8 +30,19 @@ class AppMotion {
   /// Bottom sheets.
   static const sheet = Duration(milliseconds: 360);
 
+  /// Reader settings are intentionally only a little quicker than other
+  /// sheets, keeping the motion readable while making repeated tuning feel
+  /// more immediate.
+  static const settingsSheet = Duration(milliseconds: 330);
+  static const settingsSheetClose = Duration(milliseconds: 220);
+
   /// Side drawer.
-  static const drawer = Duration(milliseconds: 360);
+  static const drawer = Duration(milliseconds: 330);
+
+  /// Shelf cards use a slightly elastic, position-aware settle while other
+  /// cards make room for the item being reordered.
+  static const shelfReorder = Duration(milliseconds: 310);
+  static const shelfLift = Duration(milliseconds: 150);
 
   /// Delay applying expensive reader relayout after a settings tap so the
   /// control's own selection animation gets a clean first few frames.
@@ -39,7 +50,7 @@ class AppMotion {
 
   /// Finger-up page settle. Dragging is still fully finger-tracked; this only
   /// affects the release-to-settle portion.
-  static const pageTurn = Duration(milliseconds: 220);
+  static const pageTurn = Duration(milliseconds: 300);
 
   /// Book opening route transition.
   ///
@@ -59,6 +70,7 @@ class AppMotion {
   static const standard = Cubic(0.2, 0.0, 0.0, 1.0);
   static const gentle = Curves.easeInOutCubic;
   static const controlCurve = Cubic(0.16, 1.0, 0.3, 1.0);
+  static const shelfReorderCurve = Cubic(0.18, 0.88, 0.22, 1.0);
 
   /// A soft material-like pickup curve: quick response at the beginning,
   /// then a calm settle before the heavier page expansion.

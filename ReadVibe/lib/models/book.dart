@@ -22,7 +22,7 @@ bool isStandaloneChapterTitle(String title) =>
     isIntroductoryChapterTitle(title) ||
     _standaloneTailTitlePattern.hasMatch(title.trim());
 
-enum BookFormat { txt, epub }
+enum BookFormat { txt, epub, docx, doc }
 
 class Chapter {
   final int index;
@@ -49,6 +49,7 @@ class Book {
   final int fileSize;
   final int txtParserVersion;
   final int? wordCount;
+  final List<int>? chapterWordCounts;
 
   const Book({
     required this.id,
@@ -61,6 +62,7 @@ class Book {
     this.fileSize = 0,
     this.txtParserVersion = currentTxtParserVersion,
     this.wordCount,
+    this.chapterWordCounts,
   }) : _storedChapterCount = chapterCount;
 
   int get chapterCount => chapters.isNotEmpty
@@ -76,11 +78,13 @@ class Book {
     'fileSize': fileSize,
     'txtParserVersion': txtParserVersion,
     if (wordCount != null) 'wordCount': wordCount,
+    if (chapterWordCounts != null && chapterWordCounts!.length == chapterCount)
+      'chapterWordCounts': chapterWordCounts,
     // Note: chapters are stored separately to reduce JSON size
     'chapterCount': chapterCount,
   };
 
-  Book copyWith({String? title, int? wordCount}) {
+  Book copyWith({String? title, int? wordCount, List<int>? chapterWordCounts}) {
     return Book(
       id: id,
       title: title ?? this.title,
@@ -92,6 +96,7 @@ class Book {
       fileSize: fileSize,
       txtParserVersion: txtParserVersion,
       wordCount: wordCount ?? this.wordCount,
+      chapterWordCounts: chapterWordCounts ?? this.chapterWordCounts,
     );
   }
 
@@ -125,6 +130,22 @@ class Book {
     final wordCount = rawWordCount is num
         ? rawWordCount.toInt().clamp(0, 0x7fffffffffffffff)
         : null;
+    final rawChapterWordCounts = json['chapterWordCounts'];
+    List<int>? chapterWordCounts;
+    if (rawChapterWordCounts is List &&
+        rawChapterWordCounts.length == chapterCount) {
+      final parsed = <int>[];
+      for (final value in rawChapterWordCounts) {
+        if (value is! num || !value.isFinite || value < 0) {
+          parsed.clear();
+          break;
+        }
+        parsed.add(value.toInt().clamp(0, 0x7fffffffffffffff));
+      }
+      if (parsed.length == chapterCount) {
+        chapterWordCounts = List<int>.unmodifiable(parsed);
+      }
+    }
 
     return Book(
       id: id,
@@ -140,6 +161,7 @@ class Book {
       fileSize: fileSize,
       txtParserVersion: txtParserVersion,
       wordCount: wordCount,
+      chapterWordCounts: chapterWordCounts,
     );
   }
 }

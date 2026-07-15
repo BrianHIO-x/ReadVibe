@@ -160,6 +160,36 @@ class StorageService {
     });
   }
 
+  /// Persists the shelf order without rewriting chapter payloads. Unknown
+  /// metadata is retained so a concurrent background update cannot make a book
+  /// disappear merely because it was not present in the drag snapshot.
+  Future<void> saveBookOrder(List<String> bookIds) async {
+    final seen = <String>{};
+    final requested = bookIds
+        .where((id) => id.isNotEmpty && seen.add(id))
+        .toList(growable: false);
+    if (requested.isEmpty) return;
+
+    await _enqueueLibraryMutation(() async {
+      final prefs = await SharedPreferences.getInstance();
+      final metadata = _readBookMetadata(prefs);
+      final byId = <String, Map<String, dynamic>>{
+        for (final book in metadata) book['id'] as String: book,
+      };
+      final reordered = <Map<String, dynamic>>[];
+      for (final id in requested) {
+        final book = byId.remove(id);
+        if (book != null) reordered.add(book);
+      }
+      for (final book in metadata) {
+        final id = book['id'] as String;
+        final remaining = byId.remove(id);
+        if (remaining != null) reordered.add(remaining);
+      }
+      await _setString(prefs, _kBooksKey, jsonEncode(reordered));
+    });
+  }
+
   Future<void> saveBookWordCount(String bookId, int wordCount) async {
     if (bookId.isEmpty || wordCount < 0) return;
     await _enqueueLibraryMutation(() async {
@@ -170,6 +200,43 @@ class StorageService {
       // recreate deleted metadata just to save a stale result.
       if (index < 0) return;
       metadata[index]['wordCount'] = wordCount.clamp(0, 0x7fffffffffffffff);
+      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+    });
+  }
+
+  Future<void> saveChapterWordCounts(
+    Book sourceBook,
+    List<int> chapterWordCounts,
+  ) async {
+    if (sourceBook.id.isEmpty ||
+        chapterWordCounts.length != sourceBook.chapterCount ||
+        chapterWordCounts.any((count) => count < 0)) {
+      return;
+    }
+    final safeCounts = <int>[
+      for (final count in chapterWordCounts) count.clamp(0, 0x7fffffffffffffff),
+    ];
+    await _enqueueLibraryMutation(() async {
+      final prefs = await SharedPreferences.getInstance();
+      final metadata = _readBookMetadata(prefs);
+      final index = metadata.indexWhere((book) => book['id'] == sourceBook.id);
+      if (index < 0) return;
+
+      final current = metadata[index];
+      final currentFileSize = current['fileSize'];
+      final currentParserVersion = current['txtParserVersion'];
+      final currentChapterCount = current['chapterCount'];
+      // Do not let a count from an older parse overwrite a newly re-imported
+      // or migrated directory that happens to reuse the same book ID.
+      if (currentFileSize is! num ||
+          currentFileSize.toInt() != sourceBook.fileSize ||
+          currentParserVersion is! num ||
+          currentParserVersion.toInt() != sourceBook.txtParserVersion ||
+          currentChapterCount is! num ||
+          currentChapterCount.toInt() != sourceBook.chapterCount) {
+        return;
+      }
+      current['chapterWordCounts'] = safeCounts;
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
     });
   }

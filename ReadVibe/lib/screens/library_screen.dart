@@ -13,6 +13,7 @@ import '../services/font_service.dart';
 import '../services/storage_service.dart';
 import '../services/txt_parser.dart';
 import '../services/epub_parser.dart';
+import '../services/word_parser.dart';
 import '../services/word_count_service.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
@@ -29,7 +30,7 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-enum _BookAction { rename, delete }
+enum _BookAction { rename, move, delete }
 
 /// Note on animation lifecycle: [_emptyIconController] runs an infinite
 /// repeat() while the shelf is empty. Any widget test that mounts this
@@ -56,9 +57,17 @@ class _LibraryScreenState extends State<LibraryScreen>
   late final AnimationController _emptyIconController;
 
   final _gridScrollController = ScrollController();
+  final _reorderScrollController = ScrollController();
   bool _gridScrolled = false;
   Offset? _shelfPointerStart;
   DateTime? _shelfPointerStartTime;
+  bool _reorderMode = false;
+  String? _reorderFocusBookId;
+  Timer? _reorderFocusTimer;
+  String? _draggingBookId;
+  bool _bookOrderChanged = false;
+  String? _lastReorderTargetId;
+  DateTime? _lastReorderTargetAt;
 
   @override
   void initState() {
@@ -86,8 +95,10 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   void dispose() {
     _loadSerial++;
+    _reorderFocusTimer?.cancel();
     _gridScrollController.removeListener(_handleGridScroll);
     _gridScrollController.dispose();
+    _reorderScrollController.dispose();
     _gridEntranceController.dispose();
     _emptyIconController.dispose();
     super.dispose();
@@ -212,7 +223,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['txt', 'epub'],
+        allowedExtensions: ['txt', 'epub', 'docx', 'doc'],
       );
 
       if (result == null || result.files.isEmpty || !mounted) return;
@@ -232,8 +243,10 @@ class _LibraryScreenState extends State<LibraryScreen>
         book = await parseEpub(path, fileName);
       } else if (ext.endsWith('.txt')) {
         book = await parseTxt(path, fileName);
+      } else if (ext.endsWith('.docx') || ext.endsWith('.doc')) {
+        book = await parseWordDocument(path, fileName);
       } else {
-        _showError('不支持的文件格式，请选择 .txt 或 .epub 文件');
+        _showError('不支持的文件格式，请选择 TXT、EPUB、DOCX 或 DOC');
         return;
       }
 
@@ -284,6 +297,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _handleShelfPointerDown(PointerDownEvent event) {
+    if (_reorderMode) return;
     _shelfPointerStart = event.position;
     _shelfPointerStartTime = DateTime.now();
   }
@@ -294,6 +308,11 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _handleShelfPointerUp(PointerUpEvent event) {
+    if (_reorderMode) {
+      _shelfPointerStart = null;
+      _shelfPointerStartTime = null;
+      return;
+    }
     final start = _shelfPointerStart;
     final startTime = _shelfPointerStartTime;
     _shelfPointerStart = null;
@@ -307,6 +326,122 @@ class _LibraryScreenState extends State<LibraryScreen>
         delta.dx > 96 && mostlyHorizontal && elapsedMs < 900;
     if (intentionalRightSwipe) {
       _showGlobalSettings();
+    }
+  }
+
+  void _enterReorderMode(String bookId) {
+    _reorderFocusTimer?.cancel();
+    setState(() {
+      _reorderMode = true;
+      _reorderFocusBookId = bookId;
+      _draggingBookId = null;
+      _bookOrderChanged = false;
+    });
+    unawaited(HapticFeedback.mediumImpact());
+    _reorderFocusTimer = Timer(const Duration(milliseconds: 560), () {
+      if (!mounted || _reorderFocusBookId != bookId) return;
+      setState(() => _reorderFocusBookId = null);
+    });
+  }
+
+  void _exitReorderMode() {
+    if (!_reorderMode || _draggingBookId != null) return;
+    _reorderFocusTimer?.cancel();
+    setState(() {
+      _reorderMode = false;
+      _reorderFocusBookId = null;
+      _lastReorderTargetId = null;
+      _lastReorderTargetAt = null;
+    });
+    unawaited(HapticFeedback.lightImpact());
+  }
+
+  void _startBookDrag(Book book) {
+    _shelfPointerStart = null;
+    _shelfPointerStartTime = null;
+    _reorderFocusTimer?.cancel();
+    setState(() {
+      _draggingBookId = book.id;
+      _reorderFocusBookId = null;
+      _bookOrderChanged = false;
+      _lastReorderTargetId = null;
+      _lastReorderTargetAt = null;
+    });
+    unawaited(HapticFeedback.mediumImpact());
+  }
+
+  void _updateBookDrag(DragUpdateDetails details) {
+    if (!_reorderScrollController.hasClients) return;
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    final y = details.globalPosition.dy;
+    var delta = 0.0;
+    if (y < 150) {
+      delta = -10;
+    } else if (y > screenHeight - 90) {
+      delta = 10;
+    }
+    if (delta == 0) return;
+    final position = _reorderScrollController.position;
+    final target = (position.pixels + delta)
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+    if ((target - position.pixels).abs() > 0.1) {
+      _gridScrollController.jumpTo(target);
+    }
+  }
+
+  void _moveDraggedBook(String targetBookId) {
+    final sourceBookId = _draggingBookId;
+    if (sourceBookId == null || sourceBookId == targetBookId) return;
+    final now = DateTime.now();
+    if (_lastReorderTargetId == targetBookId &&
+        _lastReorderTargetAt != null &&
+        now.difference(_lastReorderTargetAt!).inMilliseconds < 90) {
+      return;
+    }
+    final sourceIndex = _books.indexWhere((book) => book.id == sourceBookId);
+    final targetIndex = _books.indexWhere((book) => book.id == targetBookId);
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex == targetIndex) {
+      return;
+    }
+
+    setState(() {
+      final moved = _books.removeAt(sourceIndex);
+      _books.insert(targetIndex, moved);
+      _bookOrderChanged = true;
+      _lastReorderTargetId = targetBookId;
+      _lastReorderTargetAt = now;
+    });
+    unawaited(HapticFeedback.selectionClick());
+  }
+
+  void _finishBookDrag(Book book) {
+    final shouldPersistOrder = _bookOrderChanged;
+    setState(() {
+      _draggingBookId = null;
+      _bookOrderChanged = false;
+      _reorderFocusBookId = book.id;
+      _lastReorderTargetId = null;
+      _lastReorderTargetAt = null;
+    });
+    if (shouldPersistOrder) {
+      unawaited(_persistBookOrder());
+    }
+    _reorderFocusTimer?.cancel();
+    _reorderFocusTimer = Timer(const Duration(milliseconds: 260), () {
+      if (!mounted || _reorderFocusBookId != book.id) return;
+      setState(() => _reorderFocusBookId = null);
+    });
+  }
+
+  Future<void> _persistBookOrder() async {
+    try {
+      await _storage.saveBookOrder(_books.map((book) => book.id).toList());
+    } on Object catch (error, stackTrace) {
+      debugPrint('Failed to save shelf order: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      _showError('书架顺序保存失败，已恢复上次顺序');
+      await _loadData();
     }
   }
 
@@ -457,18 +592,34 @@ class _LibraryScreenState extends State<LibraryScreen>
                 ),
                 onTap: () => Navigator.pop(sheetContext, _BookAction.rename),
               ),
-              ListTile(
-                leading: Icon(Icons.delete_outline, color: colors.accent),
-                title: Text('删除书籍', style: TextStyle(color: colors.text)),
-                subtitle: Text(
-                  '删除正文、进度和目录状态',
-                  style: TextStyle(color: colors.secondary),
+              const SizedBox(height: AppSpacing.xs),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+                child: Row(
+                  children: [
+                    _compactBookAction(
+                      sheetContext: sheetContext,
+                      action: _BookAction.move,
+                      icon: Icons.open_with_rounded,
+                      label: '移动',
+                      color: colors.accent,
+                    ),
+                    const SizedBox(width: AppSpacing.sm),
+                    _compactBookAction(
+                      sheetContext: sheetContext,
+                      action: _BookAction.delete,
+                      icon: Icons.delete_outline_rounded,
+                      label: '删除',
+                      color: Color.lerp(
+                        colors.accent,
+                        const Color(0xFFD83B32),
+                        0.72,
+                      )!,
+                    ),
+                  ],
                 ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                ),
-                onTap: () => Navigator.pop(sheetContext, _BookAction.delete),
               ),
+              const SizedBox(height: AppSpacing.sm),
             ],
           ),
         ),
@@ -478,9 +629,58 @@ class _LibraryScreenState extends State<LibraryScreen>
     switch (action) {
       case _BookAction.rename:
         await _renameBook(book);
+      case _BookAction.move:
+        _enterReorderMode(book.id);
       case _BookAction.delete:
         _confirmDeleteBook(book);
     }
+  }
+
+  Widget _compactBookAction({
+    required BuildContext sheetContext,
+    required _BookAction action,
+    required IconData icon,
+    required String label,
+    required Color color,
+  }) {
+    return Expanded(
+      child: Semantics(
+        button: true,
+        label: label,
+        child: Material(
+          color: color.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+            onTap: () => Navigator.pop(sheetContext, action),
+            child: Container(
+              height: 66,
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(AppRadius.lg),
+                border: Border.all(color: color.withValues(alpha: 0.20)),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, size: 20, color: color),
+                  const SizedBox(height: AppSpacing.xs),
+                  Text(
+                    label,
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      height: 1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _renameBook(Book book) async {
@@ -775,56 +975,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                           ]
                         : const [],
                   ),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      20,
-                      AppSpacing.lg,
-                      20,
-                      AppSpacing.md,
-                    ),
-                    child: Row(
-                      children: [
-                        IconButton(
-                          onPressed: _showGlobalSettings,
-                          tooltip: '设置',
-                          icon: Icon(Icons.menu, color: colors.secondary),
-                        ),
-                        const SizedBox(width: AppSpacing.sm),
-                        Text(
-                          '书架',
-                          style: TextStyle(
-                            fontSize: 24,
-                            fontWeight: FontWeight.w700,
-                            color: colors.text,
-                            letterSpacing: -0.3,
-                          ),
-                        ),
-                        const Spacer(),
-                        ElevatedButton.icon(
-                          onPressed: _importing ? null : _importBook,
-                          icon: Icon(
-                            _importing ? Icons.hourglass_empty : Icons.add,
-                            size: 18,
-                          ),
-                          label: Text(_importing ? '导入中...' : '导入'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: colors.accent,
-                            foregroundColor: Colors.white,
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(
-                                AppRadius.pill,
-                              ),
-                            ),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: AppSpacing.lg,
-                              vertical: AppSpacing.sm,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                  child: _buildLibraryHeader(colors),
                 ),
 
                 // Content
@@ -853,9 +1004,142 @@ class _LibraryScreenState extends State<LibraryScreen>
         ),
       ),
     );
-    return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: AppTheme.systemUiOverlayStyle(colors),
-      child: content,
+    return PopScope<void>(
+      canPop: !_reorderMode,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _reorderMode) _exitReorderMode();
+      },
+      child: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: AppTheme.systemUiOverlayStyle(colors),
+        child: content,
+      ),
+    );
+  }
+
+  Widget _buildLibraryHeader(ReaderThemeColors colors) {
+    return Padding(
+      padding: _reorderMode
+          ? const EdgeInsets.fromLTRB(12, 2, 12, 2)
+          : const EdgeInsets.fromLTRB(20, AppSpacing.lg, 20, AppSpacing.md),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              IconButton(
+                onPressed: _reorderMode
+                    ? _exitReorderMode
+                    : _showGlobalSettings,
+                tooltip: _reorderMode ? '退出移动' : '设置',
+                icon: AnimatedSwitcher(
+                  duration: AppMotion.fast,
+                  child: Icon(
+                    _reorderMode ? Icons.close_rounded : Icons.menu,
+                    key: ValueKey(_reorderMode),
+                    color: colors.secondary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              AnimatedSwitcher(
+                duration: AppMotion.fast,
+                transitionBuilder: (child, animation) => SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 0.18),
+                    end: Offset.zero,
+                  ).animate(animation),
+                  child: FadeTransition(opacity: animation, child: child),
+                ),
+                child: Text(
+                  _reorderMode ? '调整顺序' : '书架',
+                  key: ValueKey(_reorderMode),
+                  style: TextStyle(
+                    fontSize: _reorderMode ? 20 : 24,
+                    fontWeight: FontWeight.w700,
+                    color: colors.text,
+                    letterSpacing: -0.3,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              AnimatedSwitcher(
+                duration: AppMotion.fast,
+                child: _reorderMode
+                    ? FilledButton.icon(
+                        key: const ValueKey('reorder-done'),
+                        onPressed: _draggingBookId == null
+                            ? _exitReorderMode
+                            : null,
+                        icon: const Icon(Icons.check_rounded, size: 18),
+                        label: const Text('完成'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: colors.accent,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: AppSpacing.md,
+                            vertical: 6,
+                          ),
+                        ),
+                      )
+                    : ElevatedButton.icon(
+                        key: const ValueKey('import-book'),
+                        onPressed: _importing ? null : _importBook,
+                        icon: Icon(
+                          _importing ? Icons.hourglass_empty : Icons.add,
+                          size: 18,
+                        ),
+                        label: Text(_importing ? '导入中...' : '导入'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: colors.accent,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(AppRadius.pill),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: AppSpacing.lg,
+                            vertical: AppSpacing.sm,
+                          ),
+                        ),
+                      ),
+              ),
+            ],
+          ),
+          AnimatedSize(
+            duration: AppMotion.normal,
+            curve: AppMotion.standard,
+            child: _reorderMode
+                ? Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AppSpacing.sm,
+                      0,
+                      AppSpacing.sm,
+                      2,
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.touch_app_rounded,
+                          size: 14,
+                          color: colors.secondary,
+                        ),
+                        const SizedBox(width: AppSpacing.xs),
+                        Text(
+                          '拖动书籍调整位置',
+                          style: TextStyle(
+                            color: colors.secondary,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
     );
   }
 
@@ -890,7 +1174,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           ),
           const SizedBox(height: AppSpacing.sm),
           Text(
-            '点击下方按钮，导入你的第一本 TXT 或 EPUB',
+            '点击下方按钮，导入 TXT、EPUB、DOCX 或 DOC',
             style: TextStyle(fontSize: 14, color: colors.secondary),
           ),
           const SizedBox(height: AppSpacing.xl),
@@ -920,19 +1204,26 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Widget _buildBookGrid(ReaderThemeColors colors) {
+    if (_reorderMode) return _buildReorderBookGrid(colors);
+
     return RefreshIndicator(
       onRefresh: _loadData,
       color: colors.accent,
       child: GridView.builder(
         controller: _gridScrollController,
         padding: const EdgeInsets.all(AppSpacing.md),
-        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 220,
-          childAspectRatio: 0.55,
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3,
+          childAspectRatio: 0.52,
           crossAxisSpacing: AppSpacing.xs,
-          mainAxisSpacing: AppSpacing.xs,
+          mainAxisSpacing: AppSpacing.sm,
         ),
         itemCount: _books.length,
+        findChildIndexCallback: (key) {
+          if (key is! ValueKey<String>) return null;
+          final index = _books.indexWhere((book) => book.id == key.value);
+          return index < 0 ? null : index;
+        },
         itemBuilder: (context, index) {
           final book = _books[index];
           final cardKey = GlobalObjectKey('book-card-${book.id}');
@@ -960,6 +1251,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             curve: AppMotion.standard,
           );
           return AnimatedBuilder(
+            key: ValueKey<String>(book.id),
             animation: _gridEntranceController,
             builder: (context, child) {
               final value = interval.transform(_gridEntranceController.value);
@@ -974,6 +1266,201 @@ class _LibraryScreenState extends State<LibraryScreen>
             child: card,
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildReorderBookGrid(ReaderThemeColors colors) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const horizontalPadding = AppSpacing.md;
+        const columnCount = 3;
+        const horizontalGap = AppSpacing.xs;
+        const verticalGap = AppSpacing.sm;
+        final gridWidth = math.max(
+          0.0,
+          constraints.maxWidth - horizontalPadding * 2,
+        );
+        final cardWidth = math.max(
+          0.0,
+          (gridWidth - horizontalGap * (columnCount - 1)) / columnCount,
+        );
+        final cardHeight = cardWidth / 0.52;
+        final rowCount = (_books.length / columnCount).ceil();
+        final contentHeight = rowCount == 0
+            ? 0.0
+            : rowCount * cardHeight + (rowCount - 1) * verticalGap;
+
+        return SingleChildScrollView(
+          key: const ValueKey('reorder-grid'),
+          controller: _reorderScrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(
+            horizontalPadding,
+            0,
+            horizontalPadding,
+            horizontalPadding,
+          ),
+          child: SizedBox(
+            width: gridWidth,
+            height: contentHeight,
+            child: Stack(
+              alignment: Alignment.topLeft,
+              clipBehavior: Clip.none,
+              children: [
+                for (var index = 0; index < _books.length; index++)
+                  _buildReorderBookItem(
+                    book: _books[index],
+                    index: index,
+                    cardWidth: cardWidth,
+                    cardHeight: cardHeight,
+                    horizontalGap: horizontalGap,
+                    verticalGap: verticalGap,
+                    colors: colors,
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildReorderBookItem({
+    required Book book,
+    required int index,
+    required double cardWidth,
+    required double cardHeight,
+    required double horizontalGap,
+    required double verticalGap,
+    required ReaderThemeColors colors,
+  }) {
+    const columnCount = 3;
+    final column = index % columnCount;
+    final row = index ~/ columnCount;
+    final left = column * (cardWidth + horizontalGap);
+    final top = row * (cardHeight + verticalGap);
+
+    return AnimatedPositioned(
+      key: ValueKey<String>(book.id),
+      duration: AppMotion.shelfReorder,
+      curve: AppMotion.shelfReorderCurve,
+      left: left,
+      top: top,
+      width: cardWidth,
+      height: cardHeight,
+      child: DragTarget<String>(
+        onWillAcceptWithDetails: (details) => details.data != book.id,
+        onMove: (_) => _moveDraggedBook(book.id),
+        builder: (context, candidateData, rejectedData) {
+          final isTarget = candidateData.any((id) => id != book.id);
+          final isFocused = _reorderFocusBookId == book.id;
+          final card = _buildReorderCard(book, colors);
+          return Semantics(
+            label: '拖动移动《${book.title}》',
+            hint: '按住并拖动到新的书架位置',
+            child: AnimatedScale(
+              scale: isTarget ? 0.965 : (isFocused ? 1.035 : 1.0),
+              duration: isTarget ? AppMotion.quick : AppMotion.shelfLift,
+              curve: AppMotion.shelfReorderCurve,
+              child: AnimatedContainer(
+                duration: AppMotion.shelfLift,
+                curve: AppMotion.shelfReorderCurve,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(AppRadius.lg),
+                  border: Border.all(
+                    color: isTarget || isFocused
+                        ? colors.accent.withValues(alpha: 0.42)
+                        : Colors.transparent,
+                    width: 1.2,
+                  ),
+                  boxShadow: isFocused
+                      ? [
+                          BoxShadow(
+                            color: colors.accent.withValues(alpha: 0.16),
+                            blurRadius: 18,
+                            offset: const Offset(0, 7),
+                          ),
+                        ]
+                      : const [],
+                ),
+                child: Draggable<String>(
+                  data: book.id,
+                  maxSimultaneousDrags: _openingBook ? 0 : 1,
+                  dragAnchorStrategy: pointerDragAnchorStrategy,
+                  onDragStarted: () => _startBookDrag(book),
+                  onDragUpdate: _updateBookDrag,
+                  onDragEnd: (_) => _finishBookDrag(book),
+                  feedback: _buildLiftedBookFeedback(
+                    book: book,
+                    width: cardWidth,
+                    height: cardHeight,
+                    colors: colors,
+                  ),
+                  childWhenDragging: _buildReorderPlaceholder(card, colors),
+                  child: card,
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildReorderCard(Book book, ReaderThemeColors colors) {
+    return BookCard(
+      book: book,
+      progress: _progressMap[book.id],
+      colors: colors,
+      onTap: () {},
+    );
+  }
+
+  Widget _buildReorderPlaceholder(Widget card, ReaderThemeColors colors) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: colors.accent.withValues(alpha: 0.035),
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        border: Border.all(
+          color: colors.accent.withValues(alpha: 0.18),
+          width: 1,
+        ),
+      ),
+      child: Opacity(opacity: 0.12, child: card),
+    );
+  }
+
+  Widget _buildLiftedBookFeedback({
+    required Book book,
+    required double width,
+    required double height,
+    required ReaderThemeColors colors,
+  }) {
+    return IgnorePointer(
+      child: Material(
+        color: Colors.transparent,
+        elevation: 18,
+        shadowColor: Colors.black.withValues(alpha: 0.34),
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        child: Transform.scale(
+          scale: 1.055,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: colors.headerBg.withValues(alpha: 0.98),
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+              border: Border.all(
+                color: colors.accent.withValues(alpha: 0.42),
+                width: 1.2,
+              ),
+            ),
+            child: SizedBox(
+              width: width,
+              height: height,
+              child: _buildReorderCard(book, colors),
+            ),
+          ),
+        ),
       ),
     );
   }

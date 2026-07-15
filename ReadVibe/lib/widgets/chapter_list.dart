@@ -22,6 +22,7 @@ class ChapterListSheet extends StatefulWidget {
   final ScrollController scrollController;
   final ReaderThemeColors colors;
   final ValueListenable<int?> wordCountListenable;
+  final ValueListenable<List<int>?> chapterWordCountsListenable;
   final Set<String> collapsedGroupIds;
   final TocGroupExpansionChanged onGroupExpansionChanged;
 
@@ -33,6 +34,7 @@ class ChapterListSheet extends StatefulWidget {
     required this.scrollController,
     required this.colors,
     required this.wordCountListenable,
+    required this.chapterWordCountsListenable,
     required this.collapsedGroupIds,
     required this.onGroupExpansionChanged,
   });
@@ -243,6 +245,33 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
               fontWeight: isTopLevel || isActive
                   ? FontWeight.w500
                   : FontWeight.normal,
+            ),
+          ),
+          trailing: SizedBox(
+            width: 84,
+            child: ValueListenableBuilder<List<int>?>(
+              valueListenable: widget.chapterWordCountsListenable,
+              builder: (context, chapterWordCounts, _) {
+                final wordCount =
+                    chapterWordCounts != null &&
+                        chapterIndex < chapterWordCounts.length
+                    ? chapterWordCounts[chapterIndex]
+                    : null;
+                return Text(
+                  formatChapterWordCount(wordCount),
+                  maxLines: 1,
+                  overflow: TextOverflow.fade,
+                  softWrap: false,
+                  textAlign: TextAlign.end,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isActive
+                        ? widget.colors.accent
+                        : widget.colors.secondary,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                );
+              },
             ),
           ),
           onTap: () {
