@@ -4,11 +4,11 @@
 
 ## 一、当前发布基线
 
-- 公开版本：`v0.5.4`。
-- `pubspec.yaml`：`version: 0.5.4`。
-- Android 基础 `versionCode`：`29`。
-- arm64 分包清单：`versionCode=2029`，`versionName=0.5.4`。
-- 正式 APK：`dist/ReadVibe-Android-v0.5.4-arm64-v8a.apk`。
+- 公开版本：`v0.5.6`。
+- `pubspec.yaml`：`version: 0.5.6`。
+- Android 基础 `versionCode`：`31`。
+- arm64 分包清单：`versionCode=2031`，`versionName=0.5.6`。
+- 正式 APK：`dist/ReadVibe-Android-v0.5.6-arm64-v8a.apk`。
 - 正式 ABI：`arm64-v8a`。
 
 公开版本必须使用三段式语义版本。Android 构建编号单独递增，不得附加到公开版本号或文件名。
@@ -41,7 +41,7 @@
 
 ```powershell
 flutter analyze
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.5.4 --build-number 29
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.5.6 --build-number 31
 ```
 
 - 发布前核对 APK 的 `versionName`、`versionCode`、`native-code`、文件大小和 SHA-256。
@@ -73,12 +73,15 @@ flutter build apk --release --split-per-abi --target-platform android-arm64 --bu
 - 复制、分享和全选使用平台选择回调；翻译以 Android `PackageManager` 对 `ACTION_SEND / ACTION_PROCESS_TEXT / ACTION_TRANSLATE` 的实际解析结果为数据源，Flutter 再只保留 DeepSeek、ChatGPT、Gemini、Claude、Microsoft Copilot 和 Perplexity。原生启动前重新校验白名单与显式组件，发送提示词固定为 `翻译如下内容：“所选文字”`。
 - 搜索以 Android `ACTION_VIEW` 的实际解析结果为数据源，面板固定只显示 `edge / chrome / 系统浏览器` 三项；Edge 和 Chrome 使用显式系统组件，系统浏览器使用原生未限定 Intent。两种操作均可记住默认目标并在下次直接打开，全局设置提供清除默认目标入口。
 - 翻译目标使用横向 `ListView` 卡片，内置 `assets/images/ai/` 中六个官方 WebP 图标，不显示通用机器人或单选圆点；搜索目标同样使用横向卡片，但只显示文字品牌、描边和强调线，不引入浏览器图标资源。
-- 仿真前翻与后翻必须使用不同层级：前翻沿大面积斜折线裁切当前页并显露下一页；后翻保留当前页于底层，将上一页从左侧逐步铺开到其上方，不得反转前翻路径。
-- 前翻纸背使用当前页真实快照，后翻纸背使用上一页真实快照；快照围绕由折痕上下端点确定的斜轴反射，文字经透纸衰减后仍必须可见。
-- 仿真模式使用原始指针跟踪横向位移，超过阈值后直接驱动 `_SimulationPageTarget`；正文选择区不得抢走翻页路径，未发生横向拖动的长按仍保留系统选文。
+- 仿真前翻使用垂直直线折痕与直线纸边裁切当前页并显露下一页；纸张不使用贝塞尔曲线、斜折或波浪形自由边。
+- 仿真后翻删除独立覆盖渲染器；上一页作为运动纸页，以 `leafProgress = 1 - progress` 反向复用前翻的 `_StraightLeafGeometry`、正面裁切、纸背裁切和光照路径。
+- 前翻纸背对应当前页，后翻纸背对应上一页；两者均围绕当前垂直折痕精确水平镜像。实际快照可用时显示 `RawImage`，快照未就绪时显示绑定独立控制器的同章节、同偏移镜像页面，浅色和深色主题下都不得出现无字空白纸带。
+- 仿真模式使用原始指针跟踪横向位移，超过阈值后直接驱动 `_SimulationPageTarget`，同时通过共享阻断状态清除并持续禁止 `SelectionArea` 的选区、工具栏和手柄；未发生横向拖动的长按仍保留系统选文。
 - 纵向滚动、菜单、设置、章节和手势状态变化后，旧仿真纸背快照必须失效。
-- 仿真翻页效果稳定后主动异步预取快照，后翻目标页完成布局后也只启动异步捕获。指针按下、横向拖动、回弹和提交不得调用 `toImageSync()` 或等待图像任务；快照未就绪时仍绘制卷页裁切、折痕、阴影和主题纸背，只暂缺镜像文字，不得自动调用平滑视图。
-- 仿真模式在 `simulation` 效果下调用 `_buildCurledBookTurnPages`，前翻使用 `_ForwardLeafGeometry`，后翻使用独立 `_PreviousLeafCoverGeometry`，纸背由 `_BookLeafCurlPainter` 绘制；`smooth` 效果只调用 `_buildSmoothTurnPages`。两者共用 `_SimulationPageTarget`、预览控制器和进度提交。
+- 仿真翻页效果稳定后主动异步预取当前页快照。后翻目标建立后异步捕获上一页快照。指针按下、横向拖动、回弹和提交不得调用 `toImageSync()` 或等待图像任务；快照未就绪时由镜像页面层立即提供透纸文字，不得自动调用平滑视图。
+- 仿真模式在 `simulation` 效果下调用 `_buildStraightBookTurnPages`；双向共用 `_StraightLeafGeometry`、`_StraightLeafFrontClipper`、`_StraightLeafBackClipper` 与 `_StraightPaperPainter`，后翻只反转几何进度。`smooth` 效果只调用 `_buildSmoothTurnPages`。两者共用 `_SimulationPageTarget`、预览控制器和进度提交。
+- 活动页与所有预览页的列表键必须包含各自控制器身份和阅读布局类型；提交同章翻页时先跳转活动控制器，再撤销预览与拖动状态。
+- 仿真模式与其他阅读模式互相切换时必须创建新的 `ScrollController`，目标布局完成前使用主题纯色遮罩，完成后按章节比例恢复并在仿真模式吸附到完整行。
 - 平滑翻页不得捕获、预取或保留纸背快照；切换效果前必须保存当前章节和局部比例，重排后恢复位置。
 - 深色主题下，阅读页、纸面、路由底层、书架和系统栏必须保持同一套深色配色。
 - 封面快照、主题监听器和转场资源在 `TransitionRoute.completed` 后释放。

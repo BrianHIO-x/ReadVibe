@@ -6,15 +6,15 @@ ReadVibe 是面向本地小说阅读的 Flutter Android 应用。TXT、EPUB、DO
 
 | 项目 | 当前值 |
 |---|---|
-| 公开版本 | `v0.5.4` |
-| `pubspec.yaml` | `version: 0.5.4` |
-| Android 基础构建号 | `29` |
-| arm64 APK 清单 | `versionName=0.5.4`，`versionCode=2029` |
+| 公开版本 | `v0.5.6` |
+| `pubspec.yaml` | `version: 0.5.6` |
+| Android 基础构建号 | `31` |
+| arm64 APK 清单 | `versionName=0.5.6`，`versionCode=2031` |
 | ABI | `arm64-v8a` |
 | 最低系统 | Android 8.0（API 26） |
-| APK | [`dist/ReadVibe-Android-v0.5.4-arm64-v8a.apk`](dist/ReadVibe-Android-v0.5.4-arm64-v8a.apk) |
+| APK | [`dist/ReadVibe-Android-v0.5.6-arm64-v8a.apk`](dist/ReadVibe-Android-v0.5.6-arm64-v8a.apk) |
 | 文件大小 | 38,846,135 字节（约 37.05 MiB） |
-| SHA-256 | `B5BB2957DACBB1C67D08B15F777A50141FA3731692E7914AEEE9A7871D690880` |
+| SHA-256 | `790B30986E28998A05590977A94490BC39A7B571B8B32E3862ED768A9D9125AB` |
 
 ## 功能说明
 
@@ -174,22 +174,21 @@ EPUB 按小说纯文本模式呈现，不复刻原文件的复杂 CSS 和图文�
 - 同一章内的目标页使用独立预览控制器并直接定位到下一屏或上一屏。
 - 到达章节边界时，下一章预热在章首，上一章预热在章末。
 - 页面位置按视口网格计算，前翻后再后翻会回到同一页起点。
-- 选择“仿真翻页”时，每一次有效拖动都进入 `_buildCurledBookTurnPages`：当前页或上一页使用独立的大面积斜向纸叶裁切，并同步绘制折痕、投影、高光和纸张厚度。当前页只在阅读页稳定时异步预取，手指按下、横向拖动、回弹和提交不执行同步整屏截图。
-- 仿真模式不再依赖正文 `SelectionArea` 所在的横向手势竞技场；原始指针移动超过 9 px 且以横向为主后立即开始跟手翻页，未移动的长按仍由系统建立文本选区。
-- 左滑前翻使用“当前页向左卷走”层级：下一页位于底层，当前页右边缘相对斜折线反射形成大面积自由纸背，页面本体不做水平平移。
-- 右滑后翻使用独立的“上一页盖回”层级：当前页全程留在底层，上一页的平整区域从左边缘向折痕增长，折起纸背继续覆盖右侧当前页，不使用前翻的反向动画。
-- 仿真翻页不会因为快照未完成而退回平滑平移；只有用户显式选择“平滑翻页”才会改用 `_buildSmoothTurnPages`。纸背快照经当前斜折轴反射后使用透纸衰减，页眉、标题与正文字迹保持可见。
-- `_ForwardLeafGeometry` 计算前翻时当前页从右向左卷走的斜折线、平整正面，以及由右边缘相对折线反射得到的纸背区域。
-- `_PreviousLeafCoverGeometry` 独立计算上一页从左向右覆盖时的反向倾斜折线、已铺平正面，以及由左边缘反射得到的领先纸背，不通过符号取反复用前翻几何。
-- `_ForwardLeafFrontClipper` 与 `_PreviousLeafFrontClipper` 分别裁切两套运动中的纸页正面。
-- `_BookLeafCurlPainter` 沿弯曲折痕绘制投影、暗部、柔光、纸张厚度和真实反射字迹。
+- 选择“仿真翻页”时，每一次有效拖动都进入 `_buildStraightBookTurnPages`。原始指针移动超过 9 px 且以横向为主后立即开始跟手翻页，未移动的长按仍由系统建立文本选区。
+- 横向翻页开始后，共享选择阻断状态会立即清除 `SelectionArea` 的选区、工具栏和选择手柄，并在拖动、提交或回弹结束前拒绝新的选择菜单。
+- 左滑前翻时下一页位于底层，`_StraightLeafFrontClipper` 使用垂直直边缩小当前页正面，`_StraightLeafGeometry` 以垂直折痕和当前页右边缘的精确反射生成直线纸背。
+- 右滑不再调用任何独立覆盖或旧翻页特效。上一页成为运动纸页，并以 `leafProgress = 1 - progress` 反向运行左滑完全相同的正面裁切、纸背裁切、直线折痕和光照；纸背从左侧出现后逐步展开为上一页完整正面。
+- 前翻纸背对应当前页，后翻纸背对应上一页。真实快照围绕垂直折痕水平镜像；截图尚未完成或不可用时，独立控制器会把同章节、同滚动偏移的页面直接镜像到纸背，因此拖动全程都有清晰衰减的反向页眉、标题和正文，不会出现纯色空白纸带。
+- 仿真翻页不会因为快照未完成而退回平滑平移；只有用户显式选择“平滑翻页”才会改用 `_buildSmoothTurnPages`。
 - 当前活动页由稳定 `GlobalKey` 的 `RepaintBoundary` 包裹。
 - 稳定当前页和后翻目标页分别只复用一个异步 `toImage()` 捕获任务，像素比最高限制为 1.5，减少栅格线程压力和瞬时图像内存。
-- 前翻纸背捕获当前可见页；后翻为上一页的目标预览增加独立 `RepaintBoundary`，在预览完成布局后捕获它的真实页面。
-- 纸背快照围绕折痕上下端点组成的斜轴做二维反射，并裁入当前曲线折页区域；前翻只使用当前页快照，后翻只使用上一页快照，不显示错误页面的字迹。
-- 镜像保留真实页眉章节小字、标题、正文、上下留白、字体、主题和滚动位置；浅色/深色主题分别使用不同的透纸强度，再叠加薄纸遮罩，让反面文字可见但不像第二个正面。
+- 前翻捕获当前可见页；后翻目标进入预览树后捕获上一页。两个方向在快照就绪前都由同内容镜像页面层立即提供纸背字迹。
+- 当前页、同章预览页和相邻章节页的 `ListView` 键包含各自 `ScrollController` 身份与布局类型，页面元素不会跨预览错误复用。
+- 同章翻页提交时，活动控制器先跳到预览页精确偏移，再清除预览控制器、拖动值和纸背快照，最终画面不会短暂恢复到翻页前内容。
+- 仿真模式与分章或滚动模式互相切换时重新创建控制器，目标列表在主题纯色遮罩下完成布局后按章节比例恢复；仿真目标再吸附到完整文字行边界。
+- 镜像保留真实页眉章节小字、标题、正文、上下留白、字体、主题和滚动位置；浅色纸面使用 0.38、深色纸面使用 0.46 的合成透射不透明度，再叠加薄纸光照，让反面文字可见但不像第二个正面。
 - 稳定页面主动预取快照；滚动、菜单、设置、章节或手势结束后立即使快照失效。
-- 快照尚未完成或捕获失败时，同一手势仍直接显示仿真卷页和当前主题纸背；快照完成后只在当前拖动位置补上纸背镜像文字，不更换动画类型。
+- 快照尚未完成或捕获失败时，同一手势仍直接显示直线纸页、当前主题纸背和同内容镜像字迹；快照完成后在当前拖动位置无缝接管镜像源，不更换动画类型。
 - 选择“平滑翻页”时，当前页和目标页按手指水平位移同步平移；同章目标页、跨章预热页、完整行分页和进度提交都复用仿真模式原模型。
 - 平滑翻页不需要卷页纸背，因此不会捕获或预取 `toImage()` 快照，也不保留之前的仿真纸背图像。
 
@@ -284,7 +283,7 @@ flutter analyze
 ## Release 构建
 
 ```powershell
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.5.4 --build-number 29
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.5.6 --build-number 31
 ```
 
 Flutter 输出：
@@ -297,13 +296,13 @@ build\app\outputs\flutter-apk\app-arm64-v8a-release.apk
 
 ```powershell
 New-Item -ItemType Directory -Force -Path dist | Out-Null
-Copy-Item build\app\outputs\flutter-apk\app-arm64-v8a-release.apk dist\ReadVibe-Android-v0.5.4-arm64-v8a.apk -Force
+Copy-Item build\app\outputs\flutter-apk\app-arm64-v8a-release.apk dist\ReadVibe-Android-v0.5.6-arm64-v8a.apk -Force
 ```
 
 发布核对：
 
 ```powershell
-Get-FileHash dist\ReadVibe-Android-v0.5.4-arm64-v8a.apk -Algorithm SHA256
+Get-FileHash dist\ReadVibe-Android-v0.5.6-arm64-v8a.apk -Algorithm SHA256
 ```
 
 ## 当前验证状态
@@ -312,8 +311,8 @@ Get-FileHash dist\ReadVibe-Android-v0.5.4-arm64-v8a.apk -Algorithm SHA256
 |---|---|
 | `flutter analyze` | 通过 |
 | Android arm64 release 构建 | 通过 |
-| APK `versionName` | `0.5.4` |
-| APK `versionCode` | `2029` |
+| APK `versionName` | `0.5.6` |
+| APK `versionCode` | `2031` |
 | APK native code | `arm64-v8a` |
 
 ## 相关文档

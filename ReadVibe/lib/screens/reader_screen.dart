@@ -63,7 +63,6 @@ class _ReaderScreenState extends State<ReaderScreen>
   late final AnimationController _pageTurnController;
   Animation<double>? _pageTurnAnimation;
   double _pageDragOffset = 0;
-  double _pageCurlAnchorY = double.nan;
   int? _pageDragTargetIndex;
   bool _commitPageTurnWhenSettled = false;
   int _pageTurnSerial = 0;
@@ -80,6 +79,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   Offset? _simulationTurnLastPosition;
   VelocityTracker? _simulationTurnVelocityTracker;
   bool _simulationTurnActive = false;
+  final ValueNotifier<bool> _selectionBlockedNotifier = ValueNotifier(false);
+  bool _readingModeReloading = false;
   bool _closingReader = false;
   double _viewPaddingTop = 0;
   ReadingProgress? _currentProgress;
@@ -95,13 +96,13 @@ class _ReaderScreenState extends State<ReaderScreen>
   int? _pageTurnOriginChapterIndex;
   _ScrollSnapshot? _pageTurnOriginSnapshot;
   final GlobalKey _currentPageBoundaryKey = GlobalKey();
-  final GlobalKey _incomingPageBoundaryKey = GlobalKey();
+  final GlobalKey _reversePageBoundaryKey = GlobalKey();
   ui.Image? _pageTurnSnapshot;
   Future<bool>? _pageTurnSnapshotCapture;
   int _pageTurnSnapshotSerial = 0;
-  ui.Image? _incomingPageSnapshot;
-  Future<bool>? _incomingPageSnapshotCapture;
-  int _incomingPageSnapshotSerial = 0;
+  ui.Image? _reversePageTurnSnapshot;
+  Future<bool>? _reversePageTurnSnapshotCapture;
+  int _reversePageTurnSnapshotSerial = 0;
   late final List<GlobalKey> _continuousChapterKeys;
   int _continuousAnchorChapterIndex = 0;
   final Map<int, double> _continuousChapterStarts = <int, double>{};
@@ -111,6 +112,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   double? _pendingContinuousProgress;
   _SimulationPageTarget? _simulationPageTarget;
   ScrollController? _simulationPreviewController;
+  ScrollController? _simulationPaperBackController;
   late final ValueNotifier<int?> _wordCountNotifier;
   late final ValueNotifier<List<int>?> _chapterWordCountsNotifier;
   late final ValueNotifier<double> _visibleProgressNotifier;
@@ -521,6 +523,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pendingScrollOffset = null;
     _pendingScrollProgress = null;
     _preferPendingScrollProgress = false;
+    _finishReadingModeReload();
+  }
+
+  void _finishReadingModeReload() {
+    if (!_readingModeReloading || !mounted) return;
+    setState(() => _readingModeReloading = false);
   }
 
   double _alignSimulationOffset(double offset, {double? maxExtent}) {
@@ -569,6 +577,8 @@ class _ReaderScreenState extends State<ReaderScreen>
           !_scrollController.position.hasContentDimensions) {
         if (attempt < 20) {
           _restoreContinuousPosition(serial, attempt + 1);
+        } else {
+          _finishReadingModeReload();
         }
         return;
       }
@@ -576,6 +586,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (extent == null || !extent.isFinite || extent <= 0) {
         if (attempt < 20) {
           _restoreContinuousPosition(serial, attempt + 1);
+        } else {
+          _finishReadingModeReload();
         }
         return;
       }
@@ -593,6 +605,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
       final snapshot = _continuousSnapshotForChapter(_chapterIndex);
       _recordCurrentChapterPosition(snapshot);
+      _finishReadingModeReload();
     });
   }
 
@@ -722,11 +735,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     _settingsApplyTimer?.cancel();
     if (!_closingReader) unawaited(_saveProgress());
     _discardPageTurnSnapshot();
+    _discardReversePageTurnSnapshot();
     _wordCountNotifier.dispose();
     _chapterWordCountsNotifier.dispose();
     _visibleProgressNotifier.dispose();
     _pageTurnController.dispose();
     _pageDragOffsetNotifier.dispose();
+    _selectionBlockedNotifier.dispose();
     _scrollController.removeListener(_scheduleProgressSave);
     _scrollController.dispose();
     final adjacentControllers = _adjacentScrollControllers.values.toSet();
@@ -736,6 +751,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       controller.dispose();
     }
     _simulationPreviewController?.dispose();
+    _simulationPaperBackController?.dispose();
     _showLibrarySystemBars();
     super.dispose();
   }
@@ -933,7 +949,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       RenderRepaintBoundary? boundary;
       // A setting or menu rebuild may leave the repaint boundary dirty for one
       // frame. Wait for paint instead of permanently blocking every drag.
-      for (var attempt = 0; attempt < 3; attempt++) {
+      for (var attempt = 0; attempt < 8; attempt++) {
         if (!mounted ||
             serial != _pageTurnSnapshotSerial ||
             chapterIndex != _chapterIndex ||
@@ -985,71 +1001,66 @@ class _ReaderScreenState extends State<ReaderScreen>
     final image = _pageTurnSnapshot;
     _pageTurnSnapshot = null;
     image?.dispose();
-    _discardIncomingPageSnapshot();
   }
 
-  void _scheduleIncomingPageSnapshotCapture(_SimulationPageTarget target) {
+  void _scheduleReversePageTurnSnapshotCapture(_SimulationPageTarget target) {
     if (target.goingNext ||
-        _incomingPageSnapshot != null ||
-        _incomingPageSnapshotCapture != null) {
+        _settings.readingMode != ReaderReadingMode.simulation ||
+        _settings.simulationPageTurnEffect !=
+            SimulationPageTurnEffect.simulation) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final activeTarget = _simulationPageTarget;
-      if (activeTarget == null ||
-          activeTarget.goingNext ||
-          !activeTarget.matches(target)) {
+      final currentTarget = _simulationPageTarget;
+      if (currentTarget == null ||
+          currentTarget.goingNext ||
+          !currentTarget.matches(target)) {
         return;
       }
-      unawaited(_captureIncomingPageSnapshot(target));
+      unawaited(_captureReversePageTurnSnapshot(target));
     });
   }
 
-  Future<bool> _captureIncomingPageSnapshot(_SimulationPageTarget target) {
-    if (!mounted ||
-        target.goingNext ||
-        _settings.readingMode != ReaderReadingMode.simulation ||
-        _settings.simulationPageTurnEffect !=
-            SimulationPageTurnEffect.simulation) {
+  Future<bool> _captureReversePageTurnSnapshot(_SimulationPageTarget target) {
+    if (!mounted || target.goingNext) return Future<bool>.value(false);
+    final currentTarget = _simulationPageTarget;
+    if (currentTarget == null || !currentTarget.matches(target)) {
       return Future<bool>.value(false);
     }
-    if (_incomingPageSnapshot != null) return Future<bool>.value(true);
-    final existing = _incomingPageSnapshotCapture;
+    if (_reversePageTurnSnapshot != null) return Future<bool>.value(true);
+    final existing = _reversePageTurnSnapshotCapture;
     if (existing != null) return existing;
 
-    final serial = ++_incomingPageSnapshotSerial;
+    final serial = ++_reversePageTurnSnapshotSerial;
     late final Future<bool> operation;
-    operation = _performIncomingPageSnapshotCapture(serial, target)
+    operation = _performReversePageTurnSnapshotCapture(serial, target)
         .whenComplete(() {
-          if (identical(_incomingPageSnapshotCapture, operation)) {
-            _incomingPageSnapshotCapture = null;
+          if (identical(_reversePageTurnSnapshotCapture, operation)) {
+            _reversePageTurnSnapshotCapture = null;
           }
         });
-    _incomingPageSnapshotCapture = operation;
+    _reversePageTurnSnapshotCapture = operation;
     return operation;
   }
 
-  Future<bool> _performIncomingPageSnapshotCapture(
+  Future<bool> _performReversePageTurnSnapshotCapture(
     int serial,
     _SimulationPageTarget target,
   ) async {
     try {
       final pixelRatio = math.min(MediaQuery.devicePixelRatioOf(context), 1.5);
       RenderRepaintBoundary? boundary;
-      for (var attempt = 0; attempt < 3; attempt++) {
-        final activeTarget = _simulationPageTarget;
+      for (var attempt = 0; attempt < 8; attempt++) {
+        final currentTarget = _simulationPageTarget;
         if (!mounted ||
-            serial != _incomingPageSnapshotSerial ||
-            activeTarget == null ||
-            activeTarget.goingNext ||
-            !activeTarget.matches(target) ||
-            _settings.readingMode != ReaderReadingMode.simulation ||
-            _settings.simulationPageTurnEffect !=
-                SimulationPageTurnEffect.simulation) {
+            serial != _reversePageTurnSnapshotSerial ||
+            currentTarget == null ||
+            currentTarget.goingNext ||
+            !currentTarget.matches(target)) {
           return false;
         }
-        final renderObject = _incomingPageBoundaryKey.currentContext
+        final renderObject = _reversePageBoundaryKey.currentContext
             ?.findRenderObject();
         if (renderObject is RenderRepaintBoundary &&
             !renderObject.debugNeedsPaint) {
@@ -1062,32 +1073,34 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (boundary == null) return false;
 
       final image = await boundary.toImage(pixelRatio: pixelRatio);
-      final activeTarget = _simulationPageTarget;
+      final currentTarget = _simulationPageTarget;
       if (!mounted ||
-          serial != _incomingPageSnapshotSerial ||
-          activeTarget == null ||
-          activeTarget.goingNext ||
-          !activeTarget.matches(target)) {
+          serial != _reversePageTurnSnapshotSerial ||
+          currentTarget == null ||
+          currentTarget.goingNext ||
+          !currentTarget.matches(target)) {
         image.dispose();
         return false;
       }
-      final previousImage = _incomingPageSnapshot;
-      _incomingPageSnapshot = image;
+      final previousImage = _reversePageTurnSnapshot;
+      _reversePageTurnSnapshot = image;
       previousImage?.dispose();
       setState(() {});
       return true;
     } on Object catch (error, stackTrace) {
-      debugPrint('Failed to capture the incoming previous page: $error');
+      debugPrint(
+        'Failed to capture the previous page for reverse turn: $error',
+      );
       debugPrintStack(stackTrace: stackTrace);
       return false;
     }
   }
 
-  void _discardIncomingPageSnapshot() {
-    _incomingPageSnapshotSerial++;
-    _incomingPageSnapshotCapture = null;
-    final image = _incomingPageSnapshot;
-    _incomingPageSnapshot = null;
+  void _discardReversePageTurnSnapshot() {
+    _reversePageTurnSnapshotSerial++;
+    _reversePageTurnSnapshotCapture = null;
+    final image = _reversePageTurnSnapshot;
+    _reversePageTurnSnapshot = null;
     image?.dispose();
   }
 
@@ -1116,8 +1129,11 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _resetPageDrag({bool rebuild = true}) {
     _clearSimulationTurnPointer();
+    _setTextSelectionBlocked(false);
     final simulationPreview = _simulationPreviewController;
+    final simulationPaperBack = _simulationPaperBackController;
     _simulationPreviewController = null;
+    _simulationPaperBackController = null;
     _simulationPageTarget = null;
     _pageTurnController.stop();
     _pageTurnAnimation = null;
@@ -1126,15 +1142,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageTurnOriginSnapshot = null;
     _setPageDragOffset(0);
     _discardPageTurnSnapshot();
+    _discardReversePageTurnSnapshot();
     if (!mounted) return;
     if (rebuild) {
       setState(() => _pageDragTargetIndex = null);
     } else {
       _pageDragTargetIndex = null;
     }
-    if (simulationPreview != null) {
+    if (simulationPreview != null || simulationPaperBack != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        simulationPreview.dispose();
+        simulationPreview?.dispose();
+        simulationPaperBack?.dispose();
       });
     }
     _scheduleSimulationSnapshotWarmup();
@@ -1164,14 +1182,27 @@ class _ReaderScreenState extends State<ReaderScreen>
       final rebuildsContinuous =
           previousMode == ReaderReadingMode.continuous ||
           pending.readingMode == ReaderReadingMode.continuous;
+      final rebuildsSimulation =
+          modeChanged &&
+          (previousMode == ReaderReadingMode.simulation ||
+              pending.readingMode == ReaderReadingMode.simulation);
+      final rebuildsReadingController =
+          rebuildsContinuous || rebuildsSimulation;
       final progress = _recordCurrentChapterPosition(snapshot);
       _enqueueProgressSave(progress);
       _resetPageDrag(rebuild: false);
 
-      if (rebuildsContinuous) {
+      if (rebuildsReadingController) {
         final previousController = _scrollController;
         previousController.removeListener(_scheduleProgressSave);
-        final nextController = _createScrollController(snapshot.offset);
+        // Simulation and the scrolling modes use different viewport and
+        // padding models. Reusing a ScrollPosition across those layouts lets
+        // Flutter reinterpret old pixels as a different page. Build a fresh
+        // controller at zero and restore the normalized chapter position only
+        // after the target layout has reported its own dimensions.
+        final nextController = _createScrollController(
+          rebuildsSimulation ? 0 : snapshot.offset,
+        );
         final adjacentControllers = _adjacentScrollControllers.values.toSet();
         _adjacentScrollControllers.clear();
         _adjacentScrollRestoreSerials.clear();
@@ -1182,6 +1213,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           _scrollController = nextController;
           _warmAdjacentPages = false;
           _pageDragTargetIndex = null;
+          _readingModeReloading = rebuildsSimulation;
         });
         WidgetsBinding.instance.addPostFrameCallback((_) {
           previousController.dispose();
@@ -1334,8 +1366,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     final previousAdjacentControllers = _adjacentScrollControllers.values
         .toSet();
     final previousSimulationPreview = _simulationPreviewController;
+    final previousSimulationPaperBack = _simulationPaperBackController;
     _simulationPreviewController = null;
+    _simulationPaperBackController = null;
     _simulationPageTarget = null;
+    _discardReversePageTurnSnapshot();
     _adjacentScrollControllers.clear();
     _adjacentScrollRestoreSerials.clear();
 
@@ -1354,6 +1389,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         controller.dispose();
       }
       previousSimulationPreview?.dispose();
+      previousSimulationPaperBack?.dispose();
     });
     _setPageDragOffset(0);
     _scheduleAdjacentWarmup();
@@ -1451,17 +1487,12 @@ class _ReaderScreenState extends State<ReaderScreen>
             travel.dx.abs() > travel.dy.abs() * 1.15) {
           _simulationTurnActive = true;
           _readingTapMoved = true;
-          _beginHorizontalPageTurn(event.localPosition);
-          _updateHorizontalPageTurn(
-            deltaX: travel.dx,
-            localPosition: event.localPosition,
-            width: width,
-          );
+          _beginHorizontalPageTurn();
+          _updateHorizontalPageTurn(deltaX: travel.dx, width: width);
         } else if (_simulationTurnActive) {
           _readingTapMoved = true;
           _updateHorizontalPageTurn(
             deltaX: event.localPosition.dx - lastPosition.dx,
-            localPosition: event.localPosition,
             width: width,
           );
         }
@@ -1529,13 +1560,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     _readingTapMoved = false;
   }
 
-  void _handleHorizontalDragStart(DragStartDetails details) {
-    _beginHorizontalPageTurn(details.localPosition);
+  void _handleHorizontalDragStart(DragStartDetails _) {
+    _beginHorizontalPageTurn();
   }
 
-  void _beginHorizontalPageTurn(Offset localPosition) {
+  void _beginHorizontalPageTurn() {
     if (_settings.readingMode == ReaderReadingMode.continuous) return;
-    _pageCurlAnchorY = localPosition.dy;
+    _setTextSelectionBlocked(true);
     if (_pageTurnController.isAnimating) {
       final targetIndex = _pageDragTargetIndex;
       final simulationTarget = _simulationPageTarget;
@@ -1572,16 +1603,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleHorizontalDragUpdate(DragUpdateDetails details, double width) {
-    _updateHorizontalPageTurn(
-      deltaX: details.delta.dx,
-      localPosition: details.localPosition,
-      width: width,
-    );
+    _updateHorizontalPageTurn(deltaX: details.delta.dx, width: width);
   }
 
   void _updateHorizontalPageTurn({
     required double deltaX,
-    required Offset localPosition,
     required double width,
   }) {
     if (width <= 0 || _settings.readingMode == ReaderReadingMode.continuous) {
@@ -1593,7 +1619,6 @@ class _ReaderScreenState extends State<ReaderScreen>
         _pageTurnSnapshot == null) {
       unawaited(_capturePageTurnSnapshot());
     }
-    _pageCurlAnchorY = localPosition.dy;
     final proposed = (_pageDragOffset + deltaX).clamp(-width, width);
 
     if (_settings.readingMode == ReaderReadingMode.simulation) {
@@ -1706,32 +1731,45 @@ class _ReaderScreenState extends State<ReaderScreen>
     final sameTarget =
         current != null && target != null && current.matches(target);
     if (sameTarget && (!hideOverlay || !_showOverlay)) {
-      if (!target.goingNext) _scheduleIncomingPageSnapshotCapture(target);
       return;
     }
 
-    if (!sameTarget) _discardIncomingPageSnapshot();
-
     final previousController = _simulationPreviewController;
+    final previousPaperBackController = _simulationPaperBackController;
     ScrollController? nextController;
+    ScrollController? nextPaperBackController;
     if (target != null && target.chapterIndex == _chapterIndex) {
       nextController = ScrollController(
         initialScrollOffset: target.offset,
         keepScrollOffset: false,
       );
     }
+    if (target != null &&
+        _settings.simulationPageTurnEffect ==
+            SimulationPageTurnEffect.simulation) {
+      final movingPageOffset = target.goingNext
+          ? (_pageTurnOriginSnapshot ?? _currentScrollSnapshot()).offset
+          : target.offset;
+      nextPaperBackController = ScrollController(
+        initialScrollOffset: math.max(0.0, movingPageOffset),
+        keepScrollOffset: false,
+      );
+    }
+    _discardReversePageTurnSnapshot();
     _simulationPreviewController = nextController;
+    _simulationPaperBackController = nextPaperBackController;
     setState(() {
       _simulationPageTarget = target;
       if (hideOverlay) _showOverlay = false;
     });
     if (hideOverlay) _hideStatusBarForReader();
     if (target != null && !target.goingNext) {
-      _scheduleIncomingPageSnapshotCapture(target);
+      _scheduleReversePageTurnSnapshotCapture(target);
     }
-    if (previousController != null) {
+    if (previousController != null || previousPaperBackController != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        previousController.dispose();
+        previousController?.dispose();
+        previousPaperBackController?.dispose();
       });
     }
   }
@@ -1796,13 +1834,13 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _finishPageTurn(int targetIndex) {
+    _setTextSelectionBlocked(false);
     _switchChapter(targetIndex, startAtTop: false);
   }
 
   void _finishSimulationPageTurn(_SimulationPageTarget target) {
+    _setTextSelectionBlocked(false);
     if (target.chapterIndex != _chapterIndex) {
-      _simulationPageTarget = null;
-      _simulationPreviewController = null;
       _switchChapter(target.chapterIndex, startAtTop: false);
       return;
     }
@@ -1817,26 +1855,40 @@ class _ReaderScreenState extends State<ReaderScreen>
         .clamp(position.minScrollExtent, position.maxScrollExtent)
         .toDouble();
     final previousPreview = _simulationPreviewController;
-    _simulationPreviewController = null;
-    _simulationPageTarget = null;
-    _discardPageTurnSnapshot();
-    _pageTurnAnimation = null;
-    _commitPageTurnWhenSettled = false;
-    _pageDragTargetIndex = null;
-    _setPageDragOffset(0);
+    final previousPaperBack = _simulationPaperBackController;
+    // Commit the active controller to the exact preview offset while the
+    // preview sheet still covers the screen. Clearing the drag first exposes
+    // the old page for a frame and makes the ListView appear to reload.
     if ((position.pixels - targetOffset).abs() > 0.5) {
       _scrollController.jumpTo(targetOffset);
     }
     final snapshot = _currentScrollSnapshot();
     final progress = _recordCurrentChapterPosition(snapshot);
-    setState(() {});
+    setState(() {
+      _simulationPreviewController = null;
+      _simulationPaperBackController = null;
+      _simulationPageTarget = null;
+      _pageTurnAnimation = null;
+      _commitPageTurnWhenSettled = false;
+      _pageDragTargetIndex = null;
+    });
+    _setPageDragOffset(0);
+    _discardPageTurnSnapshot();
+    _discardReversePageTurnSnapshot();
     _enqueueProgressSave(progress);
-    if (previousPreview != null) {
+    if (previousPreview != null || previousPaperBack != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        previousPreview.dispose();
+        previousPreview?.dispose();
+        previousPaperBack?.dispose();
       });
     }
     _scheduleSimulationSnapshotWarmup();
+  }
+
+  void _setTextSelectionBlocked(bool blocked) {
+    if (blocked) ContextMenuController.removeAny();
+    if (_selectionBlockedNotifier.value == blocked) return;
+    _selectionBlockedNotifier.value = blocked;
   }
 
   void _showChapterList() {
@@ -2085,17 +2137,30 @@ class _ReaderScreenState extends State<ReaderScreen>
                       duration: AppMotion.normal,
                       curve: AppMotion.standard,
                       color: themeColors.background,
-                      child: ClipRect(
-                        child: _buildReadingModeView(
-                          width: width,
-                          height: constraints.maxHeight,
-                          themeColors: themeColors,
-                          fontFamily: fontFamily,
-                          viewPadding: viewPadding.copyWith(
-                            top: stableTopInset,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          ClipRect(
+                            child: _buildReadingModeView(
+                              width: width,
+                              height: constraints.maxHeight,
+                              themeColors: themeColors,
+                              fontFamily: fontFamily,
+                              viewPadding: viewPadding.copyWith(
+                                top: stableTopInset,
+                              ),
+                              horizontalPadding: horizontalPadding,
+                            ),
                           ),
-                          horizontalPadding: horizontalPadding,
-                        ),
+                          if (_readingModeReloading)
+                            Positioned.fill(
+                              child: AbsorbPointer(
+                                child: ColoredBox(
+                                  color: themeColors.background,
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                   ),
@@ -2443,6 +2508,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         color: themeColors.background,
         child: _DoubleTapFilteredSelectionArea(
           colors: themeColors,
+          selectionBlocked: _selectionBlockedNotifier,
           child: CustomScrollView(
             key: ValueKey(
               'continuous-$_continuousAnchorChapterIndex-${_settings.fontSize}-${_settings.lineHeight}',
@@ -2494,11 +2560,6 @@ class _ReaderScreenState extends State<ReaderScreen>
           _chapterIndex - 1,
           overrideProgress: 1,
         ),
-        repaintBoundaryKey:
-            target?.goingNext == false &&
-                target?.chapterIndex == _chapterIndex - 1
-            ? _incomingPageBoundaryKey
-            : null,
         physics: pagePhysics,
         simulationPage: true,
       );
@@ -2531,9 +2592,6 @@ class _ReaderScreenState extends State<ReaderScreen>
             viewPadding: viewPadding,
             horizontalPadding: horizontalPadding,
             controller: controller,
-            repaintBoundaryKey: target.goingNext
-                ? null
-                : _incomingPageBoundaryKey,
             physics: pagePhysics,
             simulationPage: true,
           );
@@ -2555,17 +2613,36 @@ class _ReaderScreenState extends State<ReaderScreen>
         : target == null
         ? nextBoundaryPage
         : null;
+    Widget? paperBackPage;
+    final paperBackController = _simulationPaperBackController;
+    if (target != null && paperBackController != null) {
+      final movingChapter = target.goingNext
+          ? _currentChapter
+          : _book.chapters[target.chapterIndex];
+      paperBackPage = _buildChapterPage(
+        chapter: movingChapter,
+        themeColors: themeColors,
+        fontFamily: fontFamily,
+        viewPadding: viewPadding,
+        horizontalPadding: horizontalPadding,
+        controller: paperBackController,
+        repaintBoundaryKey: target.goingNext ? null : _reversePageBoundaryKey,
+        physics: pagePhysics,
+        simulationPage: true,
+      );
+    }
 
     return ValueListenableBuilder<double>(
       valueListenable: _pageDragOffsetNotifier,
       builder: (context, offset, _) {
         return switch (_settings.simulationPageTurnEffect) {
-          SimulationPageTurnEffect.simulation => _buildCurledBookTurnPages(
+          SimulationPageTurnEffect.simulation => _buildStraightBookTurnPages(
             width: width,
             dragOffset: offset,
             currentPage: currentPage,
             previousPage: previousPage,
             nextPage: nextPage,
+            paperBackPage: paperBackPage,
             themeColors: themeColors,
           ),
           SimulationPageTurnEffect.smooth => _buildSmoothTurnPages(
@@ -2616,12 +2693,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  Widget _buildCurledBookTurnPages({
+  Widget _buildStraightBookTurnPages({
     required double width,
     required double dragOffset,
     required Widget currentPage,
     required Widget? previousPage,
     required Widget? nextPage,
+    required Widget? paperBackPage,
     required ReaderThemeColors themeColors,
   }) {
     final progress = (dragOffset.abs() / width).clamp(0.0, 1.0);
@@ -2631,13 +2709,26 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!hasTarget) {
       return currentPage;
     }
-
-    final direction = goingNext
-        ? _LeafTurnDirection.forward
-        : _LeafTurnDirection.previousCover;
+    final resolvedTargetPage = targetPage;
+    final leafProgress = goingNext ? progress : 1 - progress;
+    final geometry = _StraightLeafGeometry.calculate(
+      size: Size(width, 1),
+      progress: leafProgress,
+    );
+    final movingPage = goingNext ? currentPage : resolvedTargetPage;
     final paperBackSnapshot = goingNext
         ? _pageTurnSnapshot
-        : _incomingPageSnapshot;
+        : _reversePageTurnSnapshot;
+    final paperBackSource = paperBackSnapshot != null
+        ? RawImage(
+            image: paperBackSnapshot,
+            fit: BoxFit.fill,
+            filterQuality: FilterQuality.high,
+          )
+        : paperBackPage;
+    final inkTransmission = themeColors.background.computeLuminance() < 0.25
+        ? 0.46
+        : 0.38;
 
     return Stack(
       fit: StackFit.expand,
@@ -2645,44 +2736,60 @@ class _ReaderScreenState extends State<ReaderScreen>
         if (goingNext)
           KeyedSubtree(
             key: const ValueKey('physical-next-page'),
-            child: _inactivePage(targetPage),
+            child: _inactivePage(resolvedTargetPage),
           )
         else
           KeyedSubtree(
             key: const ValueKey('physical-current-page-base'),
             child: currentPage,
           ),
-        if (goingNext)
-          KeyedSubtree(
-            key: const ValueKey('physical-forward-sheet'),
-            child: ClipPath(
-              clipper: _ForwardLeafFrontClipper(
-                progress: progress,
-                curlAnchorY: _pageCurlAnchorY,
+        KeyedSubtree(
+          key: ValueKey(
+            goingNext
+                ? 'physical-forward-sheet'
+                : 'physical-reversed-forward-sheet',
+          ),
+          child: ClipPath(
+            clipper: _StraightLeafFrontClipper(progress: leafProgress),
+            child: goingNext ? movingPage : _inactivePage(movingPage),
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: CustomPaint(
+              painter: _StraightPaperPainter(
+                progress: leafProgress,
+                pageColor: themeColors.background,
+                layer: _StraightPaperPaintLayer.base,
               ),
-              child: currentPage,
             ),
-          )
-        else
-          KeyedSubtree(
-            key: const ValueKey('physical-previous-sheet-cover'),
-            child: ClipPath(
-              clipper: _PreviousLeafFrontClipper(
-                progress: progress,
-                curlAnchorY: _pageCurlAnchorY,
+          ),
+        ),
+        if (paperBackSource != null)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: ClipPath(
+                clipper: _StraightLeafBackClipper(progress: leafProgress),
+                child: Transform.translate(
+                  offset: Offset(geometry.creaseX * 2 - width, 0),
+                  child: Transform.flip(
+                    flipX: true,
+                    child: Opacity(
+                      opacity: inkTransmission,
+                      child: _inactivePage(paperBackSource),
+                    ),
+                  ),
+                ),
               ),
-              child: _inactivePage(targetPage),
             ),
           ),
         Positioned.fill(
           child: IgnorePointer(
             child: CustomPaint(
-              painter: _BookLeafCurlPainter(
-                progress: progress,
-                direction: direction,
+              painter: _StraightPaperPainter(
+                progress: leafProgress,
                 pageColor: themeColors.background,
-                curlAnchorY: _pageCurlAnchorY,
-                paperBackSnapshot: paperBackSnapshot,
+                layer: _StraightPaperPaintLayer.lighting,
               ),
             ),
           ),
@@ -2715,7 +2822,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final itemCount = paragraphs.length + 2;
     final scrollView = ListView.builder(
       key: ValueKey<String>(
-        'chapter-${identityHashCode(chapter)}-${controller != null}',
+        'chapter-${identityHashCode(chapter)}-controller-${identityHashCode(controller)}-${simulationPage ? 'simulation' : 'scroll'}',
       ),
       controller: controller,
       primary: false,
@@ -2799,6 +2906,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     Widget readingContent = _DoubleTapFilteredSelectionArea(
       colors: themeColors,
+      selectionBlocked: _selectionBlockedNotifier,
       child: scrollView,
     );
     if (simulationPage) {
@@ -2931,10 +3039,12 @@ class _ReaderScreenState extends State<ReaderScreen>
 class _DoubleTapFilteredSelectionArea extends StatefulWidget {
   final Widget child;
   final ReaderThemeColors colors;
+  final ValueListenable<bool> selectionBlocked;
 
   const _DoubleTapFilteredSelectionArea({
     required this.child,
     required this.colors,
+    required this.selectionBlocked,
   });
 
   @override
@@ -2975,6 +3085,37 @@ class _DoubleTapFilteredSelectionAreaState
   bool _clearScheduled = false;
   SelectedContent? _selectedContent;
   Timer? _suppressionTimer;
+  bool _externallyBlocked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _externallyBlocked = widget.selectionBlocked.value;
+    widget.selectionBlocked.addListener(_handleSelectionBlockChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _DoubleTapFilteredSelectionArea oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (identical(oldWidget.selectionBlocked, widget.selectionBlocked)) return;
+    oldWidget.selectionBlocked.removeListener(_handleSelectionBlockChanged);
+    _externallyBlocked = widget.selectionBlocked.value;
+    widget.selectionBlocked.addListener(_handleSelectionBlockChanged);
+    _handleSelectionBlockChanged();
+  }
+
+  void _handleSelectionBlockChanged() {
+    _externallyBlocked = widget.selectionBlocked.value;
+    if (!_externallyBlocked) return;
+    _selectedContent = null;
+    ContextMenuController.removeAny();
+    _selectionAreaKey.currentState?.selectableRegion.clearSelection();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_externallyBlocked) return;
+      ContextMenuController.removeAny();
+      _selectionAreaKey.currentState?.selectableRegion.clearSelection();
+    });
+  }
 
   void _handlePointerDown(PointerDownEvent event) {
     if (_pointer != null) return;
@@ -3045,11 +3186,17 @@ class _DoubleTapFilteredSelectionAreaState
 
   void _handleSelectionChanged(SelectedContent? content) {
     _selectedContent = content;
-    if (content == null || !_suppressSelection || _clearScheduled) return;
+    if (content == null ||
+        (!_suppressSelection && !_externallyBlocked) ||
+        _clearScheduled) {
+      return;
+    }
     _clearScheduled = true;
     scheduleMicrotask(() {
       _clearScheduled = false;
-      if (!mounted || !_suppressSelection) return;
+      if (!mounted || (!_suppressSelection && !_externallyBlocked)) return;
+      ContextMenuController.removeAny();
+      _selectedContent = null;
       _selectionAreaKey.currentState?.selectableRegion.clearSelection();
     });
   }
@@ -3475,6 +3622,7 @@ class _DoubleTapFilteredSelectionAreaState
   }
 
   Widget _buildContextMenu(BuildContext context, SelectableRegionState state) {
+    if (_externallyBlocked) return const SizedBox.shrink();
     final defaults = state.contextMenuButtonItems;
     final copy = _buttonOfType(defaults, ContextMenuButtonType.copy);
     final share = _buttonOfType(defaults, ContextMenuButtonType.share);
@@ -3516,6 +3664,7 @@ class _DoubleTapFilteredSelectionAreaState
 
   @override
   void dispose() {
+    widget.selectionBlocked.removeListener(_handleSelectionBlockChanged);
     _suppressionTimer?.cancel();
     super.dispose();
   }
@@ -3572,70 +3721,47 @@ class _ScrollSnapshot {
   const _ScrollSnapshot({required this.offset, required this.progress});
 }
 
-enum _LeafTurnDirection { forward, previousCover }
+enum _StraightPaperPaintLayer { base, lighting }
 
-class _ForwardLeafFrontClipper extends CustomClipper<Path> {
+class _StraightLeafFrontClipper extends CustomClipper<Path> {
   final double progress;
-  final double curlAnchorY;
 
-  const _ForwardLeafFrontClipper({
-    required this.progress,
-    required this.curlAnchorY,
-  });
+  const _StraightLeafFrontClipper({required this.progress});
 
   @override
-  Path getClip(Size size) => _ForwardLeafGeometry.calculate(
-    size: size,
-    progress: progress,
-    curlAnchorY: curlAnchorY,
-  ).frontPath;
+  Path getClip(Size size) =>
+      _StraightLeafGeometry.calculate(size: size, progress: progress).frontPath;
 
   @override
-  bool shouldReclip(covariant _ForwardLeafFrontClipper oldClipper) {
-    return oldClipper.progress != progress ||
-        oldClipper.curlAnchorY != curlAnchorY;
+  bool shouldReclip(covariant _StraightLeafFrontClipper oldClipper) {
+    return oldClipper.progress != progress;
   }
 }
 
-/// The previous leaf is constructed as an incoming sheet from the left. It is
-/// deliberately not the forward leaf played backwards: the current page stays
-/// still underneath while the previous page's front settles over it.
-class _PreviousLeafFrontClipper extends CustomClipper<Path> {
+class _StraightLeafBackClipper extends CustomClipper<Path> {
   final double progress;
-  final double curlAnchorY;
 
-  const _PreviousLeafFrontClipper({
-    required this.progress,
-    required this.curlAnchorY,
-  });
+  const _StraightLeafBackClipper({required this.progress});
 
   @override
-  Path getClip(Size size) => _PreviousLeafCoverGeometry.calculate(
-    size: size,
-    progress: progress,
-    curlAnchorY: curlAnchorY,
-  ).frontPath;
+  Path getClip(Size size) =>
+      _StraightLeafGeometry.calculate(size: size, progress: progress).backPath;
 
   @override
-  bool shouldReclip(covariant _PreviousLeafFrontClipper oldClipper) {
-    return oldClipper.progress != progress ||
-        oldClipper.curlAnchorY != curlAnchorY;
+  bool shouldReclip(covariant _StraightLeafBackClipper oldClipper) {
+    return oldClipper.progress != progress;
   }
 }
 
-class _BookLeafCurlPainter extends CustomPainter {
+class _StraightPaperPainter extends CustomPainter {
   final double progress;
-  final _LeafTurnDirection direction;
   final Color pageColor;
-  final double curlAnchorY;
-  final ui.Image? paperBackSnapshot;
+  final _StraightPaperPaintLayer layer;
 
-  const _BookLeafCurlPainter({
+  const _StraightPaperPainter({
     required this.progress,
-    required this.direction,
     required this.pageColor,
-    required this.curlAnchorY,
-    required this.paperBackSnapshot,
+    required this.layer,
   });
 
   @override
@@ -3643,433 +3769,115 @@ class _BookLeafCurlPainter extends CustomPainter {
     if (size.isEmpty) return;
     final p = progress.clamp(0.0, 1.0).toDouble();
     if (p <= 0 || p >= 1) return;
-    final geometry = direction == _LeafTurnDirection.forward
-        ? _ForwardLeafGeometry.calculate(
-            size: size,
-            progress: p,
-            curlAnchorY: curlAnchorY,
-          )
-        : _PreviousLeafCoverGeometry.calculate(
-            size: size,
-            progress: p,
-            curlAnchorY: curlAnchorY,
-          );
-    final strength = geometry.curlStrength;
-    if (strength <= 0.001) return;
-
-    _paintLeafShadow(canvas, geometry, strength);
-    _paintFrontCreaseShade(canvas, geometry, strength);
-    canvas.drawShadow(
-      geometry.backPath,
-      Colors.black.withValues(alpha: 0.34 * strength),
-      10 + 16 * strength,
-      false,
+    final geometry = _StraightLeafGeometry.calculate(size: size, progress: p);
+    final strength = geometry.foldStrength;
+    final visibleBounds = geometry.backPath.getBounds().intersect(
+      Offset.zero & size,
     );
-    _paintPaperBack(canvas, size, geometry, strength);
-  }
-
-  void _paintLeafShadow(
-    Canvas canvas,
-    _BookLeafGeometry geometry,
-    double strength,
-  ) {
-    canvas.drawPath(
-      geometry.outerEdgePath,
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.24 * strength)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 16 + 12 * strength
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
-    );
-  }
-
-  void _paintFrontCreaseShade(
-    Canvas canvas,
-    _BookLeafGeometry geometry,
-    double strength,
-  ) {
-    canvas
-      ..save()
-      ..clipPath(geometry.frontPath)
-      ..drawPath(
-        geometry.creasePath,
-        Paint()
-          ..color = Colors.black.withValues(alpha: 0.15 * strength)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 18 + 16 * strength
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 11),
-      )
-      ..restore();
-  }
-
-  void _paintPaperBack(
-    Canvas canvas,
-    Size size,
-    _BookLeafGeometry geometry,
-    double strength,
-  ) {
-    final bounds = geometry.backPath.getBounds().intersect(Offset.zero & size);
-    if (bounds.width <= 0.1 || bounds.height <= 0.1) return;
+    if (visibleBounds.width <= 0.1) return;
 
     final isDarkPage = pageColor.computeLuminance() < 0.25;
-    final paper = Color.lerp(
-      pageColor,
-      Colors.white,
-      isDarkPage ? 0.025 : 0.06,
-    )!;
-    canvas.drawPath(geometry.backPath, Paint()..color = paper);
-
-    final snapshot = paperBackSnapshot;
-    if (snapshot != null) {
-      // Reflect the actual rendered page around the diagonal fold chord. The
-      // snapshot contains the live header, title, body, font, theme and exact
-      // scroll offset, so the reverse side carries the ink from this leaf
-      // instead of a decorative placeholder texture.
-      final inkTransmission = isDarkPage ? 0.66 : 0.54;
-      final creaseStart = geometry.creaseStart;
-      final creaseEnd = geometry.creaseEnd;
-      final creaseAngle = math.atan2(
-        creaseEnd.dy - creaseStart.dy,
-        creaseEnd.dx - creaseStart.dx,
-      );
-      canvas
-        ..save()
-        ..clipPath(geometry.backPath)
-        ..translate(creaseStart.dx, creaseStart.dy)
-        ..rotate(creaseAngle)
-        ..scale(1, -1)
-        ..rotate(-creaseAngle)
-        ..translate(-creaseStart.dx, -creaseStart.dy)
-        ..drawImageRect(
-          snapshot,
-          Rect.fromLTWH(
-            0,
-            0,
-            snapshot.width.toDouble(),
-            snapshot.height.toDouble(),
-          ),
-          Offset.zero & size,
-          Paint()
-            ..filterQuality = FilterQuality.high
-            ..colorFilter = ColorFilter.matrix(<double>[
-              1,
-              0,
-              0,
-              0,
-              0,
-              0,
-              1,
-              0,
-              0,
-              0,
-              0,
-              0,
-              1,
-              0,
-              0,
-              0,
-              0,
-              0,
-              inkTransmission,
-              0,
-            ]),
-        )
-        ..restore();
-      canvas.drawPath(
+    if (layer == _StraightPaperPaintLayer.base) {
+      canvas.drawShadow(
         geometry.backPath,
-        Paint()..color = paper.withValues(alpha: isDarkPage ? 0.16 : 0.20),
+        Colors.black.withValues(alpha: 0.30 * strength),
+        12 + 8 * strength,
+        false,
       );
+      final paper = Color.lerp(
+        pageColor,
+        Colors.white,
+        isDarkPage ? 0.02 : 0.045,
+      )!;
+      canvas.drawPath(geometry.backPath, Paint()..color = paper);
+      return;
     }
 
-    final highlightOnLeft = direction == _LeafTurnDirection.previousCover;
     final lighting = LinearGradient(
-      begin: highlightOnLeft ? Alignment.centerRight : Alignment.centerLeft,
-      end: highlightOnLeft ? Alignment.centerLeft : Alignment.centerRight,
       colors: [
-        Colors.black.withValues(alpha: 0.19 * strength),
-        Colors.white.withValues(alpha: 0.24 * strength),
+        Colors.black.withValues(alpha: 0.10 * strength),
+        Colors.white.withValues(alpha: 0.11 * strength),
         Colors.transparent,
-        Colors.black.withValues(alpha: 0.22 * strength),
+        Colors.black.withValues(alpha: 0.14 * strength),
       ],
-      stops: const [0, 0.24, 0.66, 1],
-    ).createShader(bounds);
+      stops: const [0, 0.22, 0.70, 1],
+    ).createShader(visibleBounds);
     canvas
       ..save()
       ..clipPath(geometry.backPath)
-      ..drawRect(bounds, Paint()..shader = lighting)
+      ..drawRect(visibleBounds, Paint()..shader = lighting)
       ..restore();
 
-    canvas.drawPath(
-      geometry.outerEdgePath,
+    canvas.drawLine(
+      Offset(geometry.outerEdgeX, 0),
+      Offset(geometry.outerEdgeX, size.height),
+      Paint()
+        ..color = Colors.black.withValues(alpha: 0.20 * strength)
+        ..strokeWidth = 1.25,
+    );
+    canvas.drawLine(
+      Offset(geometry.creaseX, 0),
+      Offset(geometry.creaseX, size.height),
       Paint()
         ..color = Colors.black.withValues(alpha: 0.18 * strength)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.25,
+        ..strokeWidth = 2
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.8),
     );
-    canvas.drawPath(
-      geometry.creasePath,
+    canvas.drawLine(
+      Offset(geometry.creaseX - 0.75, 0),
+      Offset(geometry.creaseX - 0.75, size.height),
       Paint()
-        ..color = Colors.white.withValues(alpha: 0.34 * strength)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.25,
-    );
-    canvas.drawPath(
-      geometry.creasePath,
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.12 * strength)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 3
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.4),
+        ..color = Colors.white.withValues(alpha: 0.32 * strength)
+        ..strokeWidth = 1,
     );
   }
 
   @override
-  bool shouldRepaint(covariant _BookLeafCurlPainter oldDelegate) {
+  bool shouldRepaint(covariant _StraightPaperPainter oldDelegate) {
     return oldDelegate.progress != progress ||
-        oldDelegate.direction != direction ||
         oldDelegate.pageColor != pageColor ||
-        oldDelegate.curlAnchorY != curlAnchorY ||
-        oldDelegate.paperBackSnapshot != paperBackSnapshot;
+        oldDelegate.layer != layer;
   }
 }
 
-class _BookLeafGeometry {
+class _StraightLeafGeometry {
   final Path frontPath;
   final Path backPath;
-  final Path creasePath;
-  final Path outerEdgePath;
-  final Offset creaseStart;
-  final Offset creaseEnd;
-  final double curlStrength;
+  final double creaseX;
+  final double outerEdgeX;
+  final double foldStrength;
 
-  const _BookLeafGeometry({
+  const _StraightLeafGeometry({
     required this.frontPath,
     required this.backPath,
-    required this.creasePath,
-    required this.outerEdgePath,
-    required this.creaseStart,
-    required this.creaseEnd,
-    required this.curlStrength,
+    required this.creaseX,
+    required this.outerEdgeX,
+    required this.foldStrength,
   });
-}
 
-class _ForwardLeafGeometry {
-  static _BookLeafGeometry calculate({
+  static _StraightLeafGeometry calculate({
     required Size size,
     required double progress,
-    required double curlAnchorY,
   }) {
-    final width = size.width;
-    final height = size.height;
     final p = progress.clamp(0.0, 1.0).toDouble();
-    final curl = _curlEnvelope(p);
-    final anchor = _normalizedCurlAnchor(height, curlAnchorY);
-    final cornerSign = anchor >= 0.5 ? 1.0 : -1.0;
-    final center = width * (1 - p);
-    final anchorBias = ((anchor - 0.5).abs() * 2).clamp(0.0, 1.0);
-    final diagonal = width * (0.20 + 0.10 * anchorBias) * curl;
-    final curve = width * 0.075 * curl;
-
-    double creaseX(double value) => value.clamp(0.0, width).toDouble();
-
-    final creaseTop = Offset(creaseX(center + diagonal * cornerSign), 0);
-    final creaseBottom = Offset(
-      creaseX(center - diagonal * cornerSign),
-      height,
-    );
-    final creaseControlTop = Offset(
-      creaseTop.dx - curve * cornerSign,
-      height * 0.30,
-    );
-    final creaseControlBottom = Offset(
-      creaseBottom.dx + curve * cornerSign,
-      height * 0.70,
-    );
-    final creasePath = Path()
-      ..moveTo(creaseTop.dx, creaseTop.dy)
-      ..cubicTo(
-        creaseControlTop.dx,
-        creaseControlTop.dy,
-        creaseControlBottom.dx,
-        creaseControlBottom.dy,
-        creaseBottom.dx,
-        creaseBottom.dy,
-      );
-    final front = Path()
-      ..moveTo(0, 0)
-      ..lineTo(creaseTop.dx, creaseTop.dy)
-      ..cubicTo(
-        creaseControlTop.dx,
-        creaseControlTop.dy,
-        creaseControlBottom.dx,
-        creaseControlBottom.dy,
-        creaseBottom.dx,
-        creaseBottom.dy,
-      )
-      ..lineTo(0, height)
-      ..close();
-
-    // Reflect the original right edge across the fold. Unlike the old narrow
-    // vertical strip, this produces a broad diagonal reverse side that sweeps
-    // across the screen like a flexible paper leaf.
-    final edgeTop = Offset(creaseTop.dx * 2 - width, 0);
-    final edgeBottom = Offset(creaseBottom.dx * 2 - width, height);
-    final edgeControlTop = Offset(
-      edgeTop.dx + curve * 1.15 * cornerSign,
-      height * 0.30,
-    );
-    final edgeControlBottom = Offset(
-      edgeBottom.dx - curve * 1.15 * cornerSign,
-      height * 0.70,
-    );
-    final outerEdge = Path()
-      ..moveTo(edgeTop.dx, edgeTop.dy)
-      ..cubicTo(
-        edgeControlTop.dx,
-        edgeControlTop.dy,
-        edgeControlBottom.dx,
-        edgeControlBottom.dy,
-        edgeBottom.dx,
-        edgeBottom.dy,
-      );
+    final creaseX = size.width * (1 - p);
+    final outerEdgeX = creaseX * 2 - size.width;
+    final front = Path()..addRect(Rect.fromLTRB(0, 0, creaseX, size.height));
     final back = Path()
-      ..addPath(creasePath, Offset.zero)
-      ..lineTo(edgeBottom.dx, edgeBottom.dy)
-      ..cubicTo(
-        edgeControlBottom.dx,
-        edgeControlBottom.dy,
-        edgeControlTop.dx,
-        edgeControlTop.dy,
-        edgeTop.dx,
-        edgeTop.dy,
-      )
-      ..close();
-
-    return _BookLeafGeometry(
+      ..addRect(
+        Rect.fromLTRB(
+          math.min(outerEdgeX, creaseX),
+          0,
+          math.max(outerEdgeX, creaseX),
+          size.height,
+        ),
+      );
+    return _StraightLeafGeometry(
       frontPath: front,
       backPath: back,
-      creasePath: creasePath,
-      outerEdgePath: outerEdge,
-      creaseStart: creaseTop,
-      creaseEnd: creaseBottom,
-      curlStrength: curl,
+      creaseX: creaseX,
+      outerEdgeX: outerEdgeX,
+      foldStrength: math.sin(math.pi * p).clamp(0.0, 1.0).toDouble(),
     );
   }
-}
-
-class _PreviousLeafCoverGeometry {
-  static _BookLeafGeometry calculate({
-    required Size size,
-    required double progress,
-    required double curlAnchorY,
-  }) {
-    final width = size.width;
-    final height = size.height;
-    final p = progress.clamp(0.0, 1.0).toDouble();
-    final curl = _curlEnvelope(p);
-    final anchor = _normalizedCurlAnchor(height, curlAnchorY);
-    final cornerSign = anchor >= 0.5 ? 1.0 : -1.0;
-    final center = width * p;
-    final anchorBias = ((anchor - 0.5).abs() * 2).clamp(0.0, 1.0);
-    final diagonal = width * (0.20 + 0.10 * anchorBias) * curl;
-    final curve = width * 0.078 * curl;
-
-    double creaseX(double value) => value.clamp(0.0, width).toDouble();
-
-    // This fold leans in the opposite direction from the forward leaf. The
-    // previous page therefore arrives from the left and covers the stationary
-    // current page instead of exposing it with a reversed outgoing animation.
-    final creaseTop = Offset(creaseX(center - diagonal * cornerSign), 0);
-    final creaseBottom = Offset(
-      creaseX(center + diagonal * cornerSign),
-      height,
-    );
-    final creaseControlTop = Offset(
-      creaseTop.dx + curve * cornerSign,
-      height * 0.30,
-    );
-    final creaseControlBottom = Offset(
-      creaseBottom.dx - curve * cornerSign,
-      height * 0.70,
-    );
-    final creasePath = Path()
-      ..moveTo(creaseTop.dx, creaseTop.dy)
-      ..cubicTo(
-        creaseControlTop.dx,
-        creaseControlTop.dy,
-        creaseControlBottom.dx,
-        creaseControlBottom.dy,
-        creaseBottom.dx,
-        creaseBottom.dy,
-      );
-    final front = Path()
-      ..moveTo(0, 0)
-      ..lineTo(creaseTop.dx, creaseTop.dy)
-      ..cubicTo(
-        creaseControlTop.dx,
-        creaseControlTop.dy,
-        creaseControlBottom.dx,
-        creaseControlBottom.dy,
-        creaseBottom.dx,
-        creaseBottom.dy,
-      )
-      ..lineTo(0, height)
-      ..close();
-
-    // The incoming sheet's leading edge is the reflected left edge. At half
-    // turn, its front and translucent back together span the viewport and lie
-    // above the untouched current page.
-    final edgeTop = Offset(creaseTop.dx * 2, 0);
-    final edgeBottom = Offset(creaseBottom.dx * 2, height);
-    final edgeControlTop = Offset(
-      edgeTop.dx - curve * 1.15 * cornerSign,
-      height * 0.30,
-    );
-    final edgeControlBottom = Offset(
-      edgeBottom.dx + curve * 1.15 * cornerSign,
-      height * 0.70,
-    );
-    final outerEdge = Path()
-      ..moveTo(edgeTop.dx, edgeTop.dy)
-      ..cubicTo(
-        edgeControlTop.dx,
-        edgeControlTop.dy,
-        edgeControlBottom.dx,
-        edgeControlBottom.dy,
-        edgeBottom.dx,
-        edgeBottom.dy,
-      );
-    final back = Path()
-      ..addPath(creasePath, Offset.zero)
-      ..lineTo(edgeBottom.dx, edgeBottom.dy)
-      ..cubicTo(
-        edgeControlBottom.dx,
-        edgeControlBottom.dy,
-        edgeControlTop.dx,
-        edgeControlTop.dy,
-        edgeTop.dx,
-        edgeTop.dy,
-      )
-      ..close();
-
-    return _BookLeafGeometry(
-      frontPath: front,
-      backPath: back,
-      creasePath: creasePath,
-      outerEdgePath: outerEdge,
-      creaseStart: creaseTop,
-      creaseEnd: creaseBottom,
-      curlStrength: curl,
-    );
-  }
-}
-
-double _curlEnvelope(double progress) {
-  final wave = math.sin(math.pi * progress).clamp(0.0, 1.0).toDouble();
-  return math.pow(wave, 0.58).toDouble();
-}
-
-double _normalizedCurlAnchor(double height, double curlAnchorY) {
-  if (height <= 0 || !curlAnchorY.isFinite) return 0.62;
-  return (curlAnchorY / height).clamp(0.08, 0.92).toDouble();
 }
