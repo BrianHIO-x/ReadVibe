@@ -22,7 +22,10 @@ class FontService {
       return settings;
     }
     if (!settings.hasImportedFont) {
-      return settings.copyWith(fontFamily: ReaderSettings.systemFontFamily);
+      return settings.copyWith(
+        fontFamily: ReaderSettings.systemFontFamily,
+        clearImportedFont: true,
+      );
     }
 
     try {
@@ -32,7 +35,10 @@ class FontService {
       );
       return settings;
     } on Object {
-      return settings.copyWith(fontFamily: ReaderSettings.systemFontFamily);
+      return settings.copyWith(
+        fontFamily: ReaderSettings.systemFontFamily,
+        clearImportedFont: true,
+      );
     }
   }
 

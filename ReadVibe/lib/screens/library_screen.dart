@@ -13,6 +13,8 @@ import '../services/font_service.dart';
 import '../services/storage_service.dart';
 import '../services/txt_parser.dart';
 import '../services/epub_parser.dart';
+import '../services/pdf_import_service.dart';
+import '../services/book_search_service.dart';
 import '../services/word_parser.dart';
 import '../services/word_count_service.dart';
 import '../models/book.dart';
@@ -20,6 +22,7 @@ import '../models/reader_settings.dart';
 import '../widgets/book_card.dart';
 import '../widgets/global_settings_sheet.dart';
 import 'reader_screen.dart';
+import 'pdf_reader_screen.dart';
 import 'package:file_picker/file_picker.dart';
 
 /// Library / bookshelf screen
@@ -32,11 +35,6 @@ class LibraryScreen extends StatefulWidget {
 
 enum _BookAction { rename, move, delete }
 
-/// Note on animation lifecycle: [_emptyIconController] runs an infinite
-/// repeat() while the shelf is empty. Any widget test that mounts this
-/// screen's empty state MUST use a fixed-duration pump() — never
-/// pumpAndSettle() — or the test will hang waiting for a frame that never
-/// stops being dirty.
 class _LibraryScreenState extends State<LibraryScreen>
     with TickerProviderStateMixin {
   final _storage = StorageService();
@@ -81,6 +79,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       duration: const Duration(milliseconds: 2400),
     );
     _gridScrollController.addListener(_handleGridScroll);
+    unawaited(BookSearchService.removeObsoleteData(_storage));
     _loadData();
   }
 
@@ -158,7 +157,9 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   void _scheduleMissingWordCounts(Iterable<Book> books) {
     for (final book in books) {
-      if (book.wordCount != null || !_queuedWordCountBookIds.add(book.id)) {
+      if (book.isPdf ||
+          book.wordCount != null ||
+          !_queuedWordCountBookIds.add(book.id)) {
         continue;
       }
       _wordCountQueue.addLast(book.id);
@@ -179,10 +180,17 @@ class _LibraryScreenState extends State<LibraryScreen>
           final book = await _storage.getBook(bookId);
           if (book == null) continue;
           final wordCount = await WordCountService().count(book);
-          await _storage.saveBookWordCount(bookId, wordCount);
+          await _storage.saveBookWordCount(book, wordCount);
           if (!mounted) continue;
           final index = _books.indexWhere((item) => item.id == bookId);
-          if (index >= 0 && _books[index].wordCount != wordCount) {
+          final current = index >= 0 ? _books[index] : null;
+          final sameRevision =
+              current != null &&
+              current.fileSize == book.fileSize &&
+              current.txtParserVersion == book.txtParserVersion &&
+              current.chapterCount == book.chapterCount &&
+              current.format == book.format;
+          if (sameRevision && current.wordCount != wordCount) {
             setState(() {
               _books[index] = _books[index].copyWith(wordCount: wordCount);
             });
@@ -219,11 +227,13 @@ class _LibraryScreenState extends State<LibraryScreen>
   Future<void> _importBook() async {
     if (_importing) return;
     setState(() => _importing = true);
+    Book? importedBook;
+    var metadataSaved = false;
 
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['txt', 'epub', 'docx', 'doc'],
+        allowedExtensions: ['txt', 'epub', 'docx', 'doc', 'pdf'],
       );
 
       if (result == null || result.files.isEmpty || !mounted) return;
@@ -238,21 +248,31 @@ class _LibraryScreenState extends State<LibraryScreen>
       final fileName = file.name;
       final ext = fileName.toLowerCase();
 
-      Book book;
       if (ext.endsWith('.epub')) {
-        book = await parseEpub(path, fileName);
+        importedBook = await parseEpub(path, fileName, _storage);
+      } else if (ext.endsWith('.pdf')) {
+        importedBook = await importPdf(path, fileName, _storage);
       } else if (ext.endsWith('.txt')) {
-        book = await parseTxt(path, fileName);
+        importedBook = await parseTxt(path, fileName);
       } else if (ext.endsWith('.docx') || ext.endsWith('.doc')) {
-        book = await parseWordDocument(path, fileName);
+        importedBook = await parseWordDocument(path, fileName);
       } else {
-        _showError('不支持的文件格式，请选择 TXT、EPUB、DOCX 或 DOC');
+        _showError('不支持的文件格式，请选择 TXT、EPUB、PDF、DOCX 或 DOC');
         return;
       }
 
-      await _storage.saveBook(book);
+      await _storage.saveBook(importedBook);
+      metadataSaved = true;
       await _loadData();
     } catch (e) {
+      if (!metadataSaved && importedBook != null) {
+        try {
+          await _storage.discardImportedBook(importedBook);
+        } on Object catch (cleanupError, cleanupStack) {
+          debugPrint('Failed to clean an interrupted import: $cleanupError');
+          debugPrintStack(stackTrace: cleanupStack);
+        }
+      }
       _showError(e is FormatException ? e.message : '导入失败，请确认文件未损坏后重试');
     } finally {
       if (mounted) setState(() => _importing = false);
@@ -386,7 +406,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         .clamp(position.minScrollExtent, position.maxScrollExtent)
         .toDouble();
     if ((target - position.pixels).abs() > 0.1) {
-      _gridScrollController.jumpTo(target);
+      _reorderScrollController.jumpTo(target);
     }
   }
 
@@ -842,6 +862,14 @@ class _LibraryScreenState extends State<LibraryScreen>
       }
       if (!mounted) return;
 
+      if (readableBook.isPdf) {
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => PdfReaderScreen(book: readableBook),
+          ),
+        );
+        return;
+      }
       final transitionColors = ValueNotifier<ReaderThemeColors>(
         AppTheme.getReaderTheme(
           _settings.theme,
@@ -982,6 +1010,11 @@ class _LibraryScreenState extends State<LibraryScreen>
                 Expanded(
                   child: AnimatedSwitcher(
                     duration: const Duration(milliseconds: 220),
+                    layoutBuilder: (currentChild, previousChildren) => Stack(
+                      alignment: Alignment.topCenter,
+                      fit: StackFit.expand,
+                      children: [...previousChildren, ?currentChild],
+                    ),
                     child: _loading
                         ? const Center(
                             key: ValueKey('loading'),
@@ -993,7 +1026,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                             child: _buildEmptyState(colors),
                           )
                         : KeyedSubtree(
-                            key: const ValueKey('grid'),
+                            key: ValueKey(
+                              _reorderMode ? 'reorder-grid' : 'library-grid',
+                            ),
                             child: _buildBookGrid(colors),
                           ),
                   ),
@@ -1174,7 +1209,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           ),
           const SizedBox(height: AppSpacing.sm),
           Text(
-            '点击下方按钮，导入 TXT、EPUB、DOCX 或 DOC',
+            '点击下方按钮，导入 TXT、EPUB、PDF、DOCX 或 DOC',
             style: TextStyle(fontSize: 14, color: colors.secondary),
           ),
           const SizedBox(height: AppSpacing.xl),

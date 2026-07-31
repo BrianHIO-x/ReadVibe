@@ -163,6 +163,7 @@ class ReaderSettings {
     ReaderParagraphSpacing? paragraphSpacing,
     ReaderReadingMode? readingMode,
     SimulationPageTurnEffect? simulationPageTurnEffect,
+    bool clearImportedFont = false,
   }) {
     return ReaderSettings(
       fontSize: fontSize ?? this.fontSize,
@@ -170,9 +171,15 @@ class ReaderSettings {
       theme: theme ?? this.theme,
       fontWeight: fontWeight ?? this.fontWeight,
       fontFamily: fontFamily ?? this.fontFamily,
-      importedFontFamily: importedFontFamily ?? this.importedFontFamily,
-      importedFontName: importedFontName ?? this.importedFontName,
-      importedFontPath: importedFontPath ?? this.importedFontPath,
+      importedFontFamily: clearImportedFont
+          ? null
+          : importedFontFamily ?? this.importedFontFamily,
+      importedFontName: clearImportedFont
+          ? null
+          : importedFontName ?? this.importedFontName,
+      importedFontPath: clearImportedFont
+          ? null
+          : importedFontPath ?? this.importedFontPath,
       pageMargin: pageMargin ?? this.pageMargin,
       paragraphSpacing: paragraphSpacing ?? this.paragraphSpacing,
       readingMode: readingMode ?? this.readingMode,

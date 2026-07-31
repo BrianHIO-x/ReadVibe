@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/book.dart';
 import '../models/reader_settings.dart';
+import 'pdf_renderer_service.dart';
 import 'txt_parser.dart';
 
 const _kBooksKey = 'readvibe_books';
@@ -37,6 +38,9 @@ class StorageService {
   static final Map<String, Future<void>> _chapterWriteQueues =
       <String, Future<void>>{};
   static final Map<String, int> _preferenceWriteVersions = <String, int>{};
+  static final Map<String, Future<void>> _preferenceWriteQueues =
+      <String, Future<void>>{};
+  static final Set<String> _deletedBookIds = <String>{};
   static int _nextPreferenceWriteVersion = 0;
 
   Future<List<Book>> getBooks() async {
@@ -53,6 +57,9 @@ class StorageService {
         metadata.sublist(start, end).map((map) async {
           try {
             final id = map['id'] as String;
+            if (map['format'] == BookFormat.pdf.name) {
+              return Book.fromJson(map, const <Chapter>[]);
+            }
             final chapters = await _loadChapters(id, prefs);
             if (chapters.isEmpty) return null;
             return upgradeLegacyTxtBook(Book.fromJson(map, chapters));
@@ -89,6 +96,12 @@ class StorageService {
     ).where((map) => map['id'] == bookId);
     if (metadata.isEmpty) return null;
     try {
+      if (metadata.first['format'] == BookFormat.pdf.name) {
+        final pdfBook = Book.fromJson(metadata.first, const <Chapter>[]);
+        final sourcePath = pdfBook.sourcePath;
+        if (sourcePath == null || !await File(sourcePath).exists()) return null;
+        return pdfBook;
+      }
       final chapters = await _loadChapters(bookId, prefs);
       if (chapters.isEmpty) return null;
       final storedBook = Book.fromJson(metadata.first, chapters);
@@ -119,14 +132,22 @@ class StorageService {
   }
 
   Future<void> saveBook(Book book) async {
-    if (book.chapters.isEmpty) {
+    if (book.isPdf &&
+        (book.sourcePath == null ||
+            book.pageCount == null ||
+            book.pageCount! <= 0)) {
+      throw const FormatException('PDF 文件路径或页数无效');
+    }
+    if (!book.isPdf && book.chapters.isEmpty) {
       throw const FormatException('书籍没有可保存的章节');
     }
 
     await _enqueueLibraryMutation(() async {
       // Save the large payload first. The shelf metadata is only committed
       // after the chapter file is safely in place.
-      await _saveChapters(book.id, book.chapters);
+      if (!book.isPdf) {
+        await _saveChapters(book.id, book.chapters);
+      }
       final prefs = await SharedPreferences.getInstance();
       final metadata = _readBookMetadata(prefs);
       final existingIndex = metadata.indexWhere(
@@ -138,6 +159,7 @@ class StorageService {
         metadata.insert(0, book.toJson());
       }
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+      _deletedBookIds.remove(book.id);
     });
   }
 
@@ -190,15 +212,16 @@ class StorageService {
     });
   }
 
-  Future<void> saveBookWordCount(String bookId, int wordCount) async {
-    if (bookId.isEmpty || wordCount < 0) return;
+  Future<void> saveBookWordCount(Book sourceBook, int wordCount) async {
+    if (sourceBook.id.isEmpty || sourceBook.isPdf || wordCount < 0) return;
     await _enqueueLibraryMutation(() async {
       final prefs = await SharedPreferences.getInstance();
       final metadata = _readBookMetadata(prefs);
-      final index = metadata.indexWhere((book) => book['id'] == bookId);
+      final index = metadata.indexWhere((book) => book['id'] == sourceBook.id);
       // A background count may finish after the user deletes the book. Never
       // recreate deleted metadata just to save a stale result.
       if (index < 0) return;
+      if (!_matchesBookRevision(metadata[index], sourceBook)) return;
       metadata[index]['wordCount'] = wordCount.clamp(0, 0x7fffffffffffffff);
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
     });
@@ -223,36 +246,37 @@ class StorageService {
       if (index < 0) return;
 
       final current = metadata[index];
-      final currentFileSize = current['fileSize'];
-      final currentParserVersion = current['txtParserVersion'];
-      final currentChapterCount = current['chapterCount'];
       // Do not let a count from an older parse overwrite a newly re-imported
       // or migrated directory that happens to reuse the same book ID.
-      if (currentFileSize is! num ||
-          currentFileSize.toInt() != sourceBook.fileSize ||
-          currentParserVersion is! num ||
-          currentParserVersion.toInt() != sourceBook.txtParserVersion ||
-          currentChapterCount is! num ||
-          currentChapterCount.toInt() != sourceBook.chapterCount) {
-        return;
-      }
+      if (!_matchesBookRevision(current, sourceBook)) return;
       current['chapterWordCounts'] = safeCounts;
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
     });
   }
 
   Future<void> deleteBook(String bookId) async {
+    if (bookId.isEmpty) return;
+    _deletedBookIds.add(bookId);
     await _enqueueLibraryMutation(() async {
       final prefs = await SharedPreferences.getInstance();
-      final metadata = _readBookMetadata(prefs)
-        ..removeWhere((book) => book['id'] == bookId);
+      final metadata = _readBookMetadata(prefs);
+      final removedMetadata = metadata
+          .where((book) => book['id'] == bookId)
+          .firstOrNull;
+      metadata.removeWhere((book) => book['id'] == bookId);
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
       final progressKey = '$_kProgressPrefix$bookId';
       final tocCollapsedKey = '$_kTocCollapsedPrefix$bookId';
-      _invalidatePreferenceWrite(progressKey);
-      _invalidatePreferenceWrite(tocCollapsedKey);
-      await prefs.remove(progressKey);
-      await prefs.remove(tocCollapsedKey);
+      final progressVersion = _invalidatePreferenceWrite(progressKey);
+      final tocVersion = _invalidatePreferenceWrite(tocCollapsedKey);
+      await _enqueuePreferenceWrite(progressKey, () async {
+        if (_preferenceWriteVersions[progressKey] != progressVersion) return;
+        await prefs.remove(progressKey);
+      });
+      await _enqueuePreferenceWrite(tocCollapsedKey, () async {
+        if (_preferenceWriteVersions[tocCollapsedKey] != tocVersion) return;
+        await prefs.remove(tocCollapsedKey);
+      });
       await prefs.remove('$_kChapterPrefix$bookId');
 
       final file = await _chapterFile(bookId);
@@ -268,7 +292,14 @@ class StorageService {
           // harmful than making the deleted book reappear or crashing the UI.
         }
       }
+      await _deleteManagedSourcePath(removedMetadata?['sourcePath']);
     });
+  }
+
+  /// Removes files left by an import that failed before its metadata commit.
+  Future<void> discardImportedBook(Book book) async {
+    await deleteBook(book.id);
+    await _deleteManagedSourcePath(book.sourcePath);
   }
 
   List<Map<String, dynamic>> _readBookMetadata(SharedPreferences prefs) {
@@ -377,6 +408,7 @@ class StorageService {
   }
 
   Future<ReadingProgress?> getProgress(String bookId) async {
+    if (_deletedBookIds.contains(bookId)) return null;
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString('$_kProgressPrefix$bookId');
     if (raw == null) return null;
@@ -390,7 +422,9 @@ class StorageService {
   }
 
   Future<void> saveProgress(ReadingProgress progress) async {
-    if (progress.bookId.isEmpty) return;
+    if (progress.bookId.isEmpty || _deletedBookIds.contains(progress.bookId)) {
+      return;
+    }
     await _setLatestString(
       '$_kProgressPrefix${progress.bookId}',
       jsonEncode(progress.toJson()),
@@ -420,7 +454,7 @@ class StorageService {
     String bookId,
     Set<String> groupIds,
   ) async {
-    if (bookId.isEmpty) return;
+    if (bookId.isEmpty || _deletedBookIds.contains(bookId)) return;
     final values =
         groupIds
             .map((value) => value.trim())
@@ -449,27 +483,33 @@ class StorageService {
   Future<void> saveSettings(ReaderSettings settings) async {
     final version = ++_nextPreferenceWriteVersion;
     _preferenceWriteVersions[_kSettingsKey] = version;
-    final prefs = await SharedPreferences.getInstance();
-    if (_preferenceWriteVersions[_kSettingsKey] != version) return;
+    await _enqueuePreferenceWrite(_kSettingsKey, () async {
+      if (_preferenceWriteVersions[_kSettingsKey] != version) return;
+      final prefs = await SharedPreferences.getInstance();
+      if (_preferenceWriteVersions[_kSettingsKey] != version) return;
 
-    String? previousImportedFontPath;
-    final previousRaw = prefs.getString(_kSettingsKey);
-    if (previousRaw != null) {
-      try {
-        previousImportedFontPath = ReaderSettings.fromJson(
-          Map<String, dynamic>.from(jsonDecode(previousRaw) as Map),
-        ).importedFontPath;
-      } on Object {
-        // A damaged old settings record should not block saving a valid one.
+      String? previousImportedFontPath;
+      final previousRaw = prefs.getString(_kSettingsKey);
+      if (previousRaw != null) {
+        try {
+          previousImportedFontPath = ReaderSettings.fromJson(
+            Map<String, dynamic>.from(jsonDecode(previousRaw) as Map),
+          ).importedFontPath;
+        } on Object {
+          // A damaged old settings record should not block saving a valid one.
+        }
       }
-    }
-    await _setString(prefs, _kSettingsKey, jsonEncode(settings.toJson()));
+      await _setString(prefs, _kSettingsKey, jsonEncode(settings.toJson()));
 
-    final currentImportedFontPath = settings.importedFontPath;
-    if (previousImportedFontPath != null &&
-        previousImportedFontPath != currentImportedFontPath) {
-      await _deleteManagedFont(previousImportedFontPath);
-    }
+      // A newer queued setting may still refer to the previous font. Only the
+      // latest write is allowed to reclaim the old managed file.
+      if (_preferenceWriteVersions[_kSettingsKey] != version) return;
+      final currentImportedFontPath = settings.importedFontPath;
+      if (previousImportedFontPath != null &&
+          previousImportedFontPath != currentImportedFontPath) {
+        await _deleteManagedFont(previousImportedFontPath);
+      }
+    });
   }
 
   Future<void> _deleteManagedFont(String fontPath) async {
@@ -519,6 +559,28 @@ class StorageService {
     );
 
     return source.copy(target.path);
+  }
+
+  Future<File> saveImportedPdf(String sourcePath, String bookId) async {
+    final source = File(sourcePath);
+    final stat = await source.stat();
+    const maxPdfBytes = 1024 * 1024 * 1024;
+    if (stat.type != FileSystemEntityType.file || stat.size <= 0) {
+      throw const FormatException('PDF 文件为空或无法读取');
+    }
+    if (stat.size > maxPdfBytes) {
+      throw const FormatException('PDF 文件过大，请选择不超过 1 GB 的文件');
+    }
+    final root = await getAppDataDirectory();
+    final directory = Directory(p.join(root.path, 'pdf'));
+    if (!await directory.exists()) await directory.create(recursive: true);
+    final safeId = base64Url.encode(utf8.encode(bookId)).replaceAll('=', '');
+    final target = File(p.join(directory.path, '$safeId.pdf'));
+    final temporary = File('${target.path}.tmp');
+    if (await temporary.exists()) await temporary.delete();
+    await source.copy(temporary.path);
+    if (await target.exists()) await target.delete();
+    return temporary.rename(target.path);
   }
 
   Future<Directory> getAppDataDirectory() async {
@@ -571,6 +633,25 @@ class StorageService {
     });
   }
 
+  static Future<void> _enqueuePreferenceWrite(
+    String key,
+    Future<void> Function() action,
+  ) {
+    final previous = _preferenceWriteQueues[key] ?? Future<void>.value();
+    final operation = previous.then((_) => action());
+    late final Future<void> safeTail;
+    safeTail = operation.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    _preferenceWriteQueues[key] = safeTail;
+    return operation.whenComplete(() {
+      if (identical(_preferenceWriteQueues[key], safeTail)) {
+        _preferenceWriteQueues.remove(key);
+      }
+    });
+  }
+
   static Future<void> _setString(
     SharedPreferences prefs,
     String key,
@@ -583,14 +664,63 @@ class StorageService {
   static Future<void> _setLatestString(String key, String value) async {
     final version = ++_nextPreferenceWriteVersion;
     _preferenceWriteVersions[key] = version;
-    final prefs = await SharedPreferences.getInstance();
-    if (_preferenceWriteVersions[key] != version) return;
-    await _setString(prefs, key, value);
+    await _enqueuePreferenceWrite(key, () async {
+      if (_preferenceWriteVersions[key] != version) return;
+      final prefs = await SharedPreferences.getInstance();
+      if (_preferenceWriteVersions[key] != version) return;
+      await _setString(prefs, key, value);
+    });
   }
 
-  static void _invalidatePreferenceWrite(String key) {
-    _preferenceWriteVersions[key] = ++_nextPreferenceWriteVersion;
+  static int _invalidatePreferenceWrite(String key) {
+    final version = ++_nextPreferenceWriteVersion;
+    _preferenceWriteVersions[key] = version;
+    return version;
   }
+
+  Future<void> _deleteManagedSourcePath(Object? rawSourcePath) async {
+    if (rawSourcePath is! String || rawSourcePath.trim().isEmpty) return;
+    try {
+      final root = await getAppDataDirectory();
+      final pdfDirectory = Directory(p.join(root.path, 'pdf')).absolute.path;
+      final epubDirectory = Directory(p.join(root.path, 'epub')).absolute.path;
+      final sourcePath = rawSourcePath.trim();
+      final sourceType = await FileSystemEntity.type(sourcePath);
+      if (sourceType == FileSystemEntityType.file) {
+        final source = File(sourcePath).absolute;
+        if (!p.isWithin(pdfDirectory, source.path) || !await source.exists()) {
+          return;
+        }
+        try {
+          await PdfRendererService.clearFileCache(source.path);
+        } on Object {
+          // Cache cleanup is best-effort; the managed source remains deletable.
+        }
+        await source.delete();
+      } else if (sourceType == FileSystemEntityType.directory) {
+        final source = Directory(sourcePath).absolute;
+        if (p.isWithin(epubDirectory, source.path) && await source.exists()) {
+          await source.delete(recursive: true);
+        }
+      }
+    } on FileSystemException {
+      // Metadata remains authoritative if private resource cleanup is interrupted.
+    }
+  }
+}
+
+bool _matchesBookRevision(Map<String, dynamic> metadata, Book sourceBook) {
+  final currentFileSize = metadata['fileSize'];
+  final currentParserVersion = metadata['txtParserVersion'];
+  final currentChapterCount = metadata['chapterCount'];
+  final currentFormat = metadata['format'];
+  return currentFileSize is num &&
+      currentFileSize.toInt() == sourceBook.fileSize &&
+      currentParserVersion is num &&
+      currentParserVersion.toInt() == sourceBook.txtParserVersion &&
+      currentChapterCount is num &&
+      currentChapterCount.toInt() == sourceBook.chapterCount &&
+      currentFormat == sourceBook.format.name;
 }
 
 List<Chapter> _chaptersFromJson(String raw) {
@@ -616,6 +746,7 @@ List<Chapter> _chaptersFromJson(String raw) {
       title: title,
       content: content,
       volumeTitle: volumeTitle,
+      epubBlocks: _epubBlocksFromJson(map['epubBlocks']),
     );
   }).toList();
 }
@@ -629,10 +760,123 @@ String _chaptersToJson(List<Chapter> chapters) {
             'title': chapter.title,
             'content': chapter.content,
             if (chapter.volumeTitle != null) 'volumeTitle': chapter.volumeTitle,
+            if (chapter.epubBlocks.isNotEmpty)
+              'epubBlocks': chapter.epubBlocks.map(_epubBlockToJson).toList(),
           },
         )
         .toList(),
   );
+}
+
+List<EpubContentBlock> _epubBlocksFromJson(Object? raw) {
+  if (raw is! List) return const <EpubContentBlock>[];
+  final blocks = <EpubContentBlock>[];
+  for (final value in raw) {
+    if (value is! Map) continue;
+    final map = Map<String, dynamic>.from(value);
+    final kindName = map['kind'];
+    final kind = EpubContentBlockKind.values
+        .where((candidate) => candidate.name == kindName)
+        .firstOrNull;
+    if (kind == null) continue;
+    final style = _epubStyleFromJson(map['style']);
+    final runs = <EpubTextRun>[];
+    final rawRuns = map['runs'];
+    if (rawRuns is List) {
+      for (final rawRun in rawRuns) {
+        if (rawRun is! Map) continue;
+        final run = Map<String, dynamic>.from(rawRun);
+        final text = run['text'];
+        if (text is! String || text.isEmpty) continue;
+        runs.add(
+          EpubTextRun(text: text, style: _epubStyleFromJson(run['style'])),
+        );
+      }
+    }
+    blocks.add(
+      EpubContentBlock(
+        kind: kind,
+        text: map['text'] is String ? map['text'] as String : '',
+        runs: List<EpubTextRun>.unmodifiable(runs),
+        imagePath: map['imagePath'] is String
+            ? map['imagePath'] as String
+            : null,
+        altText: map['altText'] is String ? map['altText'] as String : null,
+        imageWidth: _jsonDouble(map['imageWidth']),
+        imageHeight: _jsonDouble(map['imageHeight']),
+        style: style,
+      ),
+    );
+  }
+  return List<EpubContentBlock>.unmodifiable(blocks);
+}
+
+Map<String, dynamic> _epubBlockToJson(EpubContentBlock block) => {
+  'kind': block.kind.name,
+  if (block.text.isNotEmpty) 'text': block.text,
+  if (block.runs.isNotEmpty)
+    'runs': block.runs
+        .map((run) => {'text': run.text, 'style': _epubStyleToJson(run.style)})
+        .toList(),
+  if (block.imagePath != null) 'imagePath': block.imagePath,
+  if (block.altText != null && block.altText!.isNotEmpty)
+    'altText': block.altText,
+  if (block.imageWidth != null) 'imageWidth': block.imageWidth,
+  if (block.imageHeight != null) 'imageHeight': block.imageHeight,
+  'style': _epubStyleToJson(block.style),
+};
+
+EpubContentStyle _epubStyleFromJson(Object? raw) {
+  if (raw is! Map) return const EpubContentStyle();
+  final map = Map<String, dynamic>.from(raw);
+  return EpubContentStyle(
+    fontScale: _jsonDouble(map['fontScale']) ?? 1,
+    fontWeight: map['fontWeight'] is num
+        ? (map['fontWeight'] as num).toInt().clamp(100, 900)
+        : 400,
+    italic: map['italic'] == true,
+    underline: map['underline'] == true,
+    textAlign: map['textAlign'] is String
+        ? map['textAlign'] as String
+        : 'start',
+    lineHeightScale: _jsonDouble(map['lineHeightScale']) ?? 1,
+    letterSpacingEm: _jsonDouble(map['letterSpacingEm']) ?? 0,
+    textIndentEm: _jsonDouble(map['textIndentEm']) ?? 2,
+    marginTopEm: _jsonDouble(map['marginTopEm']) ?? 0,
+    marginBottomEm: _jsonDouble(map['marginBottomEm']) ?? 0,
+    colorArgb: map['colorArgb'] is num
+        ? (map['colorArgb'] as num).toInt()
+        : null,
+    backgroundColorArgb: map['backgroundColorArgb'] is num
+        ? (map['backgroundColorArgb'] as num).toInt()
+        : null,
+    backgroundImagePath: map['backgroundImagePath'] is String
+        ? map['backgroundImagePath'] as String
+        : null,
+  );
+}
+
+Map<String, dynamic> _epubStyleToJson(EpubContentStyle style) => {
+  if (style.fontScale != 1) 'fontScale': style.fontScale,
+  if (style.fontWeight != 400) 'fontWeight': style.fontWeight,
+  if (style.italic) 'italic': true,
+  if (style.underline) 'underline': true,
+  if (style.textAlign != 'start') 'textAlign': style.textAlign,
+  if (style.lineHeightScale != 1) 'lineHeightScale': style.lineHeightScale,
+  if (style.letterSpacingEm != 0) 'letterSpacingEm': style.letterSpacingEm,
+  if (style.textIndentEm != 2) 'textIndentEm': style.textIndentEm,
+  if (style.marginTopEm != 0) 'marginTopEm': style.marginTopEm,
+  if (style.marginBottomEm != 0) 'marginBottomEm': style.marginBottomEm,
+  if (style.colorArgb != null) 'colorArgb': style.colorArgb,
+  if (style.backgroundColorArgb != null)
+    'backgroundColorArgb': style.backgroundColorArgb,
+  if (style.backgroundImagePath != null)
+    'backgroundImagePath': style.backgroundImagePath,
+};
+
+double? _jsonDouble(Object? value) {
+  if (value is! num || !value.isFinite) return null;
+  return value.toDouble();
 }
 
 ReadingProgress _remapProgressAfterReparse(

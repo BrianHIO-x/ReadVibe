@@ -4,6 +4,7 @@ import 'theme/app_theme.dart';
 import 'theme/app_motion.dart';
 import 'screens/library_screen.dart';
 import 'screens/reader_screen.dart';
+import 'screens/pdf_reader_screen.dart';
 import 'models/book.dart';
 import 'models/reader_launch_args.dart';
 
@@ -43,6 +44,12 @@ class ReadVibeApp extends StatelessWidget {
               );
             }
             final book = args is ReaderLaunchArgs ? args.book : args as Book;
+            if (book.isPdf) {
+              return MaterialPageRoute(
+                builder: (_) => PdfReaderScreen(book: book),
+                settings: settings,
+              );
+            }
             return buildFadeScaleRoute(
               (_) => ReaderScreen(book: book),
               settings: settings,

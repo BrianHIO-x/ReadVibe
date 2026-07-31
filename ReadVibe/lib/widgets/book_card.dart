@@ -45,17 +45,33 @@ class BookCard extends StatelessWidget {
         ? Colors.black.withValues(alpha: 0.22)
         : palette.text.withValues(alpha: 0.18);
     final totalChapters = book.chapterCount;
-    final currentChapter = totalChapters > 0
-        ? (progress?.chapterIndex ?? 0).clamp(0, totalChapters - 1)
+    final totalUnits = book.isPdf ? (book.pageCount ?? 0) : totalChapters;
+    final currentChapter = totalUnits > 0
+        ? (progress?.chapterIndex ?? 0).clamp(0, totalUnits - 1)
         : 0;
-    final progressPercent = totalChapters > 0
-        ? (currentChapter / totalChapters).clamp(0.0, 1.0)
+    final localProgress =
+        progress?.chapterProgress[currentChapter] ??
+        progress?.scrollProgress ??
+        0.0;
+    final progressPercent = book.isPdf
+        ? (progress?.scrollProgress ??
+                  (totalUnits > 1 ? currentChapter / (totalUnits - 1) : 0.0))
+              .clamp(0.0, 1.0)
+              .toDouble()
+        : totalUnits > 0
+        ? ((currentChapter + localProgress.clamp(0.0, 1.0)) / totalUnits)
+              .clamp(0.0, 1.0)
+              .toDouble()
         : 0.0;
-    final metaLine = [
-      if (book.author.isNotEmpty) book.author,
-      '$totalChapters 章${progress != null ? ' · 已读 ${(progressPercent * 100).toInt()}%' : ''}',
-    ].join(' · ');
-    final wordCountLine = formatBookWordCount(book.wordCount);
+    final metaLine = book.isPdf
+        ? '${book.pageCount ?? 0} 页${progress != null ? ' · 已读 ${(progressPercent * 100).toInt()}%' : ''}'
+        : [
+            if (book.author.isNotEmpty) book.author,
+            '$totalChapters 章${progress != null ? ' · 已读 ${(progressPercent * 100).toInt()}%' : ''}',
+          ].join(' · ');
+    final wordCountLine = book.isPdf
+        ? 'PDF 原版页面'
+        : formatBookWordCount(book.wordCount);
 
     return Semantics(
       button: true,

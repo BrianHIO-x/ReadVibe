@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -20,10 +21,12 @@ import '../theme/app_motion.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../services/font_service.dart';
+import '../services/book_search_service.dart';
 import '../services/storage_service.dart';
 import '../services/system_text_action_service.dart';
 import '../services/word_count_service.dart';
 import '../widgets/chapter_list.dart';
+import '../widgets/book_search_sheet.dart';
 import '../widgets/reader_settings_sheet.dart';
 import '../widgets/pressable_scale.dart';
 import '../widgets/reading_progress_bar.dart';
@@ -80,13 +83,21 @@ class _ReaderScreenState extends State<ReaderScreen>
   VelocityTracker? _simulationTurnVelocityTracker;
   bool _simulationTurnActive = false;
   final ValueNotifier<bool> _selectionBlockedNotifier = ValueNotifier(false);
+  final ValueNotifier<bool> _textSelectionActiveNotifier = ValueNotifier(false);
   bool _readingModeReloading = false;
+  // A modal with a text field (currently full-text search) can cause Android
+  // to report a transient keyboard inset.  Simulation pagination is based on
+  // the reader viewport, so never allow that transient inset to repaginate the
+  // paper behind an open modal.
+  bool _readerModalOpen = false;
+  double? _simulationViewportLock;
   bool _closingReader = false;
   double _viewPaddingTop = 0;
   ReadingProgress? _currentProgress;
   Set<String> _collapsedTocGroupIds = <String>{};
   double? _pendingScrollOffset;
   double? _pendingScrollProgress;
+  _ReadingTextAnchor? _pendingScrollTextAnchor;
   bool _preferPendingScrollProgress = false;
   int _scrollRestoreSerial = 0;
   final Map<int, ScrollController> _adjacentScrollControllers =
@@ -110,6 +121,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _continuousMetricsScheduled = false;
   int _continuousRestoreSerial = 0;
   double? _pendingContinuousProgress;
+  double? _pendingContinuousOffset;
+  _ReadingTextAnchor? _pendingContinuousTextAnchor;
   _SimulationPageTarget? _simulationPageTarget;
   ScrollController? _simulationPreviewController;
   ScrollController? _simulationPaperBackController;
@@ -123,6 +136,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _progressSaveQueue = Future<void>.value();
   final LinkedHashMap<Chapter, List<String>> _paragraphCache =
       LinkedHashMap<Chapter, List<String>>();
+  double _readerViewportWidth = 0;
+  double _readerViewportHeight = 0;
+  EdgeInsets _readerViewPadding = EdgeInsets.zero;
+  TextScaler _readerTextScaler = TextScaler.noScaling;
 
   Book get _book => widget.book;
 
@@ -144,6 +161,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     _visibleProgressNotifier = ValueNotifier<double>(0);
     _scrollController = _createScrollController();
+    _textSelectionActiveNotifier.addListener(
+      _handleTextSelectionActivityChanged,
+    );
     WidgetsBinding.instance.addObserver(this);
     // Keep screen on while reading — the user should not have to tap to
     // prevent the device from sleeping mid-paragraph.
@@ -170,7 +190,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _ensureBookWordCount() async {
     try {
       final wordCount = await WordCountService().count(_book);
-      await _storage.saveBookWordCount(_book.id, wordCount);
+      await _storage.saveBookWordCount(_book, wordCount);
       if (mounted) _wordCountNotifier.value = wordCount;
     } on Object catch (error, stackTrace) {
       debugPrint('Failed to count reader text: $error');
@@ -190,7 +210,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   ScrollController _createScrollController([double initialOffset = 0]) {
-    final controller = ScrollController(
+    final controller = _SelectionAwareScrollController(
+      selectionActive: _textSelectionActiveNotifier,
+      freezeSelectionViewport: () =>
+          _settings.readingMode == ReaderReadingMode.simulation,
       initialScrollOffset: initialOffset.isFinite && initialOffset >= 0
           ? initialOffset
           : 0,
@@ -267,11 +290,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       final savedProgress =
           overrideProgress ?? _currentProgress?.chapterProgress[chapterIndex];
       final savedOffset = _currentProgress?.chapterOffsets[chapterIndex] ?? 0;
-      final target = savedProgress != null && savedProgress.isFinite
+      var target = savedProgress != null && savedProgress.isFinite
           ? savedProgress.clamp(0.0, 1.0).toDouble() * maxExtent
           : (savedOffset.isFinite && savedOffset >= 0 ? savedOffset : 0.0)
                 .clamp(0.0, maxExtent)
                 .toDouble();
+      if (_settings.readingMode == ReaderReadingMode.simulation) {
+        target = _alignSimulationOffset(target, maxExtent: maxExtent);
+      }
       if ((controller.offset - target).abs() > 0.5) {
         controller.jumpTo(target);
       }
@@ -450,6 +476,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (loadedSettings.readingMode == ReaderReadingMode.continuous) {
       _requestContinuousRestore(
         hasSavedProgressRatio ? safeRestoredProgress : 0,
+        offset: safeRestoredOffset,
       );
     } else {
       _scheduleAdjacentWarmup();
@@ -466,12 +493,14 @@ class _ReaderScreenState extends State<ReaderScreen>
     required double offset,
     double? progress,
     required bool preferProgress,
+    _ReadingTextAnchor? textAnchor,
   }) {
     _pendingScrollOffset = offset.isFinite && offset >= 0 ? offset : 0;
     _pendingScrollProgress = progress != null && progress.isFinite
         ? progress.clamp(0.0, 1.0).toDouble()
         : null;
     _preferPendingScrollProgress = preferProgress;
+    _pendingScrollTextAnchor = textAnchor;
     final serial = ++_scrollRestoreSerial;
     _restorePendingScrollPosition(serial);
   }
@@ -495,9 +524,21 @@ class _ReaderScreenState extends State<ReaderScreen>
       final requested = _pendingScrollOffset ?? 0;
       final maxExtent = _scrollController.position.maxScrollExtent;
       final progress = _pendingScrollProgress;
-      var offset = _preferPendingScrollProgress && progress != null
-          ? progress * maxExtent
-          : requested.clamp(0.0, maxExtent).toDouble();
+      final textAnchor = _pendingScrollTextAnchor;
+      final anchoredOffset = textAnchor == null
+          ? null
+          : _scrollOffsetForTextAnchor(
+              textAnchor,
+              settings: _settings,
+              mode: _settings.readingMode,
+              viewportDimension: _scrollController.position.viewportDimension,
+              maxExtent: maxExtent,
+            );
+      var offset =
+          anchoredOffset ??
+          (_preferPendingScrollProgress && progress != null
+              ? progress * maxExtent
+              : requested.clamp(0.0, maxExtent).toDouble());
       if (_settings.readingMode == ReaderReadingMode.simulation) {
         offset = _alignSimulationOffset(offset, maxExtent: maxExtent);
       }
@@ -522,6 +563,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (serial != _scrollRestoreSerial) return;
     _pendingScrollOffset = null;
     _pendingScrollProgress = null;
+    _pendingScrollTextAnchor = null;
     _preferPendingScrollProgress = false;
     _finishReadingModeReload();
   }
@@ -538,12 +580,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (maxExtent == null || !maxExtent.isFinite) {
       return math.max(0.0, aligned);
     }
-    return aligned.clamp(0.0, maxExtent).toDouble();
+    final alignedMax = ((maxExtent + 0.01) / lineExtent).floor() * lineExtent;
+    return aligned.clamp(0.0, math.max(0.0, alignedMax)).toDouble();
   }
 
   void _resetContinuousMetrics() {
     _continuousRestoreSerial++;
     _pendingContinuousProgress = null;
+    _pendingContinuousOffset = null;
+    _pendingContinuousTextAnchor = null;
     _continuousMetricsScheduled = false;
     _continuousChapterStarts
       ..clear()
@@ -551,7 +596,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     _continuousChapterExtents.clear();
   }
 
-  void _requestContinuousRestore(double progress) {
+  void _requestContinuousRestore(
+    double progress, {
+    double? offset,
+    _ReadingTextAnchor? textAnchor,
+  }) {
     _continuousAnchorChapterIndex = _chapterIndex;
     _continuousChapterStarts
       ..clear()
@@ -560,6 +609,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pendingContinuousProgress = progress.isFinite
         ? progress.clamp(0.0, 1.0).toDouble()
         : 0.0;
+    _pendingContinuousOffset = offset != null && offset.isFinite
+        ? math.max(0.0, offset)
+        : null;
+    _pendingContinuousTextAnchor = textAnchor;
     final serial = ++_continuousRestoreSerial;
     _restoreContinuousPosition(serial);
   }
@@ -578,7 +631,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         if (attempt < 20) {
           _restoreContinuousPosition(serial, attempt + 1);
         } else {
-          _finishReadingModeReload();
+          _clearPendingContinuousRestore(serial);
         }
         return;
       }
@@ -587,19 +640,33 @@ class _ReaderScreenState extends State<ReaderScreen>
         if (attempt < 20) {
           _restoreContinuousPosition(serial, attempt + 1);
         } else {
-          _finishReadingModeReload();
+          _clearPendingContinuousRestore(serial);
         }
         return;
       }
       final viewport = _scrollController.position.viewportDimension;
       final readableExtent = math.max(0.0, extent - viewport);
-      final target = (_pendingContinuousProgress! * readableExtent)
-          .clamp(
-            _scrollController.position.minScrollExtent,
-            _scrollController.position.maxScrollExtent,
-          )
-          .toDouble();
+      final textAnchor = _pendingContinuousTextAnchor;
+      final anchoredOffset = textAnchor == null
+          ? null
+          : _scrollOffsetForTextAnchor(
+              textAnchor,
+              settings: _settings,
+              mode: ReaderReadingMode.continuous,
+              viewportDimension: viewport,
+              maxExtent: readableExtent,
+            );
+      final requestedOffset = anchoredOffset ?? _pendingContinuousOffset;
+      final target =
+          (requestedOffset ?? _pendingContinuousProgress! * readableExtent)
+              .clamp(
+                _scrollController.position.minScrollExtent,
+                _scrollController.position.maxScrollExtent,
+              )
+              .toDouble();
       _pendingContinuousProgress = null;
+      _pendingContinuousOffset = null;
+      _pendingContinuousTextAnchor = null;
       if ((_scrollController.offset - target).abs() > 0.5) {
         _scrollController.jumpTo(target);
       }
@@ -607,6 +674,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       _recordCurrentChapterPosition(snapshot);
       _finishReadingModeReload();
     });
+  }
+
+  void _clearPendingContinuousRestore(int serial) {
+    if (serial != _continuousRestoreSerial) return;
+    _pendingContinuousProgress = null;
+    _pendingContinuousOffset = null;
+    _pendingContinuousTextAnchor = null;
+    _finishReadingModeReload();
   }
 
   void _scheduleContinuousMetricsUpdate() {
@@ -742,6 +817,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageTurnController.dispose();
     _pageDragOffsetNotifier.dispose();
     _selectionBlockedNotifier.dispose();
+    _textSelectionActiveNotifier.removeListener(
+      _handleTextSelectionActivityChanged,
+    );
+    _textSelectionActiveNotifier.dispose();
     _scrollController.removeListener(_scheduleProgressSave);
     _scrollController.dispose();
     final adjacentControllers = _adjacentScrollControllers.values.toSet();
@@ -774,6 +853,10 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _scheduleProgressSave() {
     if (!_settingsLoaded || _closingReader) return;
+    if (_settings.readingMode == ReaderReadingMode.simulation &&
+        _textSelectionActiveNotifier.value) {
+      return;
+    }
     if (_settings.readingMode == ReaderReadingMode.continuous) {
       _scheduleContinuousMetricsUpdate();
     }
@@ -889,11 +972,17 @@ class _ReaderScreenState extends State<ReaderScreen>
       _paragraphCache[chapter] = cached;
       return cached;
     }
-    final paragraphs = chapter.content
-        .split(RegExp(r'(?:\r\n?|\n)+'))
-        .map(_formatParagraph)
-        .where((p) => p.isNotEmpty)
-        .toList(growable: false);
+    final paragraphs = chapter.hasRichEpubContent
+        ? chapter.epubBlocks
+              .where((block) => block.isText && block.text.trim().isNotEmpty)
+              .map(_formatEpubParagraph)
+              .where((paragraph) => paragraph.isNotEmpty)
+              .toList(growable: false)
+        : chapter.content
+              .split(RegExp(r'(?:\r\n?|\n)+'))
+              .map(_formatParagraph)
+              .where((p) => p.isNotEmpty)
+              .toList(growable: false);
     _paragraphCache[chapter] = paragraphs;
     while (_paragraphCache.length > 5) {
       _paragraphCache.remove(_paragraphCache.keys.first);
@@ -906,8 +995,803 @@ class _ReaderScreenState extends State<ReaderScreen>
     return body.isEmpty ? '' : '$_paragraphIndent$body';
   }
 
+  String _formatEpubParagraph(EpubContentBlock block) {
+    final body = block.text.replaceFirst(RegExp(r'^[\s　]+'), '').trimRight();
+    if (body.isEmpty) return '';
+    final indentCount = block.style.textIndentEm.round().clamp(0, 8);
+    return '${List<String>.filled(indentCount, '　').join()}$body';
+  }
+
+  int _paragraphPrefixLength(Chapter chapter, int paragraphIndex) {
+    if (!chapter.hasRichEpubContent) return _paragraphIndent.length;
+    var current = 0;
+    for (final block in chapter.epubBlocks) {
+      if (!block.isText || block.text.trim().isEmpty) continue;
+      if (current == paragraphIndex) {
+        return block.style.textIndentEm.round().clamp(0, 8);
+      }
+      current++;
+    }
+    return 0;
+  }
+
   String _formatChapterTitle(String title) {
     return title.replaceFirst(RegExp(r'^[\s　]+'), '').trimRight();
+  }
+
+  bool _changesTextLayout(ReaderSettings current, ReaderSettings next) {
+    return current.fontSize != next.fontSize ||
+        current.lineHeight != next.lineHeight ||
+        current.fontWeight != next.fontWeight ||
+        current.fontFamily != next.fontFamily ||
+        current.importedFontFamily != next.importedFontFamily ||
+        current.pageMargin != next.pageMargin ||
+        current.paragraphSpacing != next.paragraphSpacing ||
+        current.readingMode != next.readingMode;
+  }
+
+  _ReadingTextAnchor? _captureReadingTextAnchor(_ScrollSnapshot snapshot) {
+    if (_readerViewportWidth <= 0 || _book.chapters.isEmpty) return null;
+    final paragraphs = _paragraphsFor(_currentChapter);
+    if (paragraphs.isEmpty) return null;
+    final settings = _settings;
+    final width = math.max(
+      1.0,
+      _readerViewportWidth - settings.pageMargin.horizontalPadding * 2,
+    );
+    final bodyStart = _bodyStartOffset(
+      _currentChapter,
+      settings: settings,
+      mode: settings.readingMode,
+      width: width,
+    );
+    if (_currentChapter.hasRichEpubContent) {
+      return _captureRichEpubTextAnchor(
+        chapter: _currentChapter,
+        bodyOffset: snapshot.offset - bodyStart,
+        settings: settings,
+        mode: settings.readingMode,
+        width: width,
+      );
+    }
+    final bodyText = _joinedBodyText(paragraphs, settings);
+    final painter = _layoutBodyText(
+      bodyText,
+      settings: settings,
+      mode: settings.readingMode,
+      width: width,
+    );
+    try {
+      final bodyY = snapshot.offset - bodyStart;
+      final position = bodyY <= 0 || painter.height <= 0
+          ? 0
+          : painter
+                .getPositionForOffset(
+                  Offset(
+                    0,
+                    bodyY.clamp(0.0, math.max(0.0, painter.height - 0.01)),
+                  ),
+                )
+                .offset;
+      return _anchorFromJoinedPosition(
+        chapterIndex: _chapterIndex,
+        paragraphs: paragraphs,
+        settings: settings,
+        position: position,
+      );
+    } finally {
+      painter.dispose();
+    }
+  }
+
+  double? _scrollOffsetForTextAnchor(
+    _ReadingTextAnchor anchor, {
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double viewportDimension,
+    required double maxExtent,
+  }) {
+    if (anchor.chapterIndex != _chapterIndex ||
+        _readerViewportWidth <= 0 ||
+        !maxExtent.isFinite) {
+      return null;
+    }
+    final chapter = _book.chapters[anchor.chapterIndex];
+    final paragraphs = _paragraphsFor(chapter);
+    if (paragraphs.isEmpty) return 0;
+    final width = math.max(
+      1.0,
+      _readerViewportWidth - settings.pageMargin.horizontalPadding * 2,
+    );
+    if (chapter.hasRichEpubContent) {
+      final bodyOffset = _richEpubOffsetForAnchor(
+        chapter: chapter,
+        anchor: anchor,
+        settings: settings,
+        mode: mode,
+        width: width,
+      );
+      final rawOffset =
+          _bodyStartOffset(
+            chapter,
+            settings: settings,
+            mode: mode,
+            width: width,
+          ) +
+          bodyOffset;
+      if (mode == ReaderReadingMode.simulation && viewportDimension > 0) {
+        final pageOffset =
+            ((rawOffset + 0.01) / viewportDimension).floor() *
+            viewportDimension;
+        return _alignSimulationOffset(pageOffset, maxExtent: maxExtent);
+      }
+      return rawOffset.clamp(0.0, maxExtent).toDouble();
+    }
+    final bodyText = _joinedBodyText(paragraphs, settings);
+    final joinedPosition = _joinedPositionForAnchor(
+      anchor,
+      paragraphs: paragraphs,
+      settings: settings,
+    );
+    final painter = _layoutBodyText(
+      bodyText,
+      settings: settings,
+      mode: mode,
+      width: width,
+    );
+    try {
+      final caretOffset = painter.getOffsetForCaret(
+        TextPosition(offset: joinedPosition.clamp(0, bodyText.length)),
+        Rect.zero,
+      );
+      final rawOffset =
+          _bodyStartOffset(
+            chapter,
+            settings: settings,
+            mode: mode,
+            width: width,
+          ) +
+          caretOffset.dy;
+      if (mode == ReaderReadingMode.simulation && viewportDimension > 0) {
+        final pageOffset =
+            ((rawOffset + 0.01) / viewportDimension).floor() *
+            viewportDimension;
+        return _alignSimulationOffset(pageOffset, maxExtent: maxExtent);
+      }
+      return rawOffset.clamp(0.0, maxExtent).toDouble();
+    } finally {
+      painter.dispose();
+    }
+  }
+
+  String _joinedBodyText(List<String> paragraphs, ReaderSettings settings) {
+    final separator =
+        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
+        ? '\n\n'
+        : '\n';
+    return paragraphs.join(separator);
+  }
+
+  _ReadingTextAnchor _anchorFromJoinedPosition({
+    required int chapterIndex,
+    required List<String> paragraphs,
+    required ReaderSettings settings,
+    required int position,
+  }) {
+    final separatorLength =
+        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine ? 2 : 1;
+    var cursor = 0;
+    for (var index = 0; index < paragraphs.length; index++) {
+      final paragraphLength = paragraphs[index].length;
+      final paragraphEnd = cursor + paragraphLength;
+      if (position <= paragraphEnd || index == paragraphs.length - 1) {
+        return _ReadingTextAnchor(
+          chapterIndex: chapterIndex,
+          paragraphIndex: index,
+          characterOffset: (position - cursor).clamp(0, paragraphLength),
+        );
+      }
+      final nextParagraphStart = paragraphEnd + separatorLength;
+      if (position < nextParagraphStart) {
+        return _ReadingTextAnchor(
+          chapterIndex: chapterIndex,
+          paragraphIndex: math.min(index + 1, paragraphs.length - 1),
+          characterOffset: 0,
+        );
+      }
+      cursor = nextParagraphStart;
+    }
+    return _ReadingTextAnchor(
+      chapterIndex: chapterIndex,
+      paragraphIndex: paragraphs.length - 1,
+      characterOffset: paragraphs.last.length,
+    );
+  }
+
+  int _joinedPositionForAnchor(
+    _ReadingTextAnchor anchor, {
+    required List<String> paragraphs,
+    required ReaderSettings settings,
+  }) {
+    final separatorLength =
+        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine ? 2 : 1;
+    final paragraphIndex = anchor.paragraphIndex.clamp(
+      0,
+      paragraphs.length - 1,
+    );
+    var position = 0;
+    for (var index = 0; index < paragraphIndex; index++) {
+      position += paragraphs[index].length + separatorLength;
+    }
+    return position +
+        anchor.characterOffset.clamp(0, paragraphs[paragraphIndex].length);
+  }
+
+  double _bodyStartOffset(
+    Chapter chapter, {
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double width,
+  }) {
+    final simulation = mode == ReaderReadingMode.simulation;
+    final lineExtent = settings.fontSize * settings.lineHeight;
+    final titleStyle = TextStyle(
+      fontFamily: settings.effectiveFontFamily,
+      fontSize: 20,
+      fontWeight: FontWeight.w600,
+      height: simulation ? lineExtent / 20 : 1.5,
+    );
+    final titleStrut = simulation
+        ? StrutStyle(
+            fontFamily: settings.effectiveFontFamily,
+            fontSize: 20,
+            height: lineExtent / 20,
+            fontWeight: FontWeight.w600,
+            forceStrutHeight: true,
+          )
+        : null;
+    final titlePainter = TextPainter(
+      text: TextSpan(
+        text: _formatChapterTitle(chapter.title),
+        style: titleStyle,
+      ),
+      textDirection: TextDirection.ltr,
+      textScaler: _readerTextScaler,
+      strutStyle: titleStrut,
+    )..layout(maxWidth: width);
+    try {
+      final topPadding = switch (mode) {
+        ReaderReadingMode.simulation => 0.0,
+        ReaderReadingMode.chapter => _readerViewPadding.top + AppSpacing.lg,
+        ReaderReadingMode.continuous =>
+          _continuousAnchorChapterIndex >= 0 &&
+                  _continuousAnchorChapterIndex < _book.chapters.length &&
+                  identical(
+                    chapter,
+                    _book.chapters[_continuousAnchorChapterIndex],
+                  )
+              ? _readerViewPadding.top + AppSpacing.lg
+              : AppSpacing.xxl,
+      };
+      final titleGap = simulation ? lineExtent : AppSpacing.xl;
+      return topPadding + titlePainter.height + titleGap;
+    } finally {
+      titlePainter.dispose();
+    }
+  }
+
+  TextPainter _layoutBodyText(
+    String text, {
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double width,
+  }) {
+    final simulation = mode == ReaderReadingMode.simulation;
+    return TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          fontFamily: settings.effectiveFontFamily,
+          fontSize: settings.fontSize,
+          fontWeight: settings.effectiveFontWeight,
+          height: settings.lineHeight,
+          letterSpacing: 0.2,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      textScaler: _readerTextScaler,
+      strutStyle: simulation
+          ? StrutStyle(
+              fontFamily: settings.effectiveFontFamily,
+              fontSize: settings.fontSize,
+              height: settings.lineHeight,
+              fontWeight: settings.effectiveFontWeight,
+              forceStrutHeight: true,
+            )
+          : null,
+    )..layout(maxWidth: width);
+  }
+
+  _ReadingTextAnchor _captureRichEpubTextAnchor({
+    required Chapter chapter,
+    required double bodyOffset,
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double width,
+  }) {
+    final safeOffset = math.max(0.0, bodyOffset);
+    var cursor = 0.0;
+    var paragraphIndex = 0;
+    var lastParagraphIndex = 0;
+    for (final block in chapter.epubBlocks) {
+      final extent = _epubBlockExtent(
+        block,
+        settings: settings,
+        mode: mode,
+        width: width,
+      );
+      if (!block.isText || block.text.trim().isEmpty) {
+        if (safeOffset < cursor + extent) {
+          return _ReadingTextAnchor(
+            chapterIndex: chapter.index,
+            paragraphIndex: lastParagraphIndex,
+            characterOffset: 0,
+          );
+        }
+        cursor += extent;
+        continue;
+      }
+      lastParagraphIndex = paragraphIndex;
+      if (safeOffset < cursor + extent) {
+        final metrics = _epubBlockMetrics(
+          block,
+          settings: settings,
+          mode: mode,
+          width: width,
+        );
+        final painter = _layoutEpubTextBlock(
+          block,
+          settings: settings,
+          mode: mode,
+          width: width,
+        );
+        try {
+          final localY = (safeOffset - cursor - metrics.leading)
+              .clamp(0.0, math.max(0.0, painter.height - 0.01))
+              .toDouble();
+          final position = painter
+              .getPositionForOffset(Offset(0, localY))
+              .offset;
+          return _ReadingTextAnchor(
+            chapterIndex: chapter.index,
+            paragraphIndex: paragraphIndex,
+            characterOffset: position.clamp(
+              0,
+              _formatEpubParagraph(block).length,
+            ),
+          );
+        } finally {
+          painter.dispose();
+        }
+      }
+      cursor += extent;
+      paragraphIndex++;
+    }
+    final paragraphs = _paragraphsFor(chapter);
+    return _ReadingTextAnchor(
+      chapterIndex: chapter.index,
+      paragraphIndex: math.max(0, paragraphs.length - 1),
+      characterOffset: paragraphs.isEmpty ? 0 : paragraphs.last.length,
+    );
+  }
+
+  double _richEpubOffsetForAnchor({
+    required Chapter chapter,
+    required _ReadingTextAnchor anchor,
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double width,
+  }) {
+    var cursor = 0.0;
+    var paragraphIndex = 0;
+    for (final block in chapter.epubBlocks) {
+      final metrics = _epubBlockMetrics(
+        block,
+        settings: settings,
+        mode: mode,
+        width: width,
+      );
+      if (block.isText && block.text.trim().isNotEmpty) {
+        if (paragraphIndex == anchor.paragraphIndex) {
+          final painter = _layoutEpubTextBlock(
+            block,
+            settings: settings,
+            mode: mode,
+            width: width,
+          );
+          try {
+            final paragraph = _formatEpubParagraph(block);
+            final caret = painter.getOffsetForCaret(
+              TextPosition(
+                offset: anchor.characterOffset.clamp(0, paragraph.length),
+              ),
+              Rect.zero,
+            );
+            return cursor + metrics.leading + caret.dy;
+          } finally {
+            painter.dispose();
+          }
+        }
+        paragraphIndex++;
+      }
+      cursor += metrics.total;
+    }
+    return cursor;
+  }
+
+  ({double leading, double content, double trailing, double total})
+  _epubBlockMetrics(
+    EpubContentBlock block, {
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double width,
+  }) {
+    final baseLine = settings.fontSize * settings.lineHeight;
+    final leading = block.style.marginTopEm * settings.fontSize;
+    final paragraphGap =
+        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
+        ? baseLine
+        : 0.0;
+    final trailing =
+        block.style.marginBottomEm * settings.fontSize + paragraphGap;
+    double content;
+    if (block.isImage) {
+      content = _epubImageHeight(block, width: width, settings: settings);
+    } else {
+      final painter = _layoutEpubTextBlock(
+        block,
+        settings: settings,
+        mode: mode,
+        width: width,
+      );
+      content = painter.height;
+      painter.dispose();
+    }
+    var total = leading + content + trailing;
+    if (mode == ReaderReadingMode.simulation && baseLine > 0) {
+      total = math.max(baseLine, (total / baseLine).ceil() * baseLine);
+    }
+    return (
+      leading: leading,
+      content: content,
+      trailing: math.max(0, total - leading - content),
+      total: total,
+    );
+  }
+
+  double _epubBlockExtent(
+    EpubContentBlock block, {
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double width,
+  }) => _epubBlockMetrics(
+    block,
+    settings: settings,
+    mode: mode,
+    width: width,
+  ).total;
+
+  double _epubImageHeight(
+    EpubContentBlock block, {
+    required double width,
+    required ReaderSettings settings,
+  }) {
+    final requestedWidth = block.imageWidth;
+    final displayWidth = requestedWidth != null && requestedWidth > 0
+        ? math.min(width, requestedWidth)
+        : width;
+    final sourceWidth = block.imageWidth;
+    final sourceHeight = block.imageHeight;
+    final aspect =
+        sourceWidth != null &&
+            sourceHeight != null &&
+            sourceWidth > 0 &&
+            sourceHeight > 0
+        ? sourceWidth / sourceHeight
+        : 1.5;
+    final naturalHeight = displayWidth / aspect;
+    return naturalHeight.clamp(
+      settings.fontSize * settings.lineHeight * 2,
+      560.0,
+    );
+  }
+
+  TextPainter _layoutEpubTextBlock(
+    EpubContentBlock block, {
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double width,
+  }) {
+    return TextPainter(
+      text: _epubTextSpan(
+        block,
+        settings: settings,
+        foreground: Colors.black,
+        background: Colors.white,
+      ),
+      textDirection: TextDirection.ltr,
+      textAlign: _epubTextAlign(block.style.textAlign),
+      textScaler: _readerTextScaler,
+    )..layout(maxWidth: width);
+  }
+
+  TextSpan _epubTextSpan(
+    EpubContentBlock block, {
+    required ReaderSettings settings,
+    required Color foreground,
+    required Color background,
+  }) {
+    final formatted = _formatEpubParagraph(block);
+    final prefixLength = math.max(0, formatted.length - block.text.length);
+    final children = <InlineSpan>[];
+    if (prefixLength > 0) {
+      children.add(
+        TextSpan(
+          text: formatted.substring(0, prefixLength),
+          style: _epubRunTextStyle(
+            block.style,
+            settings: settings,
+            foreground: foreground,
+            background: background,
+          ),
+        ),
+      );
+    }
+    if (block.runs.isEmpty) {
+      children.add(
+        TextSpan(
+          text: block.text.trim(),
+          style: _epubRunTextStyle(
+            block.style,
+            settings: settings,
+            foreground: foreground,
+            background: background,
+          ),
+        ),
+      );
+    } else {
+      for (final run in block.runs) {
+        children.add(
+          TextSpan(
+            text: run.text,
+            style: _epubRunTextStyle(
+              run.style,
+              settings: settings,
+              foreground: foreground,
+              background: background,
+            ),
+          ),
+        );
+      }
+    }
+    return TextSpan(children: children);
+  }
+
+  TextStyle _epubRunTextStyle(
+    EpubContentStyle style, {
+    required ReaderSettings settings,
+    required Color foreground,
+    required Color background,
+  }) {
+    final weight = style.fontWeight >= 600
+        ? (style.fontWeight >= 800 ? FontWeight.w900 : FontWeight.w700)
+        : settings.effectiveFontWeight;
+    return TextStyle(
+      fontFamily: settings.effectiveFontFamily,
+      fontSize: settings.fontSize * style.fontScale,
+      fontWeight: weight,
+      fontStyle: style.italic ? FontStyle.italic : FontStyle.normal,
+      decoration: style.underline
+          ? TextDecoration.underline
+          : TextDecoration.none,
+      shadows: settings.effectiveFontShadows(foreground),
+      height: settings.lineHeight * style.lineHeightScale,
+      color: _safePublisherForeground(
+        style.colorArgb,
+        fallback: foreground,
+        background: background,
+      ),
+      backgroundColor: style.backgroundColorArgb == null
+          ? null
+          : Color(style.backgroundColorArgb!).withValues(alpha: 0.18),
+      letterSpacing:
+          settings.fontSize * style.fontScale * style.letterSpacingEm + 0.2,
+    );
+  }
+
+  TextAlign _epubTextAlign(String value) => switch (value) {
+    'center' => TextAlign.center,
+    'end' => TextAlign.end,
+    'justify' => TextAlign.justify,
+    _ => TextAlign.start,
+  };
+
+  Color _epubBlockBackground(
+    EpubContentStyle style,
+    ReaderThemeColors themeColors,
+  ) {
+    final raw = style.backgroundColorArgb;
+    if (raw == null) return Colors.transparent;
+    final publisher = Color(raw);
+    final dark = themeColors.background.computeLuminance() < 0.25;
+    return Color.lerp(themeColors.background, publisher, dark ? 0.16 : 0.42)!;
+  }
+
+  Color _epubForeground(
+    EpubContentStyle style,
+    ReaderThemeColors themeColors,
+    Color background,
+  ) {
+    return _safePublisherForeground(
+      style.colorArgb,
+      fallback: themeColors.text,
+      background: background,
+    );
+  }
+
+  Color _safePublisherForeground(
+    int? raw, {
+    required Color fallback,
+    required Color background,
+  }) {
+    if (raw == null) return fallback;
+    final publisher = Color(raw);
+    final first = publisher.computeLuminance() + 0.05;
+    final second = background.computeLuminance() + 0.05;
+    final contrast = first > second ? first / second : second / first;
+    return contrast >= 3 ? publisher : fallback;
+  }
+
+  Widget _buildEpubBlockWidget({
+    required EpubContentBlock block,
+    required ReaderThemeColors themeColors,
+    required double width,
+    required bool simulationPage,
+  }) {
+    final mode = simulationPage
+        ? ReaderReadingMode.simulation
+        : _settings.readingMode;
+    final metrics = _epubBlockMetrics(
+      block,
+      settings: _settings,
+      mode: mode,
+      width: width,
+    );
+    final blockBackground = _epubBlockBackground(block.style, themeColors);
+    final foreground = _epubForeground(
+      block.style,
+      themeColors,
+      blockBackground == Colors.transparent
+          ? themeColors.background
+          : blockBackground,
+    );
+    Widget content;
+    if (block.isImage) {
+      final path = block.imagePath;
+      final requestedWidth = block.imageWidth;
+      final displayWidth = requestedWidth != null && requestedWidth > 0
+          ? math.min(width, requestedWidth)
+          : width;
+      content = SizedBox(
+        width: displayWidth,
+        height: metrics.content,
+        child: path == null
+            ? _epubImageFallback(block, themeColors)
+            : Image.file(
+                File(path),
+                fit: BoxFit.contain,
+                alignment: Alignment.center,
+                filterQuality: FilterQuality.medium,
+                errorBuilder: (_, _, _) =>
+                    _epubImageFallback(block, themeColors),
+              ),
+      );
+      content = Align(
+        alignment: switch (block.style.textAlign) {
+          'center' => Alignment.center,
+          'end' => Alignment.centerRight,
+          _ => Alignment.centerLeft,
+        },
+        child: content,
+      );
+    } else {
+      content = SizedBox(
+        width: width,
+        height: metrics.content,
+        child: Text.rich(
+          _epubTextSpan(
+            block,
+            settings: _settings,
+            foreground: foreground,
+            background: blockBackground == Colors.transparent
+                ? themeColors.background
+                : blockBackground,
+          ),
+          textAlign: _epubTextAlign(block.style.textAlign),
+          textScaler: _readerTextScaler,
+        ),
+      );
+    }
+
+    final backgroundPath = block.style.backgroundImagePath;
+    final decoration =
+        blockBackground == Colors.transparent && backgroundPath == null
+        ? null
+        : BoxDecoration(
+            color: blockBackground == Colors.transparent
+                ? null
+                : blockBackground,
+            image: backgroundPath != null && File(backgroundPath).existsSync()
+                ? DecorationImage(
+                    image: FileImage(File(backgroundPath)),
+                    fit: BoxFit.cover,
+                    opacity: 0.22,
+                  )
+                : null,
+            borderRadius: BorderRadius.circular(AppRadius.sm),
+          );
+    return SizedBox(
+      height: metrics.total,
+      child: Padding(
+        padding: EdgeInsets.only(
+          top: metrics.leading,
+          bottom: metrics.trailing,
+        ),
+        child: DecoratedBox(
+          decoration: decoration ?? const BoxDecoration(),
+          child: content,
+        ),
+      ),
+    );
+  }
+
+  Widget _epubImageFallback(
+    EpubContentBlock block,
+    ReaderThemeColors themeColors,
+  ) {
+    final label = block.altText?.trim();
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: themeColors.headerBg,
+        border: Border.all(color: themeColors.border),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.md),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.broken_image_outlined,
+                color: themeColors.secondary,
+                size: 28,
+              ),
+              if (label != null && label.isNotEmpty) ...[
+                const SizedBox(height: AppSpacing.xs),
+                Text(
+                  label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: themeColors.secondary, fontSize: 12),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _setPageDragOffset(double value) {
@@ -918,6 +1802,8 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<bool> _capturePageTurnSnapshot() {
     if (!mounted ||
+        _readerModalOpen ||
+        _textSelectionActiveNotifier.value ||
         _settings.readingMode != ReaderReadingMode.simulation ||
         _settings.simulationPageTurnEffect !=
             SimulationPageTurnEffect.simulation) {
@@ -951,6 +1837,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       // frame. Wait for paint instead of permanently blocking every drag.
       for (var attempt = 0; attempt < 8; attempt++) {
         if (!mounted ||
+            _readerModalOpen ||
+            _textSelectionActiveNotifier.value ||
             serial != _pageTurnSnapshotSerial ||
             chapterIndex != _chapterIndex ||
             _settings.readingMode != ReaderReadingMode.simulation ||
@@ -972,6 +1860,8 @@ class _ReaderScreenState extends State<ReaderScreen>
 
       final image = await boundary.toImage(pixelRatio: pixelRatio);
       if (!mounted ||
+          _readerModalOpen ||
+          _textSelectionActiveNotifier.value ||
           serial != _pageTurnSnapshotSerial ||
           chapterIndex != _chapterIndex ||
           _settings.readingMode != ReaderReadingMode.simulation ||
@@ -1004,14 +1894,16 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _scheduleReversePageTurnSnapshotCapture(_SimulationPageTarget target) {
-    if (target.goingNext ||
+    if (_readerModalOpen ||
+        _textSelectionActiveNotifier.value ||
+        target.goingNext ||
         _settings.readingMode != ReaderReadingMode.simulation ||
         _settings.simulationPageTurnEffect !=
             SimulationPageTurnEffect.simulation) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || _readerModalOpen) return;
       final currentTarget = _simulationPageTarget;
       if (currentTarget == null ||
           currentTarget.goingNext ||
@@ -1023,7 +1915,12 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<bool> _captureReversePageTurnSnapshot(_SimulationPageTarget target) {
-    if (!mounted || target.goingNext) return Future<bool>.value(false);
+    if (!mounted ||
+        _readerModalOpen ||
+        _textSelectionActiveNotifier.value ||
+        target.goingNext) {
+      return Future<bool>.value(false);
+    }
     final currentTarget = _simulationPageTarget;
     if (currentTarget == null || !currentTarget.matches(target)) {
       return Future<bool>.value(false);
@@ -1054,6 +1951,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       for (var attempt = 0; attempt < 8; attempt++) {
         final currentTarget = _simulationPageTarget;
         if (!mounted ||
+            _readerModalOpen ||
+            _textSelectionActiveNotifier.value ||
             serial != _reversePageTurnSnapshotSerial ||
             currentTarget == null ||
             currentTarget.goingNext ||
@@ -1075,6 +1974,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       final image = await boundary.toImage(pixelRatio: pixelRatio);
       final currentTarget = _simulationPageTarget;
       if (!mounted ||
+          _readerModalOpen ||
+          _textSelectionActiveNotifier.value ||
           serial != _reversePageTurnSnapshotSerial ||
           currentTarget == null ||
           currentTarget.goingNext ||
@@ -1105,7 +2006,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _scheduleSimulationSnapshotWarmup() {
-    if (!_settingsLoaded ||
+    if (_readerModalOpen ||
+        _textSelectionActiveNotifier.value ||
+        !_settingsLoaded ||
         _settings.readingMode != ReaderReadingMode.simulation ||
         _settings.simulationPageTurnEffect !=
             SimulationPageTurnEffect.simulation ||
@@ -1115,6 +2018,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
+          _readerModalOpen ||
+          _textSelectionActiveNotifier.value ||
           _settings.readingMode != ReaderReadingMode.simulation ||
           _settings.simulationPageTurnEffect !=
               SimulationPageTurnEffect.simulation ||
@@ -1158,6 +2063,44 @@ class _ReaderScreenState extends State<ReaderScreen>
     _scheduleSimulationSnapshotWarmup();
   }
 
+  /// Freezes simulation pagination while a reader-owned modal is visible.
+  ///
+  /// The search route owns the keyboard inset.  Letting that inset reach the
+  /// underlying simulation `LayoutBuilder` repaginates the current chapter
+  /// while the user is typing, which looks like the page jumps underneath the
+  /// sheet and can leave a stale paper-back snapshot behind.
+  void _beginReaderModal() {
+    if (_readerModalOpen) return;
+    _readerModalOpen = true;
+    _simulationViewportLock =
+        _settings.readingMode == ReaderReadingMode.simulation &&
+            _readerViewportHeight > 0
+        ? _readerViewportHeight
+        : null;
+    _clearReadingTap();
+    _clearSimulationTurnPointer();
+    _pageTurnSerial++;
+    if (_pageTurnController.isAnimating ||
+        _pageDragOffset != 0 ||
+        _pageDragTargetIndex != null ||
+        _simulationPageTarget != null) {
+      _resetPageDrag(rebuild: false);
+    } else {
+      _discardPageTurnSnapshot();
+      _discardReversePageTurnSnapshot();
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _endReaderModal() {
+    if (!_readerModalOpen) return;
+    _readerModalOpen = false;
+    _simulationViewportLock = null;
+    if (!mounted) return;
+    setState(() {});
+    _scheduleSimulationSnapshotWarmup();
+  }
+
   void _scheduleAdjacentWarmup() {
     if (!mounted) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1179,6 +2122,10 @@ class _ReaderScreenState extends State<ReaderScreen>
       final snapshot = _currentScrollSnapshot();
       final previousMode = _settings.readingMode;
       final modeChanged = previousMode != pending.readingMode;
+      final textLayoutChanged = _changesTextLayout(_settings, pending);
+      final textAnchor = textLayoutChanged
+          ? _captureReadingTextAnchor(snapshot)
+          : null;
       final rebuildsContinuous =
           previousMode == ReaderReadingMode.continuous ||
           pending.readingMode == ReaderReadingMode.continuous;
@@ -1213,7 +2160,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           _scrollController = nextController;
           _warmAdjacentPages = false;
           _pageDragTargetIndex = null;
-          _readingModeReloading = rebuildsSimulation;
+          _readingModeReloading = rebuildsReadingController;
         });
         WidgetsBinding.instance.addPostFrameCallback((_) {
           previousController.dispose();
@@ -1240,13 +2187,18 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
 
       if (pending.readingMode == ReaderReadingMode.continuous) {
-        _requestContinuousRestore(snapshot.progress);
+        _requestContinuousRestore(
+          snapshot.progress,
+          offset: snapshot.offset,
+          textAnchor: textAnchor,
+        );
       } else {
         _scheduleAdjacentWarmup();
         _requestScrollRestore(
           offset: snapshot.offset,
           progress: snapshot.progress,
-          preferProgress: true,
+          preferProgress: false,
+          textAnchor: textAnchor,
         );
         _scheduleSimulationSnapshotWarmup();
       }
@@ -1299,7 +2251,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       previousController.dispose();
     });
     _enqueueProgressSave(progress);
-    _requestContinuousRestore(targetProgress);
+    _requestContinuousRestore(targetProgress, offset: targetOffset);
   }
 
   void _switchChapter(int index, {required bool startAtTop}) {
@@ -1473,6 +2425,13 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleReadingPointerMove(PointerMoveEvent event, double width) {
+    if (_textSelectionActiveNotifier.value) {
+      if (event.pointer == _readingTapPointer) _readingTapMoved = true;
+      if (event.pointer == _simulationTurnPointer) {
+        _clearSimulationTurnPointer();
+      }
+      return;
+    }
     if (event.pointer == _simulationTurnPointer) {
       _simulationTurnVelocityTracker?.addPosition(
         event.timeStamp,
@@ -1561,6 +2520,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleHorizontalDragStart(DragStartDetails _) {
+    if (_textSelectionActiveNotifier.value) return;
     _beginHorizontalPageTurn();
   }
 
@@ -1603,6 +2563,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleHorizontalDragUpdate(DragUpdateDetails details, double width) {
+    if (_textSelectionActiveNotifier.value) return;
     _updateHorizontalPageTurn(deltaX: details.delta.dx, width: width);
   }
 
@@ -1678,18 +2639,26 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     final position = _scrollController.position;
     final maxExtent = position.maxScrollExtent;
-    final currentOffset = position.pixels.clamp(0.0, maxExtent).toDouble();
+    final currentOffset = _alignSimulationOffset(
+      position.pixels.clamp(0.0, maxExtent).toDouble(),
+      maxExtent: maxExtent,
+    );
     final pageExtent = math.max(1.0, position.viewportDimension);
 
     if (goingNext) {
       if (currentOffset < maxExtent - 1) {
-        final targetOffset = math.min(maxExtent, currentOffset + pageExtent);
-        return _SimulationPageTarget(
-          chapterIndex: _chapterIndex,
-          offset: targetOffset,
-          progress: maxExtent > 0 ? targetOffset / maxExtent : 0,
-          goingNext: true,
+        final targetOffset = _alignSimulationOffset(
+          currentOffset + pageExtent,
+          maxExtent: maxExtent,
         );
+        if (targetOffset > currentOffset + 0.5) {
+          return _SimulationPageTarget(
+            chapterIndex: _chapterIndex,
+            offset: targetOffset,
+            progress: maxExtent > 0 ? targetOffset / maxExtent : 0,
+            goingNext: true,
+          );
+        }
       }
       if (_chapterIndex >= _book.chapters.length - 1) return null;
       final targetIndex = _chapterIndex + 1;
@@ -1703,7 +2672,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
 
     if (currentOffset > 1) {
-      final targetOffset = math.max(0.0, currentOffset - pageExtent);
+      final targetOffset = _alignSimulationOffset(
+        math.max(0.0, currentOffset - pageExtent),
+        maxExtent: maxExtent,
+      );
       return _SimulationPageTarget(
         chapterIndex: _chapterIndex,
         offset: targetOffset,
@@ -1775,6 +2747,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleHorizontalDragEnd(DragEndDetails details, double width) {
+    if (_textSelectionActiveNotifier.value) return;
     _endHorizontalPageTurn(details.primaryVelocity ?? 0, width);
   }
 
@@ -1851,9 +2824,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
 
     final position = _scrollController.position;
-    final targetOffset = target.offset
-        .clamp(position.minScrollExtent, position.maxScrollExtent)
-        .toDouble();
+    final targetOffset = _alignSimulationOffset(
+      target.offset
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble(),
+      maxExtent: position.maxScrollExtent,
+    );
     final previousPreview = _simulationPreviewController;
     final previousPaperBack = _simulationPaperBackController;
     // Commit the active controller to the exact preview offset while the
@@ -1889,6 +2865,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (blocked) ContextMenuController.removeAny();
     if (_selectionBlockedNotifier.value == blocked) return;
     _selectionBlockedNotifier.value = blocked;
+  }
+
+  void _handleTextSelectionActivityChanged() {
+    if (!_textSelectionActiveNotifier.value) return;
+    _readingTapMoved = true;
+    _clearSimulationTurnPointer();
+    if (_pageDragOffset != 0 || _simulationPageTarget != null) {
+      _resetPageDrag();
+    }
   }
 
   void _showChapterList() {
@@ -1990,11 +2975,91 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  void _showSearch() {
+    unawaited(_presentSearch());
+  }
+
+  Future<void> _presentSearch() async {
+    if (!mounted || _readerModalOpen) return;
+    final themeColors = AppTheme.getReaderTheme(
+      _settings.theme,
+      systemBrightness: MediaQuery.platformBrightnessOf(context),
+    );
+    _beginReaderModal();
+    BookSearchResult? selectedResult;
+    try {
+      selectedResult = await showModalBottomSheet<BookSearchResult>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (sheetContext) => AnimatedPadding(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+          ),
+          child: FractionallySizedBox(
+            heightFactor: 0.88,
+            child: BookSearchSheet(
+              colors: themeColors,
+              onSearch: (query) => BookSearchService.search(_book, query),
+              onSelect: (result) =>
+                  Navigator.of(sheetContext).pop<BookSearchResult>(result),
+            ),
+          ),
+        ),
+      );
+    } finally {
+      _endReaderModal();
+    }
+
+    // Route and keyboard disposal complete before the reader creates a new
+    // controller for the matched text anchor.  This avoids positioning a
+    // simulated page during the bottom-sheet reverse animation.
+    if (selectedResult == null || !mounted) return;
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    _openSearchResult(selectedResult);
+  }
+
+  void _openSearchResult(BookSearchResult result) {
+    if (result.chapterIndex < 0 ||
+        result.chapterIndex >= _book.chapters.length) {
+      return;
+    }
+    final anchor = _ReadingTextAnchor(
+      chapterIndex: result.chapterIndex,
+      paragraphIndex: result.paragraphIndex,
+      characterOffset:
+          result.characterOffset +
+          _paragraphPrefixLength(
+            _book.chapters[result.chapterIndex],
+            result.paragraphIndex,
+          ),
+    );
+    if (!_readingModeReloading) {
+      setState(() => _readingModeReloading = true);
+    }
+    if (_settings.readingMode == ReaderReadingMode.continuous) {
+      _switchContinuousChapter(result.chapterIndex, startAtTop: true);
+      _requestContinuousRestore(0, textAnchor: anchor);
+    } else {
+      _switchChapter(result.chapterIndex, startAtTop: true);
+      _requestScrollRestore(
+        offset: 0,
+        progress: 0,
+        preferProgress: false,
+        textAnchor: anchor,
+      );
+    }
+  }
+
   void _showReaderMessage(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         behavior: SnackBarBehavior.floating,
+        dismissDirection: DismissDirection.horizontal,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.md),
         ),
@@ -2088,13 +3153,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     final horizontalPadding = _settings.pageMargin.horizontalPadding;
 
     final content = PopScope(
-      canPop: _closingReader,
+      canPop: false,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
         _closeReader();
       },
       child: Scaffold(
         backgroundColor: themeColors.background,
+        // Search owns the IME through its modal route.  Resizing this scaffold
+        // would shrink a simulated page behind the sheet and force a visible
+        // repagination of the reader body.
+        resizeToAvoidBottomInset: false,
         body: Stack(
           children: [
             // ── Stable reader background ─────────────
@@ -2107,6 +3176,22 @@ class _ReaderScreenState extends State<ReaderScreen>
             LayoutBuilder(
               builder: (context, constraints) {
                 final width = constraints.maxWidth;
+                final reportedHeight = constraints.maxHeight;
+                final stableViewPadding = viewPadding.copyWith(
+                  top: stableTopInset,
+                );
+                _readerViewportWidth = width;
+                if (!_readerModalOpen) {
+                  _readerViewportHeight = reportedHeight;
+                }
+                _readerViewPadding = stableViewPadding;
+                _readerTextScaler = MediaQuery.textScalerOf(context);
+                final readerHeight =
+                    _readerModalOpen &&
+                        _settings.readingMode == ReaderReadingMode.simulation &&
+                        _simulationViewportLock != null
+                    ? _simulationViewportLock!
+                    : reportedHeight;
                 return Listener(
                   behavior: HitTestBehavior.opaque,
                   onPointerDown: _handleReadingPointerDown,
@@ -2143,12 +3228,10 @@ class _ReaderScreenState extends State<ReaderScreen>
                           ClipRect(
                             child: _buildReadingModeView(
                               width: width,
-                              height: constraints.maxHeight,
+                              height: readerHeight,
                               themeColors: themeColors,
                               fontFamily: fontFamily,
-                              viewPadding: viewPadding.copyWith(
-                                top: stableTopInset,
-                              ),
+                              viewPadding: stableViewPadding,
                               horizontalPadding: horizontalPadding,
                             ),
                           ),
@@ -2307,6 +3390,13 @@ class _ReaderScreenState extends State<ReaderScreen>
                               subtitle:
                                   '${_chapterIndex + 1}/${_book.chapters.length}',
                               onTap: _showChapterList,
+                              color: themeColors.secondary,
+                            ),
+                            _bottomBarButton(
+                              icon: Icons.search_rounded,
+                              label: '搜索',
+                              subtitle: '全文',
+                              onTap: _showSearch,
                               color: themeColors.secondary,
                             ),
                             _bottomBarButton(
@@ -2469,8 +3559,22 @@ class _ReaderScreenState extends State<ReaderScreen>
             SliverPadding(
               padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
               sliver: SliverList.builder(
-                itemCount: 1,
-                itemBuilder: (context, _) {
+                itemCount: chapter.hasRichEpubContent
+                    ? chapter.epubBlocks.length
+                    : 1,
+                itemBuilder: (context, itemIndex) {
+                  if (chapter.hasRichEpubContent) {
+                    final contentWidth = math.max(
+                      1.0,
+                      _readerViewportWidth - horizontalPadding * 2,
+                    );
+                    return _buildEpubBlockWidget(
+                      block: chapter.epubBlocks[itemIndex],
+                      themeColors: themeColors,
+                      width: contentWidth,
+                      simulationPage: false,
+                    );
+                  }
                   final separator =
                       _settings.paragraphSpacing ==
                           ReaderParagraphSpacing.blankLine
@@ -2509,6 +3613,9 @@ class _ReaderScreenState extends State<ReaderScreen>
         child: _DoubleTapFilteredSelectionArea(
           colors: themeColors,
           selectionBlocked: _selectionBlockedNotifier,
+          selectionActive: _textSelectionActiveNotifier,
+          onReaderModalOpened: _beginReaderModal,
+          onReaderModalClosed: _endReaderModal,
           child: CustomScrollView(
             key: ValueKey(
               'continuous-$_continuousAnchorChapterIndex-${_settings.fontSize}-${_settings.lineHeight}',
@@ -2814,12 +3921,18 @@ class _ReaderScreenState extends State<ReaderScreen>
     bool simulationPage = false,
   }) {
     final paragraphs = _paragraphsFor(chapter);
+    final richBlocks = chapter.hasRichEpubContent
+        ? chapter.epubBlocks
+        : const <EpubContentBlock>[];
     final lineExtent = _settings.fontSize * _settings.lineHeight;
     final paragraphGap =
         _settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
         ? lineExtent
         : 0.0;
-    final itemCount = paragraphs.length + 2;
+    final bodyItemCount = chapter.hasRichEpubContent
+        ? richBlocks.length
+        : paragraphs.length;
+    final itemCount = bodyItemCount + 2;
     final scrollView = ListView.builder(
       key: ValueKey<String>(
         'chapter-${identityHashCode(chapter)}-controller-${identityHashCode(controller)}-${simulationPage ? 'simulation' : 'scroll'}',
@@ -2827,7 +3940,9 @@ class _ReaderScreenState extends State<ReaderScreen>
       controller: controller,
       primary: false,
       physics: physics,
-      scrollCacheExtent: const ScrollCacheExtent.pixels(900),
+      scrollCacheExtent: simulationPage
+          ? const ScrollCacheExtent.pixels(0)
+          : const ScrollCacheExtent.pixels(900),
       padding: EdgeInsets.fromLTRB(
         horizontalPadding,
         simulationPage ? 0 : viewPadding.top + AppSpacing.lg,
@@ -2871,6 +3986,18 @@ class _ReaderScreenState extends State<ReaderScreen>
         }
 
         final paragraphIndex = index - 1;
+        if (chapter.hasRichEpubContent) {
+          final contentWidth = math.max(
+            1.0,
+            _readerViewportWidth - horizontalPadding * 2,
+          );
+          return _buildEpubBlockWidget(
+            block: richBlocks[paragraphIndex],
+            themeColors: themeColors,
+            width: contentWidth,
+            simulationPage: simulationPage,
+          );
+        }
         return Padding(
           padding: EdgeInsets.only(
             bottom: paragraphIndex == paragraphs.length - 1 ? 0 : paragraphGap,
@@ -2907,6 +4034,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     Widget readingContent = _DoubleTapFilteredSelectionArea(
       colors: themeColors,
       selectionBlocked: _selectionBlockedNotifier,
+      selectionActive: _textSelectionActiveNotifier,
+      onReaderModalOpened: _beginReaderModal,
+      onReaderModalClosed: _endReaderModal,
       child: scrollView,
     );
     if (simulationPage) {
@@ -3040,11 +4170,17 @@ class _DoubleTapFilteredSelectionArea extends StatefulWidget {
   final Widget child;
   final ReaderThemeColors colors;
   final ValueListenable<bool> selectionBlocked;
+  final ValueNotifier<bool> selectionActive;
+  final VoidCallback onReaderModalOpened;
+  final VoidCallback onReaderModalClosed;
 
   const _DoubleTapFilteredSelectionArea({
     required this.child,
     required this.colors,
     required this.selectionBlocked,
+    required this.selectionActive,
+    required this.onReaderModalOpened,
+    required this.onReaderModalClosed,
   });
 
   @override
@@ -3086,6 +4222,7 @@ class _DoubleTapFilteredSelectionAreaState
   SelectedContent? _selectedContent;
   Timer? _suppressionTimer;
   bool _externallyBlocked = false;
+  bool _ownsActiveSelection = false;
 
   @override
   void initState() {
@@ -3107,6 +4244,7 @@ class _DoubleTapFilteredSelectionAreaState
   void _handleSelectionBlockChanged() {
     _externallyBlocked = widget.selectionBlocked.value;
     if (!_externallyBlocked) return;
+    _setSelectionActive(false);
     _selectedContent = null;
     ContextMenuController.removeAny();
     _selectionAreaKey.currentState?.selectableRegion.clearSelection();
@@ -3186,17 +4324,46 @@ class _DoubleTapFilteredSelectionAreaState
 
   void _handleSelectionChanged(SelectedContent? content) {
     _selectedContent = content;
-    if (content == null ||
-        (!_suppressSelection && !_externallyBlocked) ||
-        _clearScheduled) {
+    final selectedText = content?.plainText.trim();
+    if (selectedText == null || selectedText.isEmpty) {
+      _setSelectionActive(false);
+      ContextMenuController.removeAny();
+      if (content != null) _scheduleInvalidSelectionClear();
       return;
     }
+    if (!_suppressSelection && !_externallyBlocked) {
+      _setSelectionActive(true);
+      return;
+    }
+    _setSelectionActive(false);
+    if (_clearScheduled) return;
+    _scheduleSelectionClear();
+  }
+
+  void _scheduleInvalidSelectionClear() {
+    if (_clearScheduled) return;
+    _clearScheduled = true;
+    scheduleMicrotask(() {
+      _clearScheduled = false;
+      if (!mounted) return;
+      final selectedText = _selectedContent?.plainText.trim();
+      if (selectedText != null && selectedText.isNotEmpty) return;
+      ContextMenuController.removeAny();
+      _selectedContent = null;
+      _setSelectionActive(false);
+      _selectionAreaKey.currentState?.selectableRegion.clearSelection();
+    });
+  }
+
+  void _scheduleSelectionClear() {
+    if (_clearScheduled) return;
     _clearScheduled = true;
     scheduleMicrotask(() {
       _clearScheduled = false;
       if (!mounted || (!_suppressSelection && !_externallyBlocked)) return;
       ContextMenuController.removeAny();
       _selectedContent = null;
+      _setSelectionActive(false);
       _selectionAreaKey.currentState?.selectableRegion.clearSelection();
     });
   }
@@ -3234,11 +4401,17 @@ class _DoubleTapFilteredSelectionAreaState
         }
       }
       if (defaultTarget != null) {
-        final launched = await SystemTextActionService.launch(
-          action: action,
-          target: defaultTarget,
-          text: selectedText,
-        );
+        bool launched;
+        try {
+          launched = await SystemTextActionService.launch(
+            action: action,
+            target: defaultTarget,
+            text: selectedText,
+          );
+        } on Object {
+          await SystemTextActionService.setDefaultTargetId(action, null);
+          rethrow;
+        }
         if (launched) return;
         await SystemTextActionService.setDefaultTargetId(action, null);
       }
@@ -3269,7 +4442,7 @@ class _DoubleTapFilteredSelectionAreaState
           ),
         );
       }
-    } on PlatformException catch (error, stackTrace) {
+    } on Object catch (error, stackTrace) {
       debugPrint('Failed to launch a system text action: $error');
       debugPrintStack(stackTrace: stackTrace);
       if (mounted) {
@@ -3305,140 +4478,149 @@ class _DoubleTapFilteredSelectionAreaState
 
     var selectedId = availableTargets.first.id;
     var remember = false;
-    return showModalBottomSheet<_TextActionChoice>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      barrierColor: Colors.black.withValues(alpha: 0.32),
-      builder: (sheetContext) => StatefulBuilder(
-        builder: (context, setSheetState) {
-          final selected = targets.firstWhere(
-            (target) => target.id == selectedId,
-          );
-          return SafeArea(
-            child: Container(
-              margin: const EdgeInsets.all(AppSpacing.md),
-              padding: const EdgeInsets.fromLTRB(
-                AppSpacing.lg,
-                AppSpacing.lg,
-                AppSpacing.lg,
-                AppSpacing.md,
-              ),
-              decoration: BoxDecoration(
-                color: widget.colors.headerBg,
-                borderRadius: BorderRadius.circular(AppRadius.pill),
-                border: Border.all(color: widget.colors.border),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.18),
-                    blurRadius: 24,
-                    offset: const Offset(0, 10),
-                  ),
-                ],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    action == SystemTextActionType.translate
-                        ? '选择 AI 翻译应用'
-                        : '选择搜索浏览器',
-                    style: TextStyle(
-                      color: widget.colors.text,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
+    widget.onReaderModalOpened();
+    try {
+      return await showModalBottomSheet<_TextActionChoice>(
+        context: context,
+        backgroundColor: Colors.transparent,
+        barrierColor: Colors.black.withValues(alpha: 0.32),
+        builder: (sheetContext) => StatefulBuilder(
+          builder: (context, setSheetState) {
+            final selected = targets.firstWhere(
+              (target) => target.id == selectedId,
+            );
+            return SafeArea(
+              child: Container(
+                margin: const EdgeInsets.all(AppSpacing.md),
+                padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.lg,
+                  AppSpacing.lg,
+                  AppSpacing.lg,
+                  AppSpacing.md,
+                ),
+                decoration: BoxDecoration(
+                  color: widget.colors.headerBg,
+                  borderRadius: BorderRadius.circular(AppRadius.pill),
+                  border: Border.all(color: widget.colors.border),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.18),
+                      blurRadius: 24,
+                      offset: const Offset(0, 10),
                     ),
-                  ),
-                  const SizedBox(height: AppSpacing.xs),
-                  Text(
-                    action == SystemTextActionType.translate
-                        ? '左右滑动选择已安装且可以接收文字的 AI 应用'
-                        : '左右滑动选择 edge、chrome 或系统浏览器',
-                    style: TextStyle(
-                      color: widget.colors.secondary,
-                      fontSize: 12,
-                    ),
-                  ),
-                  const SizedBox(height: AppSpacing.md),
-                  SizedBox(
-                    height: 120,
-                    child: ListView.separated(
-                      scrollDirection: Axis.horizontal,
-                      physics: const BouncingScrollPhysics(
-                        parent: AlwaysScrollableScrollPhysics(),
-                      ),
-                      padding: const EdgeInsets.symmetric(horizontal: 2),
-                      itemCount: targets.length,
-                      separatorBuilder: (_, _) =>
-                          const SizedBox(width: AppSpacing.sm),
-                      itemBuilder: (context, index) {
-                        final target = targets[index];
-                        return _buildTextActionTargetCard(
-                          target: target,
-                          selected: target.id == selectedId,
-                          action: action,
-                          onTap: target.available
-                              ? () =>
-                                    setSheetState(() => selectedId = target.id)
-                              : null,
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: AppSpacing.xs),
-                  CheckboxListTile(
-                    value: remember,
-                    onChanged: (value) =>
-                        setSheetState(() => remember = value ?? false),
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    activeColor: widget.colors.accent,
-                    checkColor: Colors.white,
-                    title: Text(
-                      '记住并默认打开',
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      action == SystemTextActionType.translate
+                          ? '选择 AI 翻译应用'
+                          : '选择搜索浏览器',
                       style: TextStyle(
                         color: widget.colors.text,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
-                    subtitle: Text(
-                      '下次点击${action == SystemTextActionType.translate ? '翻译' : '搜索'}时直接跳转',
+                    const SizedBox(height: AppSpacing.xs),
+                    Text(
+                      action == SystemTextActionType.translate
+                          ? '左右滑动选择已安装且可以接收文字的 AI 应用'
+                          : '左右滑动选择 edge、chrome 或系统浏览器',
                       style: TextStyle(
                         color: widget.colors.secondary,
-                        fontSize: 11,
+                        fontSize: 12,
                       ),
                     ),
-                  ),
-                  const SizedBox(height: AppSpacing.sm),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: () => Navigator.pop(
-                        sheetContext,
-                        _TextActionChoice(target: selected, remember: remember),
+                    const SizedBox(height: AppSpacing.md),
+                    SizedBox(
+                      height: 120,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        physics: const BouncingScrollPhysics(
+                          parent: AlwaysScrollableScrollPhysics(),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        itemCount: targets.length,
+                        separatorBuilder: (_, _) =>
+                            const SizedBox(width: AppSpacing.sm),
+                        itemBuilder: (context, index) {
+                          final target = targets[index];
+                          return _buildTextActionTargetCard(
+                            target: target,
+                            selected: target.id == selectedId,
+                            action: action,
+                            onTap: target.available
+                                ? () => setSheetState(
+                                    () => selectedId = target.id,
+                                  )
+                                : null,
+                          );
+                        },
                       ),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: widget.colors.accent,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                          vertical: AppSpacing.md,
+                    ),
+                    const SizedBox(height: AppSpacing.xs),
+                    CheckboxListTile(
+                      value: remember,
+                      onChanged: (value) =>
+                          setSheetState(() => remember = value ?? false),
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      activeColor: widget.colors.accent,
+                      checkColor: Colors.white,
+                      title: Text(
+                        '记住并默认打开',
+                        style: TextStyle(
+                          color: widget.colors.text,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                      child: Text(
-                        action == SystemTextActionType.translate
-                            ? '发送给 ${selected.label}'
-                            : '使用 ${selected.label} 搜索',
+                      subtitle: Text(
+                        '下次点击${action == SystemTextActionType.translate ? '翻译' : '搜索'}时直接跳转',
+                        style: TextStyle(
+                          color: widget.colors.secondary,
+                          fontSize: 11,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: AppSpacing.sm),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        onPressed: () => Navigator.pop(
+                          sheetContext,
+                          _TextActionChoice(
+                            target: selected,
+                            remember: remember,
+                          ),
+                        ),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: widget.colors.accent,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                            vertical: AppSpacing.md,
+                          ),
+                        ),
+                        child: Text(
+                          action == SystemTextActionType.translate
+                              ? '发送给 ${selected.label}'
+                              : '使用 ${selected.label} 搜索',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          );
-        },
-      ),
-    );
+            );
+          },
+        ),
+      );
+    } finally {
+      widget.onReaderModalClosed();
+    }
   }
 
   Widget _buildTextActionTargetCard({
@@ -3623,12 +4805,21 @@ class _DoubleTapFilteredSelectionAreaState
 
   Widget _buildContextMenu(BuildContext context, SelectableRegionState state) {
     if (_externallyBlocked) return const SizedBox.shrink();
+    final selectedText = _selectedContent?.plainText.trim();
+    if (selectedText == null || selectedText.isEmpty) {
+      _scheduleInvalidSelectionClear();
+      return const SizedBox.shrink();
+    }
     final defaults = state.contextMenuButtonItems;
     final copy = _buttonOfType(defaults, ContextMenuButtonType.copy);
     final share = _buttonOfType(defaults, ContextMenuButtonType.share);
     final selectAll = _buttonOfType(defaults, ContextMenuButtonType.selectAll);
+    if (copy == null) {
+      _scheduleInvalidSelectionClear();
+      return const SizedBox.shrink();
+    }
     final buttons = <ContextMenuButtonItem>[
-      if (copy != null) copy.copyWith(label: '复制'),
+      copy.copyWith(label: '复制'),
       if (share != null) share.copyWith(label: '分享'),
       if (selectAll != null) selectAll.copyWith(label: '全选'),
       ContextMenuButtonItem(
@@ -3665,8 +4856,22 @@ class _DoubleTapFilteredSelectionAreaState
   @override
   void dispose() {
     widget.selectionBlocked.removeListener(_handleSelectionBlockChanged);
+    if (_ownsActiveSelection && widget.selectionActive.value) {
+      widget.selectionActive.value = false;
+    }
     _suppressionTimer?.cancel();
     super.dispose();
+  }
+
+  void _setSelectionActive(bool active) {
+    if (active) {
+      _ownsActiveSelection = true;
+      if (!widget.selectionActive.value) widget.selectionActive.value = true;
+      return;
+    }
+    if (!_ownsActiveSelection) return;
+    _ownsActiveSelection = false;
+    if (widget.selectionActive.value) widget.selectionActive.value = false;
   }
 
   @override
@@ -3712,6 +4917,155 @@ class _SimulationPageTarget {
         goingNext == other.goingNext &&
         (offset - other.offset).abs() < 0.5;
   }
+}
+
+/// Separates direct reader scrolling from Flutter's selection edge scroller.
+///
+/// Once a non-empty selection exists, a finger dragging the underlying
+/// Scrollable must not compete with the selection handle for the same pointer.
+/// Chapter and continuous modes still allow programmatic [animateTo] calls so
+/// Flutter can extend the selection at the viewport edge. Simulation mode adds
+/// the stricter finite-page lock and rejects every pixel mutation.
+class _SelectionAwareScrollController extends ScrollController {
+  final ValueListenable<bool> selectionActive;
+  final bool Function() freezeSelectionViewport;
+
+  _SelectionAwareScrollController({
+    required this.selectionActive,
+    required this.freezeSelectionViewport,
+    super.initialScrollOffset,
+  });
+
+  @override
+  ScrollPosition createScrollPosition(
+    ScrollPhysics physics,
+    ScrollContext context,
+    ScrollPosition? oldPosition,
+  ) {
+    return _SelectionAwareScrollPosition(
+      physics: physics,
+      context: context,
+      oldPosition: oldPosition,
+      initialPixels: initialScrollOffset,
+      keepScrollOffset: keepScrollOffset,
+      debugLabel: debugLabel,
+      selectionActive: selectionActive,
+      viewportIsFrozen: () =>
+          selectionActive.value && freezeSelectionViewport(),
+    );
+  }
+}
+
+class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext {
+  final ValueListenable<bool> selectionActive;
+  final bool Function() viewportIsFrozen;
+  Completer<void>? _frozenAnimationCompleter;
+
+  _SelectionAwareScrollPosition({
+    required super.physics,
+    required super.context,
+    required this.selectionActive,
+    required this.viewportIsFrozen,
+    super.oldPosition,
+    super.initialPixels,
+    super.keepScrollOffset,
+    super.debugLabel,
+  }) {
+    selectionActive.addListener(_handleSelectionActivityChanged);
+  }
+
+  void _handleSelectionActivityChanged() {
+    if (!viewportIsFrozen()) _releaseFrozenAnimation();
+  }
+
+  void _releaseFrozenAnimation() {
+    final completer = _frozenAnimationCompleter;
+    _frozenAnimationCompleter = null;
+    if (completer != null && !completer.isCompleted) completer.complete();
+  }
+
+  // Flutter's selection edge scroller first checks these extents before it
+  // starts an animateTo loop. Collapsing both extents to the visible page
+  // position makes a simulation page a true, finite selection surface while
+  // the selection gesture is active. This stops the auto-scroller at its
+  // source instead of completing a blocked animation and letting it retry in
+  // a tight asynchronous loop.
+  @override
+  double get minScrollExtent =>
+      viewportIsFrozen() ? pixels : super.minScrollExtent;
+
+  @override
+  double get maxScrollExtent =>
+      viewportIsFrozen() ? pixels : super.maxScrollExtent;
+
+  @override
+  double setPixels(double newPixels) {
+    if (viewportIsFrozen()) return newPixels - pixels;
+    return super.setPixels(newPixels);
+  }
+
+  @override
+  void forcePixels(double value) {
+    if (viewportIsFrozen()) return;
+    super.forcePixels(value);
+  }
+
+  @override
+  void applyUserOffset(double delta) {
+    // A selection-handle drag and a Scrollable drag can both remain in the
+    // Android pointer stream. Let the selection own that stream. Flutter's
+    // edge auto-scroller uses animateTo instead, so chapter and continuous
+    // selections can still advance vertically without racing this path.
+    if (selectionActive.value) return;
+    super.applyUserOffset(delta);
+  }
+
+  @override
+  void pointerScroll(double delta) {
+    if (selectionActive.value) return;
+    super.pointerScroll(delta);
+  }
+
+  @override
+  void jumpTo(double value) {
+    if (viewportIsFrozen()) return;
+    super.jumpTo(value);
+  }
+
+  @override
+  Future<void> animateTo(
+    double to, {
+    required Duration duration,
+    required Curve curve,
+  }) {
+    // Keep a rejected edge-scroll request pending for the lifetime of the
+    // fixed-page selection. Completing immediately makes Flutter's selection
+    // auto-scroller retry in a tight loop at the page edge.
+    if (viewportIsFrozen()) {
+      return (_frozenAnimationCompleter ??= Completer<void>()).future;
+    }
+    _releaseFrozenAnimation();
+    return super.animateTo(to, duration: duration, curve: curve);
+  }
+
+  @override
+  void dispose() {
+    selectionActive.removeListener(_handleSelectionActivityChanged);
+    _releaseFrozenAnimation();
+    super.dispose();
+  }
+}
+
+class _ReadingTextAnchor {
+  final int chapterIndex;
+  final int paragraphIndex;
+  final int characterOffset;
+
+  const _ReadingTextAnchor({
+    required this.chapterIndex,
+    required this.paragraphIndex,
+    required this.characterOffset,
+  });
 }
 
 class _ScrollSnapshot {

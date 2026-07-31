@@ -2,7 +2,11 @@ package com.readvibe.app
 
 import android.content.ComponentName
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -10,12 +14,14 @@ import org.apache.poi.hwpf.HWPFDocument
 import org.apache.poi.hwpf.extractor.WordExtractor
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
     companion object {
         private const val TEXT_ACTION_CHANNEL = "com.readvibe.app/system_text_actions"
         private const val DOCUMENT_PARSER_CHANNEL = "com.readvibe.app/document_parser"
+        private const val PDF_RENDERER_CHANNEL = "com.readvibe.app/pdf_renderer"
         private const val ACTION_TRANSLATE = "android.intent.action.TRANSLATE"
         private val AI_PACKAGE_ALLOWLIST = setOf(
             "com.deepseek.chat",
@@ -109,6 +115,52 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            PDF_RENDERER_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            if (call.method !in setOf("getPageCount", "renderPage", "clearFileCache")) {
+                result.notImplemented()
+                return@setMethodCallHandler
+            }
+            val filePath = call.argument<String>("filePath")
+            if (filePath.isNullOrBlank()) {
+                result.error("PDF_PATH_INVALID", "PDF 文件路径无效", null)
+                return@setMethodCallHandler
+            }
+            documentExecutor.execute {
+                try {
+                    when (call.method) {
+                        "getPageCount" -> {
+                            val pageCount = getPdfPageCount(filePath)
+                            runOnUiThread { result.success(pageCount) }
+                        }
+
+                        "renderPage" -> {
+                            val pageIndex = call.argument<Int>("pageIndex") ?: -1
+                            val widthPx = call.argument<Int>("widthPx") ?: 1440
+                            val rendered = renderPdfPage(filePath, pageIndex, widthPx)
+                            runOnUiThread { result.success(rendered) }
+                        }
+
+                        "clearFileCache" -> {
+                            clearPdfCache(filePath)
+                            runOnUiThread { result.success(null) }
+                        }
+                    }
+                } catch (error: Throwable) {
+                    runOnUiThread {
+                        result.error(
+                            "PDF_RENDER_FAILED",
+                            error.message ?: "PDF 已损坏、加密或不受支持",
+                            null,
+                        )
+                    }
+                }
+            }
+        }
+
     }
 
     private fun extractLegacyDoc(filePath: String): String {
@@ -121,6 +173,69 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+    }
+
+    private fun getPdfPageCount(filePath: String): Int {
+        val source = File(filePath)
+        require(source.isFile && source.length() > 0) { "PDF 文件为空或无法读取" }
+        ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+            PdfRenderer(descriptor).use { renderer ->
+                require(renderer.pageCount > 0) { "PDF 不包含可显示页面" }
+                return renderer.pageCount
+            }
+        }
+    }
+
+    private fun renderPdfPage(filePath: String, pageIndex: Int, requestedWidth: Int): String {
+        val source = File(filePath)
+        require(source.isFile && source.length() > 0) { "PDF 文件为空或无法读取" }
+        val widthPx = requestedWidth.coerceIn(480, 4096)
+        val cacheRoot = File(cacheDir, "readvibe_pdf_pages")
+        if (!cacheRoot.exists()) cacheRoot.mkdirs()
+        val cacheKey = pdfCacheKey(source)
+        val cacheDirectory = File(cacheRoot, cacheKey)
+        if (!cacheDirectory.exists()) cacheDirectory.mkdirs()
+        val target = File(cacheDirectory, "${pageIndex}_$widthPx.png")
+        if (target.isFile && target.length() > 0) return target.absolutePath
+
+        ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+            PdfRenderer(descriptor).use { renderer ->
+                require(pageIndex in 0 until renderer.pageCount) { "PDF 页码超出范围" }
+                renderer.openPage(pageIndex).use { page ->
+                    val scale = widthPx.toFloat() / page.width.toFloat()
+                    val heightPx = (page.height * scale).toInt().coerceIn(1, 8192)
+                    val bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
+                    try {
+                        bitmap.eraseColor(Color.WHITE)
+                        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        val temporary = File(cacheDirectory, "${pageIndex}_$widthPx.tmp")
+                        FileOutputStream(temporary).use { output ->
+                            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                                "PDF 页面图像写入失败"
+                            }
+                            output.flush()
+                        }
+                        if (target.exists()) target.delete()
+                        check(temporary.renameTo(target)) { "PDF 页面缓存替换失败" }
+                    } finally {
+                        bitmap.recycle()
+                    }
+                }
+            }
+        }
+        return target.absolutePath
+    }
+
+    private fun clearPdfCache(filePath: String) {
+        val source = File(filePath)
+        val cacheRoot = File(cacheDir, "readvibe_pdf_pages")
+        val cacheDirectory = File(cacheRoot, pdfCacheKey(source))
+        if (cacheDirectory.isDirectory) cacheDirectory.deleteRecursively()
+    }
+
+    private fun pdfCacheKey(source: File): String {
+        return "${source.nameWithoutExtension}_${source.length()}_${source.lastModified()}"
+            .replace(Regex("[^A-Za-z0-9_.-]"), "_")
     }
 
     private fun querySystemTextTargets(action: String?): List<Map<String, Any>> {

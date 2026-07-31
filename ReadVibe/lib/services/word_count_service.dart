@@ -19,7 +19,8 @@ class WordCountService {
     final stored = book.wordCount;
     if (stored != null) return Future<int>.value(stored);
 
-    final existing = _inFlight[book.id];
+    final cacheKey = _chapterCacheKey(book);
+    final existing = _inFlight[cacheKey];
     if (existing != null) return existing;
 
     final contents = <String>[
@@ -28,12 +29,12 @@ class WordCountService {
     late final Future<int> operation;
     operation = Isolate.run(() => _countVisibleRunes(contents)).whenComplete(
       () {
-        if (identical(_inFlight[book.id], operation)) {
-          _inFlight.remove(book.id);
+        if (identical(_inFlight[cacheKey], operation)) {
+          _inFlight.remove(cacheKey);
         }
       },
     );
-    _inFlight[book.id] = operation;
+    _inFlight[cacheKey] = operation;
     return operation;
   }
 

@@ -64,7 +64,6 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
   @override
   Widget build(BuildContext context) {
     final directory = _TocDirectory.fromChapters(widget.chapters);
-    final visibleRows = directory.visibleRows(_collapsedGroupIds);
     _scheduleInitialScroll(directory);
 
     return Container(
@@ -124,20 +123,9 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
           ),
           Divider(height: 1, color: widget.colors.border),
           Expanded(
-            child: ListView.builder(
+            child: CustomScrollView(
               controller: widget.scrollController,
-              itemCount: visibleRows.length,
-              itemBuilder: (context, index) {
-                final row = visibleRows[index];
-                return switch (row) {
-                  _TocChapterRow() => _buildChapterRow(
-                    row.chapterIndex,
-                    isTopLevel: row.isTopLevel,
-                    volumeTitle: row.volumeTitle,
-                  ),
-                  _TocVolumeRow() => _buildVolumeRow(row.entry, row.expanded),
-                };
-              },
+              slivers: _buildDirectorySlivers(directory),
             ),
           ),
         ],
@@ -145,14 +133,56 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
     );
   }
 
+  List<Widget> _buildDirectorySlivers(_TocDirectory directory) {
+    return directory.entries
+        .map((entry) {
+          return switch (entry) {
+            _TocDirectEntry(:final chapterIndex) => SliverToBoxAdapter(
+              child: _buildChapterRow(
+                chapterIndex,
+                isTopLevel: directory.hasVolumes,
+              ),
+            ),
+            _TocVolumeEntry() => _buildVolumeSection(entry),
+          };
+        })
+        .toList(growable: false);
+  }
+
+  Widget _buildVolumeSection(_TocVolumeEntry entry) {
+    final expanded = !_collapsedGroupIds.contains(entry.id);
+    return SliverMainAxisGroup(
+      slivers: [
+        SliverPersistentHeader(
+          pinned: true,
+          delegate: _TocVolumeHeaderDelegate(
+            child: _buildVolumeRow(entry, expanded),
+          ),
+        ),
+        if (expanded)
+          SliverList.builder(
+            itemCount: entry.chapterIndexes.length,
+            itemBuilder: (context, index) => _buildChapterRow(
+              entry.chapterIndexes[index],
+              volumeTitle: entry.title,
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _buildVolumeRow(_TocVolumeEntry entry, bool expanded) {
     final containsActive = entry.chapterIndexes.contains(widget.currentChapter);
+    final background = Color.alphaBlend(
+      containsActive
+          ? widget.colors.text.withValues(alpha: 0.06)
+          : Colors.transparent,
+      widget.colors.headerBg,
+    );
     return AnimatedContainer(
       duration: AppMotion.normal,
       curve: AppMotion.standard,
-      color: containsActive
-          ? widget.colors.text.withValues(alpha: 0.06)
-          : Colors.transparent,
+      color: background,
       child: Material(
         color: Colors.transparent,
         child: ListTile(
@@ -214,6 +244,8 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
             left: isTopLevel ? 20 : (volumeTitle == null ? 16 : 44),
             right: 20,
           ),
+          minLeadingWidth: isTopLevel ? 18 : 6,
+          horizontalTitleGap: isTopLevel ? 12 : 8,
           leading: isTopLevel
               ? Icon(
                   Icons.description_outlined,
@@ -222,19 +254,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
                       ? widget.colors.accent
                       : widget.colors.secondary,
                 )
-              : SizedBox(
-                  width: 28,
-                  child: Text(
-                    '${chapterIndex + 1}'.padLeft(2, '0'),
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: isActive
-                          ? widget.colors.accent
-                          : widget.colors.secondary,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
+              : const SizedBox(width: 6),
           title: Text(
             displayTitle,
             maxLines: 1,
@@ -302,9 +322,14 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
       widget.currentChapter,
       _collapsedGroupIds,
     );
+    final keepVolumeHeaderVisible = directory.isChapterInExpandedVolume(
+      widget.currentChapter,
+      _collapsedGroupIds,
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !widget.scrollController.hasClients) return;
-      final desiredOffset = rowIndex * 56.0;
+      final desiredOffset =
+          (rowIndex - (keepVolumeHeaderVisible ? 1 : 0)) * 56.0;
       widget.scrollController.jumpTo(
         desiredOffset.clamp(
           0.0,
@@ -313,6 +338,31 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
       );
     });
   }
+}
+
+class _TocVolumeHeaderDelegate extends SliverPersistentHeaderDelegate {
+  static const double extent = 56;
+
+  final Widget child;
+
+  const _TocVolumeHeaderDelegate({required this.child});
+
+  @override
+  double get minExtent => extent;
+
+  @override
+  double get maxExtent => extent;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) => SizedBox.expand(child: child);
+
+  @override
+  bool shouldRebuild(covariant _TocVolumeHeaderDelegate oldDelegate) =>
+      oldDelegate.child != child;
 }
 
 sealed class _TocEntry {
@@ -433,54 +483,18 @@ class _TocDirectory {
     return 0;
   }
 
-  List<_TocVisibleRow> visibleRows(Set<String> collapsedGroupIds) {
-    final rows = <_TocVisibleRow>[];
+  bool isChapterInExpandedVolume(
+    int chapterIndex,
+    Set<String> collapsedGroupIds,
+  ) {
     for (final entry in entries) {
-      switch (entry) {
-        case _TocDirectEntry(:final chapterIndex):
-          rows.add(
-            _TocChapterRow(chapterIndex: chapterIndex, isTopLevel: hasVolumes),
-          );
-        case _TocVolumeEntry():
-          final expanded = !collapsedGroupIds.contains(entry.id);
-          rows.add(_TocVolumeRow(entry: entry, expanded: expanded));
-          if (expanded) {
-            rows.addAll(
-              entry.chapterIndexes.map(
-                (chapterIndex) => _TocChapterRow(
-                  chapterIndex: chapterIndex,
-                  volumeTitle: entry.title,
-                ),
-              ),
-            );
-          }
+      if (entry is _TocVolumeEntry &&
+          entry.chapterIndexes.contains(chapterIndex)) {
+        return !collapsedGroupIds.contains(entry.id);
       }
     }
-    return rows;
+    return false;
   }
-}
-
-sealed class _TocVisibleRow {
-  const _TocVisibleRow();
-}
-
-class _TocChapterRow extends _TocVisibleRow {
-  final int chapterIndex;
-  final bool isTopLevel;
-  final String? volumeTitle;
-
-  const _TocChapterRow({
-    required this.chapterIndex,
-    this.isTopLevel = false,
-    this.volumeTitle,
-  });
-}
-
-class _TocVolumeRow extends _TocVisibleRow {
-  final _TocVolumeEntry entry;
-  final bool expanded;
-
-  const _TocVolumeRow({required this.entry, required this.expanded});
 }
 
 class _MutableTocVolume {
