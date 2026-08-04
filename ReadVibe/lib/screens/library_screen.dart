@@ -273,7 +273,11 @@ class _LibraryScreenState extends State<LibraryScreen>
           debugPrintStack(stackTrace: cleanupStack);
         }
       }
-      _showError(e is FormatException ? e.message : '导入失败，请确认文件未损坏后重试');
+      _showError(
+        e is FormatException && e.message.trim().isNotEmpty
+            ? e.message
+            : '导入失败，请确认文件未损坏后重试',
+      );
     } finally {
       if (mounted) setState(() => _importing = false);
     }
@@ -296,7 +300,12 @@ class _LibraryScreenState extends State<LibraryScreen>
           children: [
             const Icon(Icons.error_outline, color: Colors.white, size: 20),
             const SizedBox(width: AppSpacing.sm),
-            Expanded(child: Text(message)),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(color: Colors.white),
+              ),
+            ),
           ],
         ),
       ),
@@ -311,7 +320,23 @@ class _LibraryScreenState extends State<LibraryScreen>
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.md),
         ),
-        content: Text(message),
+        backgroundColor: AppTheme.success,
+        content: Row(
+          children: [
+            const Icon(
+              Icons.check_circle_outline,
+              color: Colors.white,
+              size: 20,
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

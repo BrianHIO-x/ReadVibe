@@ -31,6 +31,8 @@ import '../widgets/reader_settings_sheet.dart';
 import '../widgets/pressable_scale.dart';
 import '../widgets/reading_progress_bar.dart';
 
+const double _simulationPageExtentTolerance = 0.01;
+
 /// Reader screen — displays book content with settings overlay
 class ReaderScreen extends StatefulWidget {
   final Book book;
@@ -108,6 +110,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   _ScrollSnapshot? _pageTurnOriginSnapshot;
   final GlobalKey _currentPageBoundaryKey = GlobalKey();
   final GlobalKey _reversePageBoundaryKey = GlobalKey();
+  // The preview page moves between the offstage idle slot and the active
+  // turn stack as the drag crosses the visibility threshold. A GlobalKey
+  // lets Flutter reparent it without disposing the chapter ListView.
+  final GlobalKey _simulationPreviewBoundaryKey = GlobalKey();
   ui.Image? _pageTurnSnapshot;
   Future<bool>? _pageTurnSnapshotCapture;
   int _pageTurnSnapshotSerial = 0;
@@ -209,10 +215,16 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  ScrollController _createScrollController([double initialOffset = 0]) {
+  ScrollController _createScrollController([
+    double initialOffset = 0,
+    bool? simulationPagination,
+  ]) {
     final controller = _SelectionAwareScrollController(
       selectionActive: _textSelectionActiveNotifier,
       freezeSelectionViewport: () =>
+          _settings.readingMode == ReaderReadingMode.simulation,
+      paginateToFullViewports:
+          simulationPagination ??
           _settings.readingMode == ReaderReadingMode.simulation,
       initialScrollOffset: initialOffset.isFinite && initialOffset >= 0
           ? initialOffset
@@ -243,9 +255,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     // Preview controllers must never use the active chapter's progress
     // listener. They are positioned offscreen before a horizontal drag and
     // only become authoritative if that page turn is committed.
-    final controller = ScrollController(
+    final controller = _previewScrollController(
       initialScrollOffset: initialOffset,
-      keepScrollOffset: false,
     );
     _adjacentScrollControllers[chapterIndex] = controller;
     _scheduleAdjacentScrollRestore(
@@ -261,16 +272,19 @@ class _ReaderScreenState extends State<ReaderScreen>
     ScrollController controller, {
     double? overrideProgress,
     int attempt = 0,
+    int? serial,
   }) {
-    final serial = attempt == 0
-        ? (_adjacentScrollRestoreSerials[chapterIndex] ?? 0) + 1
-        : _adjacentScrollRestoreSerials[chapterIndex] ?? 0;
-    if (attempt == 0) {
-      _adjacentScrollRestoreSerials[chapterIndex] = serial;
+    // Retry attempts must carry the serial of the chain that spawned them.
+    // Reading the map again here would let a stale chain adopt a newer
+    // chain's serial and pass the validity check below.
+    final effectiveSerial =
+        serial ?? (_adjacentScrollRestoreSerials[chapterIndex] ?? 0) + 1;
+    if (serial == null) {
+      _adjacentScrollRestoreSerials[chapterIndex] = effectiveSerial;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
-          _adjacentScrollRestoreSerials[chapterIndex] != serial ||
+          _adjacentScrollRestoreSerials[chapterIndex] != effectiveSerial ||
           !identical(_adjacentScrollControllers[chapterIndex], controller)) {
         return;
       }
@@ -281,6 +295,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             controller,
             overrideProgress: overrideProgress,
             attempt: attempt + 1,
+            serial: effectiveSerial,
           );
         }
         return;
@@ -296,7 +311,11 @@ class _ReaderScreenState extends State<ReaderScreen>
                 .clamp(0.0, maxExtent)
                 .toDouble();
       if (_settings.readingMode == ReaderReadingMode.simulation) {
-        target = _alignSimulationOffset(target, maxExtent: maxExtent);
+        target = _alignSimulationOffset(
+          target,
+          pageExtent: controller.position.viewportDimension,
+          maxExtent: maxExtent,
+        );
       }
       if ((controller.offset - target).abs() > 0.5) {
         controller.jumpTo(target);
@@ -322,8 +341,33 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  /// What the drag preview is actually showing. When a turn commits, this is
+  /// the page the user sees under the settling animation, so the committed
+  /// chapter must land exactly here.
+  _ScrollSnapshot? _simulationPreviewSnapshot(int chapterIndex) {
+    if (_simulationPageTarget?.chapterIndex != chapterIndex) return null;
+    final controller = _simulationPreviewController;
+    if (controller == null ||
+        !controller.hasClients ||
+        !controller.position.hasContentDimensions) {
+      return null;
+    }
+    final maxExtent = controller.position.maxScrollExtent;
+    final rawOffset = controller.offset;
+    final offset = rawOffset.isFinite
+        ? rawOffset.clamp(0.0, maxExtent).toDouble()
+        : 0.0;
+    return _ScrollSnapshot(
+      offset: offset,
+      progress: maxExtent > 0 ? offset / maxExtent : 0,
+    );
+  }
+
   void _hideStatusBarForReader() {
-    if (!mounted || _closingReader) return;
+    // Never hide the status bar while the reader chrome is open. The timer
+    // scheduled right after the book-opening animation can fire after the
+    // user has already summoned the menu, and must not win that race.
+    if (!mounted || _closingReader || _showOverlay) return;
     _applySystemBarStyle();
     // Bottom gesture navigation stays visible; only the top status bar is
     // hidden for the immersive reading surface.
@@ -540,7 +584,11 @@ class _ReaderScreenState extends State<ReaderScreen>
               ? progress * maxExtent
               : requested.clamp(0.0, maxExtent).toDouble());
       if (_settings.readingMode == ReaderReadingMode.simulation) {
-        offset = _alignSimulationOffset(offset, maxExtent: maxExtent);
+        offset = _alignSimulationOffset(
+          offset,
+          pageExtent: _scrollController.position.viewportDimension,
+          maxExtent: maxExtent,
+        );
       }
       _lastScrollSnapshot = _ScrollSnapshot(
         offset: offset,
@@ -573,15 +621,34 @@ class _ReaderScreenState extends State<ReaderScreen>
     setState(() => _readingModeReloading = false);
   }
 
-  double _alignSimulationOffset(double offset, {double? maxExtent}) {
-    final lineExtent = _settings.fontSize * _settings.lineHeight;
-    if (!offset.isFinite || lineExtent <= 0) return 0;
-    final aligned = (offset / lineExtent).round() * lineExtent;
+  double _alignSimulationOffset(
+    double offset, {
+    required double pageExtent,
+    double? maxExtent,
+  }) {
+    if (!offset.isFinite || !pageExtent.isFinite || pageExtent <= 0) return 0;
+    final aligned = (offset / pageExtent).round() * pageExtent;
     if (maxExtent == null || !maxExtent.isFinite) {
       return math.max(0.0, aligned);
     }
-    final alignedMax = ((maxExtent + 0.01) / lineExtent).floor() * lineExtent;
+    final alignedMax =
+        ((maxExtent + _simulationPageExtentTolerance) / pageExtent).floor() *
+        pageExtent;
     return aligned.clamp(0.0, math.max(0.0, alignedMax)).toDouble();
+  }
+
+  ScrollController _previewScrollController({
+    required double initialScrollOffset,
+  }) {
+    if (_settings.readingMode == ReaderReadingMode.simulation) {
+      return _FullViewportPagingScrollController(
+        initialScrollOffset: initialScrollOffset,
+      );
+    }
+    return ScrollController(
+      initialScrollOffset: initialScrollOffset,
+      keepScrollOffset: false,
+    );
   }
 
   void _resetContinuousMetrics() {
@@ -1019,6 +1086,23 @@ class _ReaderScreenState extends State<ReaderScreen>
     return title.replaceFirst(RegExp(r'^[\s　]+'), '').trimRight();
   }
 
+  bool _hasEmbeddedEpubHeading(Chapter chapter) {
+    if (!chapter.hasRichEpubContent) return false;
+    for (final block in chapter.epubBlocks) {
+      if (!block.isText || block.text.trim().isEmpty) continue;
+      if (block.isHeading) return true;
+      // Older imported EPUB payloads predate the semantic heading flag. Keep
+      // them compatible when their first styled block is visibly the same
+      // title; otherwise preserve the app-rendered directory title.
+      final sameTitle =
+          _formatChapterTitle(block.text) == _formatChapterTitle(chapter.title);
+      return sameTitle &&
+          block.style.textIndentEm == 0 &&
+          (block.style.fontScale > 1.05 || block.style.fontWeight >= 600);
+    }
+    return false;
+  }
+
   bool _changesTextLayout(ReaderSettings current, ReaderSettings next) {
     return current.fontSize != next.fontSize ||
         current.lineHeight != next.lineHeight ||
@@ -1123,7 +1207,11 @@ class _ReaderScreenState extends State<ReaderScreen>
         final pageOffset =
             ((rawOffset + 0.01) / viewportDimension).floor() *
             viewportDimension;
-        return _alignSimulationOffset(pageOffset, maxExtent: maxExtent);
+        return _alignSimulationOffset(
+          pageOffset,
+          pageExtent: viewportDimension,
+          maxExtent: maxExtent,
+        );
       }
       return rawOffset.clamp(0.0, maxExtent).toDouble();
     }
@@ -1156,7 +1244,11 @@ class _ReaderScreenState extends State<ReaderScreen>
         final pageOffset =
             ((rawOffset + 0.01) / viewportDimension).floor() *
             viewportDimension;
-        return _alignSimulationOffset(pageOffset, maxExtent: maxExtent);
+        return _alignSimulationOffset(
+          pageOffset,
+          pageExtent: viewportDimension,
+          maxExtent: maxExtent,
+        );
       }
       return rawOffset.clamp(0.0, maxExtent).toDouble();
     } finally {
@@ -1235,6 +1327,20 @@ class _ReaderScreenState extends State<ReaderScreen>
   }) {
     final simulation = mode == ReaderReadingMode.simulation;
     final lineExtent = settings.fontSize * settings.lineHeight;
+    final topPadding = switch (mode) {
+      ReaderReadingMode.simulation => 0.0,
+      ReaderReadingMode.chapter => _readerViewPadding.top + AppSpacing.lg,
+      ReaderReadingMode.continuous =>
+        _continuousAnchorChapterIndex >= 0 &&
+                _continuousAnchorChapterIndex < _book.chapters.length &&
+                identical(
+                  chapter,
+                  _book.chapters[_continuousAnchorChapterIndex],
+                )
+            ? _readerViewPadding.top + AppSpacing.lg
+            : AppSpacing.xxl,
+    };
+    if (_hasEmbeddedEpubHeading(chapter)) return topPadding;
     final titleStyle = TextStyle(
       fontFamily: settings.effectiveFontFamily,
       fontSize: 20,
@@ -1260,19 +1366,6 @@ class _ReaderScreenState extends State<ReaderScreen>
       strutStyle: titleStrut,
     )..layout(maxWidth: width);
     try {
-      final topPadding = switch (mode) {
-        ReaderReadingMode.simulation => 0.0,
-        ReaderReadingMode.chapter => _readerViewPadding.top + AppSpacing.lg,
-        ReaderReadingMode.continuous =>
-          _continuousAnchorChapterIndex >= 0 &&
-                  _continuousAnchorChapterIndex < _book.chapters.length &&
-                  identical(
-                    chapter,
-                    _book.chapters[_continuousAnchorChapterIndex],
-                  )
-              ? _readerViewPadding.top + AppSpacing.lg
-              : AppSpacing.xxl,
-      };
       final titleGap = simulation ? lineExtent : AppSpacing.xl;
       return topPadding + titlePainter.height + titleGap;
     } finally {
@@ -2032,14 +2125,27 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
   }
 
-  void _resetPageDrag({bool rebuild = true}) {
-    _clearSimulationTurnPointer();
-    _setTextSelectionBlocked(false);
+  /// Drops the active simulation target and its preview controllers without
+  /// touching gesture state. Controllers dispose after the frame so a build
+  /// already in flight never hands a dead controller to a ListView.
+  void _clearSimulationPageTurnState() {
     final simulationPreview = _simulationPreviewController;
     final simulationPaperBack = _simulationPaperBackController;
     _simulationPreviewController = null;
     _simulationPaperBackController = null;
     _simulationPageTarget = null;
+    if (simulationPreview != null || simulationPaperBack != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        simulationPreview?.dispose();
+        simulationPaperBack?.dispose();
+      });
+    }
+  }
+
+  void _resetPageDrag({bool rebuild = true}) {
+    _clearSimulationTurnPointer();
+    _setTextSelectionBlocked(false);
+    _clearSimulationPageTurnState();
     _pageTurnController.stop();
     _pageTurnAnimation = null;
     _commitPageTurnWhenSettled = false;
@@ -2053,12 +2159,6 @@ class _ReaderScreenState extends State<ReaderScreen>
       setState(() => _pageDragTargetIndex = null);
     } else {
       _pageDragTargetIndex = null;
-    }
-    if (simulationPreview != null || simulationPaperBack != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        simulationPreview?.dispose();
-        simulationPaperBack?.dispose();
-      });
     }
     _scheduleSimulationSnapshotWarmup();
   }
@@ -2149,6 +2249,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         // after the target layout has reported its own dimensions.
         final nextController = _createScrollController(
           rebuildsSimulation ? 0 : snapshot.offset,
+          pending.readingMode == ReaderReadingMode.simulation,
         );
         final adjacentControllers = _adjacentScrollControllers.values.toSet();
         _adjacentScrollControllers.clear();
@@ -2263,6 +2364,13 @@ class _ReaderScreenState extends State<ReaderScreen>
       return;
     }
     if (index == _chapterIndex) {
+      // A table-of-contents pick lands here when it names the current chapter.
+      // The sheet is already popped; dismiss the reader chrome too so every
+      // directory jump returns to the same immersive state as other modes.
+      if (_showOverlay) {
+        setState(() => _showOverlay = false);
+        _hideStatusBarForReader();
+      }
       if (startAtTop && _scrollController.hasClients) {
         _discardPageTurnSnapshot();
         _scrollController.jumpTo(0);
@@ -2288,10 +2396,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     _enqueueProgressSave(progress);
     _pageTurnOriginChapterIndex = null;
     _pageTurnOriginSnapshot = null;
-    // The adjacent preview is already laid out at the saved reading position.
-    // Inherit its exact pixel offset when committing the turn so the page seen
-    // during the gesture is the same page that remains after the animation.
-    final previewSnapshot = startAtTop ? null : _adjacentScrollSnapshot(index);
+    // The drag preview is already laid out at the page the user sees under
+    // the settling animation. Inherit its exact pixel offset when committing
+    // the turn so the page seen during the gesture is the same page that
+    // remains after the animation.
+    final previewSnapshot = startAtTop
+        ? null
+        : (_simulationPreviewSnapshot(index) ?? _adjacentScrollSnapshot(index));
     final targetOffset = startAtTop
         ? 0.0
         : previewSnapshot?.offset ?? progress.chapterOffsets[index] ?? 0.0;
@@ -2319,6 +2430,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         .toSet();
     final previousSimulationPreview = _simulationPreviewController;
     final previousSimulationPaperBack = _simulationPaperBackController;
+    final overlayWasVisible = _showOverlay;
     _simulationPreviewController = null;
     _simulationPaperBackController = null;
     _simulationPageTarget = null;
@@ -2334,7 +2446,11 @@ class _ReaderScreenState extends State<ReaderScreen>
       _pageTurnAnimation = null;
       _commitPageTurnWhenSettled = false;
       _simulationPageTarget = null;
+      _showOverlay = false;
     });
+    // Jumping chapters from the table of contents must return to the same
+    // immersive reading state as a gesture-driven page turn.
+    if (overlayWasVisible) _hideStatusBarForReader();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       previousController.dispose();
       for (final controller in previousAdjacentControllers) {
@@ -2368,12 +2484,14 @@ class _ReaderScreenState extends State<ReaderScreen>
     _enqueueProgressSave(progress);
     final serial = ++_overlayToggleSerial;
     final willShow = !_showOverlay;
+    // Update _showOverlay first: _hideStatusBarForReader refuses to run while
+    // the chrome is visible, so the state must already reflect the toggle.
+    setState(() => _showOverlay = willShow);
     if (willShow) {
       _showStatusBar();
     } else {
       _hideStatusBarForReader();
     }
-    setState(() => _showOverlay = willShow);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
           serial != _overlayToggleSerial ||
@@ -2447,7 +2565,13 @@ class _ReaderScreenState extends State<ReaderScreen>
           _simulationTurnActive = true;
           _readingTapMoved = true;
           _beginHorizontalPageTurn();
-          _updateHorizontalPageTurn(deltaX: travel.dx, width: width);
+          // Drop the touch-slop dead zone from the first delta. Applying the
+          // full travel would teleport the leaf past the slop distance while
+          // the finger has effectively not moved yet.
+          _updateHorizontalPageTurn(
+            deltaX: travel.dx - 9 * travel.dx.sign,
+            width: width,
+          );
         } else if (_simulationTurnActive) {
           _readingTapMoved = true;
           _updateHorizontalPageTurn(
@@ -2546,6 +2670,15 @@ class _ReaderScreenState extends State<ReaderScreen>
         }
         return;
       }
+      // A fresh gesture grabbed the page mid-settle without finishing it.
+      // The stopped animation left _pageDragOffset partway through its
+      // travel; accumulating the new drag on that leftover snaps the leaf.
+      // Restart from the resting page instead. Pointer tracking belongs to
+      // the new gesture and must survive this reset.
+      _commitPageTurnWhenSettled = false;
+      _pageDragTargetIndex = null;
+      _clearSimulationPageTurnState();
+      _setPageDragOffset(0);
     }
     _pageTurnController.stop();
     _pageTurnAnimation = null;
@@ -2641,6 +2774,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final maxExtent = position.maxScrollExtent;
     final currentOffset = _alignSimulationOffset(
       position.pixels.clamp(0.0, maxExtent).toDouble(),
+      pageExtent: position.viewportDimension,
       maxExtent: maxExtent,
     );
     final pageExtent = math.max(1.0, position.viewportDimension);
@@ -2649,6 +2783,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (currentOffset < maxExtent - 1) {
         final targetOffset = _alignSimulationOffset(
           currentOffset + pageExtent,
+          pageExtent: pageExtent,
           maxExtent: maxExtent,
         );
         if (targetOffset > currentOffset + 0.5) {
@@ -2674,6 +2809,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (currentOffset > 1) {
       final targetOffset = _alignSimulationOffset(
         math.max(0.0, currentOffset - pageExtent),
+        pageExtent: pageExtent,
         maxExtent: maxExtent,
       );
       return _SimulationPageTarget(
@@ -2700,6 +2836,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     bool hideOverlay = false,
   }) {
     final current = _simulationPageTarget;
+    if (current == null && target == null) {
+      // Rubber-banding at the book edges reaches this on every move event.
+      // Without the early return each event discards the reverse snapshot
+      // and rebuilds the whole reader for no visible change.
+      return;
+    }
     final sameTarget =
         current != null && target != null && current.matches(target);
     if (sameTarget && (!hideOverlay || !_showOverlay)) {
@@ -2710,10 +2852,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     final previousPaperBackController = _simulationPaperBackController;
     ScrollController? nextController;
     ScrollController? nextPaperBackController;
-    if (target != null && target.chapterIndex == _chapterIndex) {
-      nextController = ScrollController(
+    if (target != null) {
+      // Every target page gets a dedicated controller born at the target
+      // offset. Sharing the adjacent warm-up controller made the revealed
+      // page paint its saved reading position first and then jump to the
+      // page edge once the scheduled restore landed mid-drag.
+      nextController = _FullViewportPagingScrollController(
         initialScrollOffset: target.offset,
-        keepScrollOffset: false,
       );
     }
     if (target != null &&
@@ -2722,9 +2867,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       final movingPageOffset = target.goingNext
           ? (_pageTurnOriginSnapshot ?? _currentScrollSnapshot()).offset
           : target.offset;
-      nextPaperBackController = ScrollController(
+      nextPaperBackController = _FullViewportPagingScrollController(
         initialScrollOffset: math.max(0.0, movingPageOffset),
-        keepScrollOffset: false,
       );
     }
     _discardReversePageTurnSnapshot();
@@ -2828,6 +2972,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       target.offset
           .clamp(position.minScrollExtent, position.maxScrollExtent)
           .toDouble(),
+      pageExtent: position.viewportDimension,
       maxExtent: position.maxScrollExtent,
     );
     final previousPreview = _simulationPreviewController;
@@ -2840,6 +2985,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     final snapshot = _currentScrollSnapshot();
     final progress = _recordCurrentChapterPosition(snapshot);
+    // The drag is over: clear its origin so the next turn's paper back never
+    // mirrors this turn's departure page.
+    _pageTurnOriginChapterIndex = null;
+    _pageTurnOriginSnapshot = null;
     setState(() {
       _simulationPreviewController = null;
       _simulationPaperBackController = null;
@@ -3530,34 +3679,42 @@ class _ReaderScreenState extends State<ReaderScreen>
       chapterIndex++
     ) {
       final chapter = _book.chapters[chapterIndex];
+      final hasEmbeddedHeading = _hasEmbeddedEpubHeading(chapter);
+      final chapterTop = chapterIndex == _continuousAnchorChapterIndex
+          ? viewPadding.top + AppSpacing.lg
+          : AppSpacing.xxl;
       slivers.add(
         SliverMainAxisGroup(
           key: _continuousChapterKeys[chapterIndex],
           slivers: [
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  horizontalPadding,
-                  chapterIndex == _continuousAnchorChapterIndex
-                      ? viewPadding.top + AppSpacing.lg
-                      : AppSpacing.xxl,
-                  horizontalPadding,
-                  AppSpacing.xl,
-                ),
-                child: Text(
-                  _formatChapterTitle(chapter.title),
-                  style: TextStyle(
-                    fontFamily: fontFamily,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w600,
-                    color: themeColors.text,
-                    height: 1.5,
+            if (!hasEmbeddedHeading)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    horizontalPadding,
+                    chapterTop,
+                    horizontalPadding,
+                    AppSpacing.xl,
+                  ),
+                  child: Text(
+                    _formatChapterTitle(chapter.title),
+                    style: TextStyle(
+                      fontFamily: fontFamily,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w600,
+                      color: themeColors.text,
+                      height: 1.5,
+                    ),
                   ),
                 ),
               ),
-            ),
             SliverPadding(
-              padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+              padding: EdgeInsets.fromLTRB(
+                horizontalPadding,
+                hasEmbeddedHeading ? chapterTop : 0,
+                horizontalPadding,
+                0,
+              ),
               sliver: SliverList.builder(
                 itemCount: chapter.hasRichEpubContent
                     ? chapter.epubBlocks.length
@@ -3689,37 +3846,31 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     Widget? targetPage;
     if (target != null) {
-      if (target.chapterIndex == _chapterIndex) {
-        final controller = _simulationPreviewController;
-        if (controller != null) {
-          targetPage = _buildChapterPage(
-            chapter: _currentChapter,
-            themeColors: themeColors,
-            fontFamily: fontFamily,
-            viewPadding: viewPadding,
-            horizontalPadding: horizontalPadding,
-            controller: controller,
-            physics: pagePhysics,
-            simulationPage: true,
-          );
-        }
-      } else if (target.goingNext) {
-        targetPage = nextBoundaryPage;
-      } else {
-        targetPage = previousBoundaryPage;
+      final controller = _simulationPreviewController;
+      if (controller != null) {
+        targetPage = _buildChapterPage(
+          chapter: _book.chapters[target.chapterIndex],
+          themeColors: themeColors,
+          fontFamily: fontFamily,
+          viewPadding: viewPadding,
+          horizontalPadding: horizontalPadding,
+          controller: controller,
+          repaintBoundaryKey: _simulationPreviewBoundaryKey,
+          physics: pagePhysics,
+          simulationPage: true,
+        );
       }
     }
 
+    // Both boundary pages stay in the tree at all times (offstage or
+    // offscreen when idle). Their scroll positions settle while invisible,
+    // so a drag never reveals a page that is still jumping to its edge.
     final previousPage = target?.goingNext == false
-        ? targetPage
-        : target == null
-        ? previousBoundaryPage
-        : null;
+        ? (targetPage ?? previousBoundaryPage)
+        : previousBoundaryPage;
     final nextPage = target?.goingNext == true
-        ? targetPage
-        : target == null
-        ? nextBoundaryPage
-        : null;
+        ? (targetPage ?? nextBoundaryPage)
+        : nextBoundaryPage;
     Widget? paperBackPage;
     final paperBackController = _simulationPaperBackController;
     if (target != null && paperBackController != null) {
@@ -3749,6 +3900,8 @@ class _ReaderScreenState extends State<ReaderScreen>
             currentPage: currentPage,
             previousPage: previousPage,
             nextPage: nextPage,
+            keepAlivePreviousPage: previousBoundaryPage,
+            keepAliveNextPage: nextBoundaryPage,
             paperBackPage: paperBackPage,
             themeColors: themeColors,
           ),
@@ -3758,6 +3911,8 @@ class _ReaderScreenState extends State<ReaderScreen>
             currentPage: currentPage,
             previousPage: previousPage,
             nextPage: nextPage,
+            keepAlivePreviousPage: previousBoundaryPage,
+            keepAliveNextPage: nextBoundaryPage,
           ),
         };
       },
@@ -3770,9 +3925,20 @@ class _ReaderScreenState extends State<ReaderScreen>
     required Widget currentPage,
     required Widget? previousPage,
     required Widget? nextPage,
+    Widget? keepAlivePreviousPage,
+    Widget? keepAliveNextPage,
   }) {
     return Stack(
       children: [
+        // Boundary pages displaced by an active preview copy stay attached
+        // offstage: their shared controllers hold the restored edge position
+        // that _switchChapter inherits when the turn commits.
+        if (keepAlivePreviousPage != null &&
+            !identical(keepAlivePreviousPage, previousPage))
+          Offstage(child: keepAlivePreviousPage),
+        if (keepAliveNextPage != null &&
+            !identical(keepAliveNextPage, nextPage))
+          Offstage(child: keepAliveNextPage),
         if (previousPage != null)
           KeyedSubtree(
             key: const ValueKey('previous-page'),
@@ -3808,13 +3974,26 @@ class _ReaderScreenState extends State<ReaderScreen>
     required Widget? nextPage,
     required Widget? paperBackPage,
     required ReaderThemeColors themeColors,
+    Widget? keepAlivePreviousPage,
+    Widget? keepAliveNextPage,
   }) {
     final progress = (dragOffset.abs() / width).clamp(0.0, 1.0);
     final goingNext = dragOffset <= 0;
     final targetPage = goingNext ? nextPage : previousPage;
     final hasTarget = progress > 0.001 && targetPage != null;
     if (!hasTarget) {
-      return currentPage;
+      // Idle: keep both boundary pages attached offstage so their ListViews
+      // lay out and restore to their page edges before any drag starts. A
+      // page that first attaches mid-drag paints its stale saved position
+      // and then visibly jumps once the scheduled restore lands.
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          if (previousPage != null) Offstage(child: previousPage),
+          if (nextPage != null) Offstage(child: nextPage),
+          currentPage,
+        ],
+      );
     }
     final resolvedTargetPage = targetPage;
     final leafProgress = goingNext ? progress : 1 - progress;
@@ -3840,6 +4019,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     return Stack(
       fit: StackFit.expand,
       children: [
+        // Only the turn's active target page is placed visibly. Every other
+        // boundary page stays attached offstage so its shared controller
+        // keeps the restored edge position for a direction flip or a commit.
+        if (keepAlivePreviousPage != null &&
+            !identical(keepAlivePreviousPage, resolvedTargetPage))
+          Offstage(child: keepAlivePreviousPage),
+        if (keepAliveNextPage != null &&
+            !identical(keepAliveNextPage, resolvedTargetPage))
+          Offstage(child: keepAliveNextPage),
         if (goingNext)
           KeyedSubtree(
             key: const ValueKey('physical-next-page'),
@@ -3932,7 +4120,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     final bodyItemCount = chapter.hasRichEpubContent
         ? richBlocks.length
         : paragraphs.length;
-    final itemCount = bodyItemCount + 2;
+    final hasStandaloneTitle = !_hasEmbeddedEpubHeading(chapter);
+    final titleItemCount = hasStandaloneTitle ? 1 : 0;
+    final itemCount = bodyItemCount + titleItemCount + 1;
     final scrollView = ListView.builder(
       key: ValueKey<String>(
         'chapter-${identityHashCode(chapter)}-controller-${identityHashCode(controller)}-${simulationPage ? 'simulation' : 'scroll'}',
@@ -3951,7 +4141,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       ),
       itemCount: itemCount,
       itemBuilder: (context, index) {
-        if (index == 0) {
+        if (hasStandaloneTitle && index == 0) {
           return Padding(
             padding: EdgeInsets.only(
               bottom: simulationPage ? lineExtent : AppSpacing.xl,
@@ -3982,10 +4172,12 @@ class _ReaderScreenState extends State<ReaderScreen>
           );
         }
         if (index == itemCount - 1) {
-          return SizedBox(height: simulationPage ? lineExtent : AppSpacing.xxl);
+          return simulationPage
+              ? const SizedBox.shrink()
+              : const SizedBox(height: AppSpacing.xxl);
         }
 
-        final paragraphIndex = index - 1;
+        final paragraphIndex = index - titleItemCount;
         if (chapter.hasRichEpubContent) {
           final contentWidth = math.max(
             1.0,
@@ -4140,7 +4332,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(icon, color: color, size: 22),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 4),
                   Text(
                     label,
                     style: TextStyle(
@@ -4154,6 +4346,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                     style: TextStyle(
                       fontSize: 11,
                       color: color.withValues(alpha: 0.7),
+                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),
                 ],
@@ -4919,6 +5112,70 @@ class _SimulationPageTarget {
   }
 }
 
+double _fullViewportMaxScrollExtent(
+  double rawMaxScrollExtent,
+  double viewportDimension,
+) {
+  if (!rawMaxScrollExtent.isFinite || rawMaxScrollExtent <= 0) return 0;
+  if (!viewportDimension.isFinite || viewportDimension <= 0) {
+    return rawMaxScrollExtent;
+  }
+  final rawPageCount = rawMaxScrollExtent / viewportDimension;
+  final nearestPageCount = rawPageCount.round();
+  final nearestExtent = nearestPageCount * viewportDimension;
+  final pageCount =
+      (rawMaxScrollExtent - nearestExtent).abs() <=
+          _simulationPageExtentTolerance
+      ? nearestPageCount
+      : rawPageCount.ceil();
+  return math.max(0.0, pageCount * viewportDimension);
+}
+
+/// Extends a simulation chapter's logical scroll range to a whole number of
+/// pages. The added range is blank paper after the real chapter content, so
+/// the final page starts at the next exact viewport boundary instead of
+/// overlapping the preceding page to bottom-align a short remainder.
+class _FullViewportPagingScrollController extends ScrollController {
+  _FullViewportPagingScrollController({super.initialScrollOffset})
+    : super(keepScrollOffset: false);
+
+  @override
+  ScrollPosition createScrollPosition(
+    ScrollPhysics physics,
+    ScrollContext context,
+    ScrollPosition? oldPosition,
+  ) {
+    return _FullViewportPagingScrollPosition(
+      physics: physics,
+      context: context,
+      oldPosition: oldPosition,
+      initialPixels: initialScrollOffset,
+      keepScrollOffset: keepScrollOffset,
+      debugLabel: debugLabel,
+    );
+  }
+}
+
+class _FullViewportPagingScrollPosition
+    extends ScrollPositionWithSingleContext {
+  _FullViewportPagingScrollPosition({
+    required super.physics,
+    required super.context,
+    super.oldPosition,
+    super.initialPixels,
+    super.keepScrollOffset,
+    super.debugLabel,
+  });
+
+  @override
+  bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
+    return super.applyContentDimensions(
+      minScrollExtent,
+      _fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension),
+    );
+  }
+}
+
 /// Separates direct reader scrolling from Flutter's selection edge scroller.
 ///
 /// Once a non-empty selection exists, a finger dragging the underlying
@@ -4929,10 +5186,12 @@ class _SimulationPageTarget {
 class _SelectionAwareScrollController extends ScrollController {
   final ValueListenable<bool> selectionActive;
   final bool Function() freezeSelectionViewport;
+  final bool paginateToFullViewports;
 
   _SelectionAwareScrollController({
     required this.selectionActive,
     required this.freezeSelectionViewport,
+    required this.paginateToFullViewports,
     super.initialScrollOffset,
   });
 
@@ -4952,6 +5211,7 @@ class _SelectionAwareScrollController extends ScrollController {
       selectionActive: selectionActive,
       viewportIsFrozen: () =>
           selectionActive.value && freezeSelectionViewport(),
+      paginateToFullViewports: paginateToFullViewports,
     );
   }
 }
@@ -4959,6 +5219,7 @@ class _SelectionAwareScrollController extends ScrollController {
 class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext {
   final ValueListenable<bool> selectionActive;
   final bool Function() viewportIsFrozen;
+  final bool paginateToFullViewports;
   Completer<void>? _frozenAnimationCompleter;
 
   _SelectionAwareScrollPosition({
@@ -4966,12 +5227,23 @@ class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext {
     required super.context,
     required this.selectionActive,
     required this.viewportIsFrozen,
+    required this.paginateToFullViewports,
     super.oldPosition,
     super.initialPixels,
     super.keepScrollOffset,
     super.debugLabel,
   }) {
     selectionActive.addListener(_handleSelectionActivityChanged);
+  }
+
+  @override
+  bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
+    return super.applyContentDimensions(
+      minScrollExtent,
+      paginateToFullViewports
+          ? _fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension)
+          : maxScrollExtent,
+    );
   }
 
   void _handleSelectionActivityChanged() {

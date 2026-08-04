@@ -29,9 +29,24 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
   int _serial = 0;
 
   @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_handleQueryChanged);
+  }
+
+  @override
   void dispose() {
     _controller.dispose();
     super.dispose();
+  }
+
+  void _handleQueryChanged() {
+    // Typing a new keyword makes the previous "no matches" verdict stale.
+    if (!_searched && _errorMessage == null) return;
+    setState(() {
+      _searched = false;
+      _errorMessage = null;
+    });
   }
 
   Future<void> _search() async {
@@ -66,11 +81,66 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
     }
   }
 
+  /// Renders a result snippet with every occurrence of the submitted keyword
+  /// painted in the accent colour, so the match is visible at a glance.
+  Widget _buildHighlightedSnippet(String snippet) {
+    final baseStyle = TextStyle(color: widget.colors.secondary);
+    final query = _controller.text.trim();
+    if (query.isEmpty) {
+      return Text(
+        snippet,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: baseStyle,
+      );
+    }
+    final highlightStyle = TextStyle(
+      color: widget.colors.accent,
+      fontWeight: FontWeight.w700,
+    );
+    final lowerSnippet = snippet.toLowerCase();
+    final lowerQuery = query.toLowerCase();
+    final spans = <TextSpan>[];
+    var start = 0;
+    while (start <= snippet.length) {
+      final match = lowerSnippet.indexOf(lowerQuery, start);
+      if (match < 0) break;
+      if (match > start) {
+        spans.add(TextSpan(text: snippet.substring(start, match)));
+      }
+      spans.add(
+        TextSpan(
+          text: snippet.substring(match, match + query.length),
+          style: highlightStyle,
+        ),
+      );
+      start = match + query.length;
+    }
+    if (start < snippet.length) {
+      spans.add(TextSpan(text: snippet.substring(start)));
+    }
+    if (spans.isEmpty) {
+      return Text(
+        snippet,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: baseStyle,
+      );
+    }
+    return RichText(
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      text: TextSpan(style: baseStyle, children: spans),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Material(
       color: widget.colors.background,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+      borderRadius: const BorderRadius.vertical(
+        top: Radius.circular(AppRadius.pill),
+      ),
       clipBehavior: Clip.antiAlias,
       child: SafeArea(
         top: false,
@@ -130,12 +200,19 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
                   filled: true,
                   fillColor: widget.colors.headerBg,
                   border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(AppRadius.lg),
                     borderSide: BorderSide(color: widget.colors.border),
                   ),
                   enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(AppRadius.lg),
                     borderSide: BorderSide(color: widget.colors.border),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.lg),
+                    borderSide: BorderSide(
+                      color: widget.colors.accent,
+                      width: 1.5,
+                    ),
                   ),
                 ),
               ),
@@ -201,13 +278,8 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
                                 ),
                                 subtitle: Padding(
                                   padding: const EdgeInsets.only(top: 5),
-                                  child: Text(
+                                  child: _buildHighlightedSnippet(
                                     result.snippet,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: widget.colors.secondary,
-                                    ),
                                   ),
                                 ),
                                 trailing: Icon(

@@ -741,12 +741,16 @@ List<Chapter> _chaptersFromJson(String raw) {
         rawVolumeTitle is String && rawVolumeTitle.trim().isNotEmpty
         ? rawVolumeTitle.trim()
         : null;
+    final epubBlocks = _epubBlocksFromJson(map['epubBlocks']);
+    final restoredContent = content.isNotEmpty || epubBlocks.isEmpty
+        ? content
+        : _plainContentFromEpubBlocks(epubBlocks);
     return Chapter(
       index: index,
       title: title,
-      content: content,
+      content: restoredContent,
       volumeTitle: volumeTitle,
-      epubBlocks: _epubBlocksFromJson(map['epubBlocks']),
+      epubBlocks: epubBlocks,
     );
   }).toList();
 }
@@ -758,7 +762,10 @@ String _chaptersToJson(List<Chapter> chapters) {
           (chapter) => {
             'index': chapter.index,
             'title': chapter.title,
-            'content': chapter.content,
+            // Rich EPUB blocks already contain the complete visible text.
+            // Avoid writing a second full copy of large novels; it is rebuilt
+            // in memory when the chapter file is loaded.
+            'content': chapter.epubBlocks.isEmpty ? chapter.content : '',
             if (chapter.volumeTitle != null) 'volumeTitle': chapter.volumeTitle,
             if (chapter.epubBlocks.isNotEmpty)
               'epubBlocks': chapter.epubBlocks.map(_epubBlockToJson).toList(),
@@ -766,6 +773,18 @@ String _chaptersToJson(List<Chapter> chapters) {
         )
         .toList(),
   );
+}
+
+String _plainContentFromEpubBlocks(List<EpubContentBlock> blocks) {
+  var body = blocks.where(
+    (block) => block.isText && !block.isHeading && block.text.trim().isNotEmpty,
+  );
+  if (body.isEmpty) {
+    body = blocks.where(
+      (block) => block.isText && block.text.trim().isNotEmpty,
+    );
+  }
+  return body.map((block) => block.text.trim()).join('\n');
 }
 
 List<EpubContentBlock> _epubBlocksFromJson(Object? raw) {
@@ -798,6 +817,7 @@ List<EpubContentBlock> _epubBlocksFromJson(Object? raw) {
         kind: kind,
         text: map['text'] is String ? map['text'] as String : '',
         runs: List<EpubTextRun>.unmodifiable(runs),
+        isHeading: map['isHeading'] == true,
         imagePath: map['imagePath'] is String
             ? map['imagePath'] as String
             : null,
@@ -818,6 +838,7 @@ Map<String, dynamic> _epubBlockToJson(EpubContentBlock block) => {
     'runs': block.runs
         .map((run) => {'text': run.text, 'style': _epubStyleToJson(run.style)})
         .toList(),
+  if (block.isHeading) 'isHeading': true,
   if (block.imagePath != null) 'imagePath': block.imagePath,
   if (block.altText != null && block.altText!.isNotEmpty)
     'altText': block.altText,

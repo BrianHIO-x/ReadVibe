@@ -105,6 +105,11 @@ Book _parseEpubSync(
   final title = _firstElementText(opf, 'title');
   final author = _firstElementText(opf, 'creator');
   final manifest = _extractManifest(opf, opfDir);
+  final navigationTitles = _extractNavigationTitles(
+    opf,
+    manifest,
+    archiveFiles,
+  );
   final spineIds = _elementsNamed(opf, 'itemref')
       .where(
         (element) =>
@@ -122,6 +127,8 @@ Book _parseEpubSync(
   );
   final chapters = <Chapter>[];
   String? activeVolumeTitle;
+  final cssDocumentCache = <String, String>{};
+  final cssRulesCache = <String, List<_CssRule>>{};
 
   for (final itemId in spineIds) {
     final manifestItem = manifest[itemId];
@@ -132,11 +139,15 @@ Book _parseEpubSync(
     if (contentFile == null) continue;
 
     final document = html_parser.parse(_decodeMarkup(_bytesOf(contentFile)));
-    final chapterTitle =
-        _extractChapterTitle(document) ?? '章节 ${chapters.length + 1}';
-    final cssText = _chapterCssText(document, manifestItem.path, archiveFiles);
+    final cssText = _chapterCssText(
+      document,
+      manifestItem.path,
+      archiveFiles,
+      cssDocumentCache,
+    );
     final resolver = _EpubStyleResolver(
       cssText,
+      rulesCache: cssRulesCache,
       resolveImage: (rawUrl) =>
           imageStore.extract(rawUrl, relativeTo: manifestItem.path)?.path,
     );
@@ -147,16 +158,30 @@ Book _parseEpubSync(
       imageStore,
     );
 
-    if (blocks.isNotEmpty &&
-        blocks.first.isText &&
-        _normalizeVisibleText(blocks.first.text) ==
-            _normalizeVisibleText(chapterTitle)) {
-      blocks.removeAt(0);
-    }
     if (blocks.isEmpty) continue;
 
-    final plainText = blocks
-        .where((block) => block.isText && block.text.trim().isNotEmpty)
+    final embeddedHeading = blocks
+        .where((block) => block.isText && block.isHeading)
+        .firstOrNull;
+    final chapterTitle =
+        navigationTitles[manifestItem.path] ??
+        embeddedHeading?.text.trim() ??
+        _extractDocumentTitle(document) ??
+        '章节 ${chapters.length + 1}';
+    if (embeddedHeading == null) {
+      _promoteMatchingLeadingTitle(blocks, chapterTitle);
+    }
+
+    var plainTextBlocks = blocks.where(
+      (block) =>
+          block.isText && !block.isHeading && block.text.trim().isNotEmpty,
+    );
+    if (plainTextBlocks.isEmpty) {
+      plainTextBlocks = blocks.where(
+        (block) => block.isText && block.text.trim().isNotEmpty,
+      );
+    }
+    final plainText = plainTextBlocks
         .map((block) => block.text.trim())
         .join('\n');
     if (isVolumeChapterTitle(chapterTitle)) {
@@ -199,8 +224,9 @@ Book _parseEpubSync(
 class _ManifestItem {
   final String path;
   final String mediaType;
+  final Set<String> properties;
 
-  const _ManifestItem(this.path, this.mediaType);
+  const _ManifestItem(this.path, this.mediaType, this.properties);
 }
 
 Map<String, _ManifestItem> _extractManifest(XmlDocument opf, String opfDir) {
@@ -218,9 +244,90 @@ Map<String, _ManifestItem> _extractManifest(XmlDocument opf, String opfDir) {
     manifest[id] = _ManifestItem(
       joined,
       item.getAttribute('media-type')?.trim().toLowerCase() ?? '',
+      (item.getAttribute('properties') ?? '')
+          .toLowerCase()
+          .split(RegExp(r'\s+'))
+          .where((value) => value.isNotEmpty)
+          .toSet(),
     );
   }
   return manifest;
+}
+
+Map<String, String> _extractNavigationTitles(
+  XmlDocument opf,
+  Map<String, _ManifestItem> manifest,
+  Map<String, ArchiveFile> archiveFiles,
+) {
+  final titles = <String, String>{};
+
+  void addTitle(String? rawReference, String? rawTitle, String relativeTo) {
+    final title = _normalizeVisibleText(rawTitle ?? '');
+    if (rawReference == null || title.isEmpty) return;
+    final path = _resolveArchiveReference(rawReference, relativeTo);
+    if (path.isNotEmpty) titles.putIfAbsent(path, () => title);
+  }
+
+  for (final item in manifest.values.where(
+    (candidate) => candidate.properties.contains('nav'),
+  )) {
+    final file = _findArchiveFile(archiveFiles, item.path);
+    if (file == null) continue;
+    try {
+      final document = html_parser.parse(_decodeMarkup(_bytesOf(file)));
+      final navigationElements = document.querySelectorAll('nav');
+      final toc = navigationElements.where((element) {
+        final type =
+            element.attributes['epub:type'] ??
+            element.attributes['type'] ??
+            element.attributes['role'] ??
+            '';
+        return type
+            .toLowerCase()
+            .split(RegExp(r'\s+'))
+            .any((value) => value == 'toc' || value == 'doc-toc');
+      }).firstOrNull;
+      final scope = toc ?? navigationElements.firstOrNull ?? document.body;
+      for (final anchor
+          in scope?.querySelectorAll('a[href]') ?? const <Element>[]) {
+        addTitle(anchor.attributes['href'], anchor.text, item.path);
+      }
+    } on Object {
+      // A malformed navigation document must not make readable spine content
+      // impossible to import; the document heading remains the fallback.
+    }
+  }
+
+  final spine = _elementsNamed(opf, 'spine').firstOrNull;
+  final ncxId = spine?.getAttribute('toc');
+  final ncxCandidates = <_ManifestItem>{
+    if (ncxId != null && manifest[ncxId] != null) manifest[ncxId]!,
+    ...manifest.values.where(
+      (item) => item.mediaType == 'application/x-dtbncx+xml',
+    ),
+  };
+  for (final item in ncxCandidates) {
+    final file = _findArchiveFile(archiveFiles, item.path);
+    if (file == null) continue;
+    try {
+      final ncx = _parseXml(file, 'NCX');
+      for (final navPoint in _elementsNamed(ncx, 'navPoint')) {
+        final content = navPoint.descendants
+            .whereType<XmlElement>()
+            .where((element) => element.name.local == 'content')
+            .firstOrNull;
+        final label = navPoint.descendants
+            .whereType<XmlElement>()
+            .where((element) => element.name.local == 'navLabel')
+            .firstOrNull;
+        addTitle(content?.getAttribute('src'), label?.innerText, item.path);
+      }
+    } on Object {
+      // EPUB 2 navigation is optional for rendering. Ignore a damaged NCX and
+      // use the embedded chapter heading instead.
+    }
+  }
+  return titles;
 }
 
 bool _isMarkupMediaType(String mediaType) =>
@@ -233,6 +340,7 @@ String _chapterCssText(
   Document document,
   String contentPath,
   Map<String, ArchiveFile> archiveFiles,
+  Map<String, String> documentCache,
 ) {
   final output = StringBuffer();
   final visited = <String>{};
@@ -240,9 +348,12 @@ String _chapterCssText(
   void appendCssPath(String rawPath, String relativeTo) {
     final cssPath = _resolveArchiveReference(rawPath, relativeTo);
     if (cssPath.isEmpty || !visited.add(cssPath)) return;
-    final file = _findArchiveFile(archiveFiles, cssPath);
-    if (file == null || file.size > 8 * 1024 * 1024) return;
-    final css = _decodeMarkup(_bytesOf(file));
+    final css = documentCache.putIfAbsent(cssPath, () {
+      final file = _findArchiveFile(archiveFiles, cssPath);
+      if (file == null || file.size > 8 * 1024 * 1024) return '';
+      return _decodeMarkup(_bytesOf(file));
+    });
+    if (css.isEmpty) return;
     for (final match in RegExp(
       r'''@import\s+(?:url\()?\s*["']?([^"')\s;]+)''',
       caseSensitive: false,
@@ -303,7 +414,9 @@ List<EpubContentBlock> _documentToBlocks(
     if (rawSource == null || rawSource.trim().isEmpty) return;
     final extracted = imageStore.extract(rawSource, relativeTo: contentPath);
     if (extracted == null) return;
-    final style = resolver.styleFor(image, inherited: inheritedStyle);
+    final style = _normalizeImageStyle(
+      resolver.styleFor(image, inherited: inheritedStyle),
+    );
     final width = _cssOrAttributePixels(
       image.attributes['width'] ?? resolver.propertyFor(image, 'width'),
     );
@@ -338,7 +451,13 @@ List<EpubContentBlock> _documentToBlocks(
   }
 
   void appendLeaf(Element element, EpubContentStyle inheritedStyle) {
-    final blockStyle = resolver.styleFor(element, inherited: inheritedStyle);
+    final resolvedStyle = resolver.styleFor(element, inherited: inheritedStyle);
+    final isHeading = _isSemanticHeading(element, resolvedStyle);
+    final blockStyle = _normalizeBlockStyle(
+      resolvedStyle,
+      tag: element.localName,
+      isHeading: isHeading,
+    );
     if (resolver.isHidden(element)) return;
     var collector = _EpubRunCollector();
 
@@ -350,7 +469,8 @@ List<EpubContentBlock> _documentToBlocks(
         EpubContentBlock(
           kind: EpubContentBlockKind.text,
           text: collected.text,
-          runs: collected.runs,
+          runs: _compactRuns(collected.runs, blockStyle),
+          isHeading: isHeading,
           style: blockStyle,
         ),
       );
@@ -370,13 +490,18 @@ List<EpubContentBlock> _documentToBlocks(
         return;
       }
       if (tag == 'br' || tag == 'hr') collector.add(' ', style);
-      final childStyle = resolver.styleFor(node, inherited: style);
+      final childStyle = _normalizeInlineStyle(
+        resolver.styleFor(node, inherited: style),
+        inherited: style,
+      );
       for (final child in node.nodes) {
         visit(child, childStyle);
       }
     }
 
-    visit(element, blockStyle);
+    for (final child in element.nodes) {
+      visit(child, blockStyle);
+    }
     flushText();
   }
 
@@ -390,7 +515,13 @@ List<EpubContentBlock> _documentToBlocks(
     final containsBlockChild = element.children.any(
       (child) => _blockElements.contains(child.localName),
     );
-    if (_blockElements.contains(element.localName) && !containsBlockChild) {
+    // Inline wrappers such as `<span>` or `<b>` legitimately hold chapter text
+    // in real-world EPUBs. Treating only block tags as leaves silently dropped
+    // that text whenever the wrapper sat next to block-level siblings.
+    if (!containsBlockChild &&
+        !_transparentContainers.contains(element.localName) &&
+        (_blockElements.contains(element.localName) ||
+            element.text.trim().isNotEmpty)) {
       appendLeaf(element, inheritedStyle);
       return;
     }
@@ -433,6 +564,196 @@ const _blockElements = <String>{
   'th',
   'tr',
 };
+
+const _headingElements = <String>{'h1', 'h2', 'h3', 'h4', 'h5', 'h6'};
+
+bool _isSemanticHeading(Element element, EpubContentStyle style) {
+  if (_headingElements.contains(element.localName)) return true;
+  final roleTokens = <String>[
+    element.attributes['role'] ?? '',
+    element.attributes['epub:type'] ?? '',
+    element.attributes['type'] ?? '',
+  ].expand((value) => value.toLowerCase().split(RegExp(r'\s+')));
+  if (roleTokens.any(
+    (value) =>
+        value == 'heading' ||
+        value == 'title' ||
+        value == 'chapter-title' ||
+        value == 'chaptertitle',
+  )) {
+    return true;
+  }
+  final identityTokens = <String>{
+    element.id.toLowerCase(),
+    ...element.classes.map((value) => value.toLowerCase()),
+  };
+  final namedAsHeading = identityTokens.any(
+    (value) => RegExp(
+      r'(^|[-_])(chapter[-_]?title|chaptertitle|title|heading|head)([-_]|$)',
+    ).hasMatch(value),
+  );
+  if (namedAsHeading) return true;
+  return style.fontScale >= 1.12 &&
+      style.fontWeight >= 600 &&
+      (style.textIndentEm == 0 || style.textAlign == 'center');
+}
+
+bool _promoteMatchingLeadingTitle(
+  List<EpubContentBlock> blocks,
+  String chapterTitle,
+) {
+  final normalizedTitle = _normalizeVisibleText(chapterTitle);
+  if (normalizedTitle.isEmpty) return false;
+  for (var index = 0; index < blocks.length; index++) {
+    final block = blocks[index];
+    if (!block.isText || block.text.trim().isEmpty) continue;
+    if (_normalizeVisibleText(block.text) != normalizedTitle) return false;
+    final style = block.style;
+    blocks[index] = EpubContentBlock(
+      kind: block.kind,
+      text: block.text,
+      runs: block.runs
+          .map(
+            (run) => EpubTextRun(
+              text: run.text,
+              style: EpubContentStyle(
+                fontScale: math.max(1.2, run.style.fontScale),
+                fontWeight: math.max(600, run.style.fontWeight),
+                italic: run.style.italic,
+                underline: run.style.underline,
+                textAlign: style.textAlign,
+                textIndentEm: 0,
+                colorArgb: run.style.colorArgb,
+                backgroundColorArgb: run.style.backgroundColorArgb,
+              ),
+            ),
+          )
+          .toList(growable: false),
+      isHeading: true,
+      imagePath: block.imagePath,
+      altText: block.altText,
+      imageWidth: block.imageWidth,
+      imageHeight: block.imageHeight,
+      style: EpubContentStyle(
+        fontScale: math.max(1.2, style.fontScale),
+        fontWeight: math.max(600, style.fontWeight),
+        italic: style.italic,
+        underline: style.underline,
+        textAlign: style.textAlign,
+        textIndentEm: 0,
+        marginBottomEm: math.max(0.45, style.marginBottomEm),
+        colorArgb: style.colorArgb,
+        backgroundColorArgb: style.backgroundColorArgb,
+        backgroundImagePath: style.backgroundImagePath,
+      ),
+    );
+    return true;
+  }
+  return false;
+}
+
+EpubContentStyle _normalizeBlockStyle(
+  EpubContentStyle style, {
+  required String? tag,
+  required bool isHeading,
+}) {
+  if (isHeading) {
+    return EpubContentStyle(
+      fontScale: style.fontScale,
+      fontWeight: math.max(600, style.fontWeight),
+      italic: style.italic,
+      underline: style.underline,
+      textAlign: style.textAlign,
+      textIndentEm: 0,
+      marginTopEm: style.marginTopEm.clamp(0, 1.2),
+      marginBottomEm: style.marginBottomEm.clamp(0.25, 0.8),
+      colorArgb: style.colorArgb,
+      backgroundColorArgb: style.backgroundColorArgb,
+      backgroundImagePath: style.backgroundImagePath,
+    );
+  }
+  final withoutIndent =
+      tag == 'blockquote' || tag == 'figcaption' || tag == 'li' || tag == 'pre';
+  return EpubContentStyle(
+    fontWeight: 400,
+    italic: style.italic,
+    underline: style.underline,
+    textAlign: 'start',
+    textIndentEm: withoutIndent ? 0 : 2,
+    colorArgb: style.colorArgb,
+    backgroundColorArgb: style.backgroundColorArgb,
+    backgroundImagePath: style.backgroundImagePath,
+  );
+}
+
+EpubContentStyle _normalizeInlineStyle(
+  EpubContentStyle style, {
+  required EpubContentStyle inherited,
+}) {
+  return EpubContentStyle(
+    fontScale: inherited.fontScale,
+    fontWeight: style.fontWeight,
+    italic: style.italic,
+    underline: style.underline,
+    textAlign: inherited.textAlign,
+    textIndentEm: inherited.textIndentEm,
+    colorArgb: style.colorArgb,
+    backgroundColorArgb: style.backgroundColorArgb,
+  );
+}
+
+EpubContentStyle _normalizeImageStyle(EpubContentStyle style) {
+  return EpubContentStyle(
+    textAlign: style.textAlign,
+    textIndentEm: 0,
+    marginTopEm: style.marginTopEm.clamp(0, 1),
+    marginBottomEm: style.marginBottomEm.clamp(0, 1),
+    backgroundColorArgb: style.backgroundColorArgb,
+    backgroundImagePath: style.backgroundImagePath,
+  );
+}
+
+List<EpubTextRun> _compactRuns(
+  List<EpubTextRun> source,
+  EpubContentStyle blockStyle,
+) {
+  if (source.isEmpty) return const <EpubTextRun>[];
+  final compact = <EpubTextRun>[];
+  for (final run in source) {
+    if (compact.isNotEmpty && _sameEpubStyle(compact.last.style, run.style)) {
+      final previous = compact.removeLast();
+      compact.add(
+        EpubTextRun(text: '${previous.text}${run.text}', style: run.style),
+      );
+    } else {
+      compact.add(run);
+    }
+  }
+  if (compact.every((run) => _sameEpubStyle(run.style, blockStyle))) {
+    return const <EpubTextRun>[];
+  }
+  return List<EpubTextRun>.unmodifiable(compact);
+}
+
+bool _sameEpubStyle(EpubContentStyle first, EpubContentStyle second) =>
+    first.fontScale == second.fontScale &&
+    first.fontWeight == second.fontWeight &&
+    first.italic == second.italic &&
+    first.underline == second.underline &&
+    first.textAlign == second.textAlign &&
+    first.lineHeightScale == second.lineHeightScale &&
+    first.letterSpacingEm == second.letterSpacingEm &&
+    first.textIndentEm == second.textIndentEm &&
+    first.marginTopEm == second.marginTopEm &&
+    first.marginBottomEm == second.marginBottomEm &&
+    first.colorArgb == second.colorArgb &&
+    first.backgroundColorArgb == second.backgroundColorArgb &&
+    first.backgroundImagePath == second.backgroundImagePath;
+
+/// Structural containers that must always be walked into, never collapsed
+/// into a single leaf block — flattening `<html>`/`<body>` would merge every
+/// paragraph of a chapter into one run.
+const _transparentContainers = <String>{'html', 'body'};
 
 class _CollectedRuns {
   final String text;
@@ -487,9 +808,17 @@ class _CssRule {
 class _EpubStyleResolver {
   final List<_CssRule> _rules;
   final String? Function(String rawUrl) resolveImage;
+  final Expando<Map<String, String>> _declarationCache =
+      Expando<Map<String, String>>('epub-css-declarations');
 
-  _EpubStyleResolver(String cssText, {required this.resolveImage})
-    : _rules = _parseCssRules(cssText);
+  _EpubStyleResolver(
+    String cssText, {
+    required Map<String, List<_CssRule>> rulesCache,
+    required this.resolveImage,
+  }) : _rules = rulesCache.putIfAbsent(
+         cssText,
+         () => List<_CssRule>.unmodifiable(_parseCssRules(cssText)),
+       );
 
   bool isHidden(Element element) {
     final display = propertyFor(element, 'display')?.toLowerCase();
@@ -626,6 +955,8 @@ class _EpubStyleResolver {
   }
 
   Map<String, String> _declarationsFor(Element element) {
+    final cached = _declarationCache[element];
+    if (cached != null) return cached;
     final matched =
         _rules
             .where((rule) => _matchesSelector(element, rule.selector))
@@ -640,6 +971,7 @@ class _EpubStyleResolver {
     }
     final inline = element.attributes['style'];
     if (inline != null) declarations.addAll(_parseDeclarations(inline));
+    _declarationCache[element] = declarations;
     return declarations;
   }
 }
@@ -988,7 +1320,7 @@ class _EpubImageStore {
       final target = File(
         p.join(outputDirectory.path, '$encodedName$extension'),
       );
-      target.writeAsBytesSync(bytes, flush: true);
+      target.writeAsBytesSync(bytes);
       final dimensions = _imageDimensions(bytes, extension);
       return _ExtractedImage(
         target.path,
@@ -1018,7 +1350,7 @@ class _EpubImageStore {
         final target = File(
           p.join(outputDirectory.path, 'inline_${_dataImageIndex++}$extension'),
         );
-        target.writeAsBytesSync(bytes, flush: true);
+        target.writeAsBytesSync(bytes);
         final dimensions = _imageDimensions(
           Uint8List.fromList(bytes),
           extension,
@@ -1246,9 +1578,7 @@ String _decodeUtf16(List<int> bytes, Endian endian) {
   return String.fromCharCodes(codeUnits);
 }
 
-String? _extractChapterTitle(Document document) {
-  final heading = document.querySelector('h1, h2, h3')?.text.trim();
-  if (heading != null && heading.isNotEmpty) return heading;
+String? _extractDocumentTitle(Document document) {
   final title = document.querySelector('title')?.text.trim();
   return title == null || title.isEmpty ? null : title;
 }

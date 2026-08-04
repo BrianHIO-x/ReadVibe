@@ -38,6 +38,10 @@ final _chapterPatterns = [
   ),
 ];
 
+// Novel-sized TXT files are a few megabytes; anything near a gigabyte would
+// exhaust memory when decoded and split inside the worker isolate.
+const _maxTxtFileBytes = 256 * 1024 * 1024;
+
 /// Parses a TXT file and detects its UTF-8 or GBK encoding automatically.
 Future<Book> parseTxt(String filePath, String fileName) async {
   // Decoding and chapter detection are CPU-heavy for novel-sized files. Keep
@@ -48,6 +52,11 @@ Future<Book> parseTxt(String filePath, String fileName) async {
 
 Book _parseTxtSync(String filePath, String fileName) {
   final file = File(filePath);
+  final length = file.lengthSync();
+  if (length <= 0) throw const FormatException('TXT 文件为空或无法读取');
+  if (length > _maxTxtFileBytes) {
+    throw const FormatException('TXT 文件过大，请选择小于 256 MB 的文件');
+  }
   final bytes = file.readAsBytesSync();
   final content = decodeTxtBytes(bytes);
   return buildBookFromText(

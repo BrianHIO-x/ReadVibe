@@ -22,7 +22,7 @@ class ReaderSettingsSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final maxHeight = MediaQuery.sizeOf(context).height * 0.5;
+    final maxHeight = MediaQuery.sizeOf(context).height * 0.62;
     final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
     return Container(
       decoration: BoxDecoration(
@@ -50,10 +50,10 @@ class ReaderSettingsSheet extends StatelessWidget {
                 // Drag handle
                 Center(
                   child: Container(
-                    width: 34,
-                    height: 3,
+                    width: 40,
+                    height: 4,
                     decoration: BoxDecoration(
-                      color: colors.border,
+                      color: colors.secondary.withValues(alpha: 0.30),
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),

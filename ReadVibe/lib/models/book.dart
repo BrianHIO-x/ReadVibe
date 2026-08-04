@@ -74,6 +74,7 @@ class EpubContentBlock {
   final EpubContentBlockKind kind;
   final String text;
   final List<EpubTextRun> runs;
+  final bool isHeading;
   final String? imagePath;
   final String? altText;
   final double? imageWidth;
@@ -84,6 +85,7 @@ class EpubContentBlock {
     required this.kind,
     this.text = '',
     this.runs = const <EpubTextRun>[],
+    this.isHeading = false,
     this.imagePath,
     this.altText,
     this.imageWidth,
