@@ -30,11 +30,17 @@ final _chapterPatterns = [
   RegExp(r'^第[一二两三四五六七八九十百千万零〇０-９0-9]+[章回节卷集部篇]'),
   RegExp(r'^卷[一二两三四五六七八九十百千万零〇０-９0-9]+'),
   RegExp(r'^(?:Chapter|Part)\s*[0-9０-９IVXLCDM]+', caseSensitive: false),
-  RegExp(r'^(?:序章|楔子|引子|前言|后记|尾声)'),
+  RegExp(
+    r'^(?:内容简介|作品简介|书籍简介|作者简介|编辑推荐|内容提要|出版说明|简介|序言|序章|楔子|引子|前言|后记|尾声|附录)(?:$|[\s　:：—（(【\[-])',
+  ),
   RegExp(
     r'^番外(?:第?[一二两三四五六七八九十百千万零〇０-９0-9]+[章节篇]?|[一二两三四五六七八九十百千万零〇０-９0-9]+)?',
   ),
 ];
+
+// Novel-sized TXT files are a few megabytes; anything near a gigabyte would
+// exhaust memory when decoded and split inside the worker isolate.
+const _maxTxtFileBytes = 256 * 1024 * 1024;
 
 /// Parses a TXT file and detects its UTF-8 or GBK encoding automatically.
 Future<Book> parseTxt(String filePath, String fileName) async {
@@ -46,27 +52,48 @@ Future<Book> parseTxt(String filePath, String fileName) async {
 
 Book _parseTxtSync(String filePath, String fileName) {
   final file = File(filePath);
+  final length = file.lengthSync();
+  if (length <= 0) throw const FormatException('TXT 文件为空或无法读取');
+  if (length > _maxTxtFileBytes) {
+    throw const FormatException('TXT 文件过大，请选择小于 256 MB 的文件');
+  }
   final bytes = file.readAsBytesSync();
   final content = decodeTxtBytes(bytes);
-  if (content.trim().isEmpty) {
-    throw const FormatException('TXT 文件没有可阅读的正文');
+  return buildBookFromText(
+    content: content,
+    fileName: fileName,
+    format: BookFormat.txt,
+    fileSize: bytes.length,
+  );
+}
+
+/// Builds a chaptered local book from plain text extracted by any supported
+/// container. DOC and DOCX reuse exactly the same chapter rules as TXT so the
+/// directory and reading behavior stay consistent across import formats.
+Book buildBookFromText({
+  required String content,
+  required String fileName,
+  required BookFormat format,
+  required int fileSize,
+}) {
+  final normalized = content
+      .replaceAll('\u0000', '')
+      .replaceAll('\u0007', '\n');
+  if (normalized.trim().isEmpty) {
+    throw FormatException('${format.name.toUpperCase()} 文件没有可阅读的正文');
   }
   final cleanTitle = fileName
-      .replaceAll(RegExp(r'\.txt$', caseSensitive: false), '')
+      .replaceAll(RegExp(r'\.(?:txt|docx?|epub)$', caseSensitive: false), '')
       .trim();
-
-  final lines = splitTxtLines(content);
-  final chapters = extractTxtChapters(lines);
   final now = DateTime.now();
-
   return Book(
-    id: 'txt_${now.microsecondsSinceEpoch}',
+    id: '${format.name}_${now.microsecondsSinceEpoch}',
     title: cleanTitle.isEmpty ? '未命名书籍' : cleanTitle,
-    format: BookFormat.txt,
-    chapters: chapters,
+    format: format,
+    chapters: extractTxtChapters(splitTxtLines(normalized)),
     txtParserVersion: currentTxtParserVersion,
     importDate: now,
-    fileSize: bytes.length,
+    fileSize: fileSize,
   );
 }
 
@@ -86,7 +113,12 @@ String? detectTxtChapterTitle(String sourceLine) =>
 /// excluded because they never existed in the source file.
 Book upgradeLegacyTxtBook(Book book) {
   if (book.format != BookFormat.txt ||
-      book.txtParserVersion >= currentTxtParserVersion ||
+      // Parser v2 already discarded empty volume marker lines, and the app
+      // does not retain the original imported TXT. Reparsing its reconstructed
+      // chapters cannot recover those titles, so only the older pre-v2 parser
+      // is migrated automatically. Re-importing the original file creates v3
+      // chapters with complete volume metadata.
+      book.txtParserVersion >= 2 ||
       book.chapters.isEmpty) {
     return book;
   }
@@ -180,6 +212,7 @@ List<Chapter> extractTxtChapters(List<String> lines) {
   }
 
   final chapters = <Chapter>[];
+  String? activeVolumeTitle;
 
   // Never discard text before the first detected heading. It may be a preface,
   // publication information, or (as in the reported book) real opening prose.
@@ -198,6 +231,10 @@ List<Chapter> extractTxtChapters(List<String> lines) {
         ? chapterStarts[i + 1].index
         : lines.length;
     final content = normalizeTxtContent(lines.getRange(start + 1, end));
+    final title = chapterStarts[i].title;
+    if (isVolumeChapterTitle(title)) {
+      activeVolumeTitle = title;
+    }
 
     // Adjacent table-of-contents entries and duplicate headings used to create
     // selectable chapters with a completely blank page. Empty entries are not
@@ -206,8 +243,9 @@ List<Chapter> extractTxtChapters(List<String> lines) {
     chapters.add(
       Chapter(
         index: chapters.length,
-        title: chapterStarts[i].title,
+        title: title,
         content: content,
+        volumeTitle: isStandaloneChapterTitle(title) ? null : activeVolumeTitle,
       ),
     );
   }

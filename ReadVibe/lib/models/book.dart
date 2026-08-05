@@ -1,19 +1,118 @@
 // Book and chapter data models.
 
-const currentTxtParserVersion = 2;
+const currentTxtParserVersion = 3;
 
-enum BookFormat { txt, epub }
+final _volumeChapterTitlePattern = RegExp(
+  r'^(?:第[一二两三四五六七八九十百千万零〇０-９0-9]+卷|卷[一二两三四五六七八九十百千万零〇０-９0-9]+)',
+);
+final _introductoryChapterTitlePattern = RegExp(
+  r'^(?:内容简介|作品简介|书籍简介|作者简介|编辑推荐|内容提要|出版说明|简介|前言|序言|序章|楔子|引子|开篇)(?:$|[\s　:：—（(【\[-])',
+);
+final _standaloneTailTitlePattern = RegExp(
+  r'^(?:(?:后记|尾声|附录)(?:$|[\s　:：—（(【\[-])|番外(?:$|[\s　:：—（(【\[-]|第?[一二两三四五六七八九十百千万零〇０-９0-9]+[章节篇]?))',
+);
+
+bool isVolumeChapterTitle(String title) =>
+    _volumeChapterTitlePattern.hasMatch(title.trim());
+
+bool isIntroductoryChapterTitle(String title) =>
+    _introductoryChapterTitlePattern.hasMatch(title.trim());
+
+bool isStandaloneChapterTitle(String title) =>
+    isIntroductoryChapterTitle(title) ||
+    _standaloneTailTitlePattern.hasMatch(title.trim());
+
+enum BookFormat { txt, epub, docx, doc, pdf }
+
+enum EpubContentBlockKind { text, image }
+
+/// A compact, Flutter-independent subset of EPUB styling.
+///
+/// Values are persisted with the chapter payload so EPUB books can keep their
+/// publisher layout without using a second WebView-based reader. Font sizes,
+/// line heights and spacing are relative to the user's reader settings.
+class EpubContentStyle {
+  final double fontScale;
+  final int fontWeight;
+  final bool italic;
+  final bool underline;
+  final String textAlign;
+  final double lineHeightScale;
+  final double letterSpacingEm;
+  final double textIndentEm;
+  final double marginTopEm;
+  final double marginBottomEm;
+  final int? colorArgb;
+  final int? backgroundColorArgb;
+  final String? backgroundImagePath;
+
+  const EpubContentStyle({
+    this.fontScale = 1,
+    this.fontWeight = 400,
+    this.italic = false,
+    this.underline = false,
+    this.textAlign = 'start',
+    this.lineHeightScale = 1,
+    this.letterSpacingEm = 0,
+    this.textIndentEm = 2,
+    this.marginTopEm = 0,
+    this.marginBottomEm = 0,
+    this.colorArgb,
+    this.backgroundColorArgb,
+    this.backgroundImagePath,
+  });
+}
+
+class EpubTextRun {
+  final String text;
+  final EpubContentStyle style;
+
+  const EpubTextRun({required this.text, required this.style});
+}
+
+class EpubContentBlock {
+  final EpubContentBlockKind kind;
+  final String text;
+  final List<EpubTextRun> runs;
+  final bool isHeading;
+  final String? imagePath;
+  final String? altText;
+  final double? imageWidth;
+  final double? imageHeight;
+  final EpubContentStyle style;
+
+  const EpubContentBlock({
+    required this.kind,
+    this.text = '',
+    this.runs = const <EpubTextRun>[],
+    this.isHeading = false,
+    this.imagePath,
+    this.altText,
+    this.imageWidth,
+    this.imageHeight,
+    this.style = const EpubContentStyle(),
+  });
+
+  bool get isText => kind == EpubContentBlockKind.text;
+  bool get isImage => kind == EpubContentBlockKind.image;
+}
 
 class Chapter {
   final int index;
   final String title;
   final String content;
+  final String? volumeTitle;
+  final List<EpubContentBlock> epubBlocks;
 
   const Chapter({
     required this.index,
     required this.title,
     required this.content,
+    this.volumeTitle,
+    this.epubBlocks = const <EpubContentBlock>[],
   });
+
+  bool get hasRichEpubContent => epubBlocks.isNotEmpty;
 }
 
 class Book {
@@ -26,6 +125,10 @@ class Book {
   final DateTime importDate;
   final int fileSize;
   final int txtParserVersion;
+  final int? wordCount;
+  final List<int>? chapterWordCounts;
+  final String? sourcePath;
+  final int? pageCount;
 
   const Book({
     required this.id,
@@ -37,7 +140,13 @@ class Book {
     required this.importDate,
     this.fileSize = 0,
     this.txtParserVersion = currentTxtParserVersion,
+    this.wordCount,
+    this.chapterWordCounts,
+    this.sourcePath,
+    this.pageCount,
   }) : _storedChapterCount = chapterCount;
+
+  bool get isPdf => format == BookFormat.pdf;
 
   int get chapterCount => chapters.isNotEmpty
       ? chapters.length
@@ -51,9 +160,38 @@ class Book {
     'importDate': importDate.toIso8601String(),
     'fileSize': fileSize,
     'txtParserVersion': txtParserVersion,
+    if (wordCount != null) 'wordCount': wordCount,
+    if (chapterWordCounts != null && chapterWordCounts!.length == chapterCount)
+      'chapterWordCounts': chapterWordCounts,
+    if (sourcePath != null) 'sourcePath': sourcePath,
+    if (pageCount != null) 'pageCount': pageCount,
     // Note: chapters are stored separately to reduce JSON size
     'chapterCount': chapterCount,
   };
+
+  Book copyWith({
+    String? title,
+    int? wordCount,
+    List<int>? chapterWordCounts,
+    String? sourcePath,
+    int? pageCount,
+  }) {
+    return Book(
+      id: id,
+      title: title ?? this.title,
+      author: author,
+      format: format,
+      chapters: chapters,
+      chapterCount: chapterCount,
+      importDate: importDate,
+      fileSize: fileSize,
+      txtParserVersion: txtParserVersion,
+      wordCount: wordCount ?? this.wordCount,
+      chapterWordCounts: chapterWordCounts ?? this.chapterWordCounts,
+      sourcePath: sourcePath ?? this.sourcePath,
+      pageCount: pageCount ?? this.pageCount,
+    );
+  }
 
   /// Creates a Book from JSON. Chapters must be provided separately.
   factory Book.fromJson(Map<String, dynamic> json, List<Chapter> chapters) {
@@ -81,6 +219,35 @@ class Book {
     final txtParserVersion = rawTxtParserVersion is num
         ? rawTxtParserVersion.toInt().clamp(0, 0x7fffffff)
         : 0;
+    final rawWordCount = json['wordCount'];
+    final wordCount = rawWordCount is num
+        ? rawWordCount.toInt().clamp(0, 0x7fffffffffffffff)
+        : null;
+    final rawChapterWordCounts = json['chapterWordCounts'];
+    List<int>? chapterWordCounts;
+    if (rawChapterWordCounts is List &&
+        rawChapterWordCounts.length == chapterCount) {
+      final parsed = <int>[];
+      for (final value in rawChapterWordCounts) {
+        if (value is! num || !value.isFinite || value < 0) {
+          parsed.clear();
+          break;
+        }
+        parsed.add(value.toInt().clamp(0, 0x7fffffffffffffff));
+      }
+      if (parsed.length == chapterCount) {
+        chapterWordCounts = List<int>.unmodifiable(parsed);
+      }
+    }
+    final rawSourcePath = json['sourcePath'];
+    final sourcePath =
+        rawSourcePath is String && rawSourcePath.trim().isNotEmpty
+        ? rawSourcePath.trim()
+        : null;
+    final rawPageCount = json['pageCount'];
+    final pageCount = rawPageCount is num
+        ? rawPageCount.toInt().clamp(1, 0x7fffffff)
+        : null;
 
     return Book(
       id: id,
@@ -95,6 +262,10 @@ class Book {
       importDate: importDate,
       fileSize: fileSize,
       txtParserVersion: txtParserVersion,
+      wordCount: wordCount,
+      chapterWordCounts: chapterWordCounts,
+      sourcePath: sourcePath,
+      pageCount: pageCount,
     );
   }
 }

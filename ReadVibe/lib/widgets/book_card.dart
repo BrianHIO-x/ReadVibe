@@ -3,6 +3,7 @@ import '../theme/app_theme.dart';
 import '../theme/app_spacing.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
+import '../services/word_count_service.dart';
 import 'pressable_scale.dart';
 
 /// A book card displayed on the library shelf
@@ -44,21 +45,38 @@ class BookCard extends StatelessWidget {
         ? Colors.black.withValues(alpha: 0.22)
         : palette.text.withValues(alpha: 0.18);
     final totalChapters = book.chapterCount;
-    final currentChapter = totalChapters > 0
-        ? (progress?.chapterIndex ?? 0).clamp(0, totalChapters - 1)
+    final totalUnits = book.isPdf ? (book.pageCount ?? 0) : totalChapters;
+    final currentChapter = totalUnits > 0
+        ? (progress?.chapterIndex ?? 0).clamp(0, totalUnits - 1)
         : 0;
-    final progressPercent = totalChapters > 0
-        ? (currentChapter / totalChapters).clamp(0.0, 1.0)
+    final localProgress =
+        progress?.chapterProgress[currentChapter] ??
+        progress?.scrollProgress ??
+        0.0;
+    final progressPercent = book.isPdf
+        ? (progress?.scrollProgress ??
+                  (totalUnits > 1 ? currentChapter / (totalUnits - 1) : 0.0))
+              .clamp(0.0, 1.0)
+              .toDouble()
+        : totalUnits > 0
+        ? ((currentChapter + localProgress.clamp(0.0, 1.0)) / totalUnits)
+              .clamp(0.0, 1.0)
+              .toDouble()
         : 0.0;
-    final metaLine = [
-      if (book.author.isNotEmpty) book.author,
-      '$totalChapters 章${progress != null ? ' · 已读 ${(progressPercent * 100).toInt()}%' : ''}',
-    ].join(' · ');
+    final metaLine = book.isPdf
+        ? '${book.pageCount ?? 0} 页${progress != null ? ' · 已读 ${(progressPercent * 100).toInt()}%' : ''}'
+        : [
+            if (book.author.isNotEmpty) book.author,
+            '$totalChapters 章${progress != null ? ' · 已读 ${(progressPercent * 100).toInt()}%' : ''}',
+          ].join(' · ');
+    final wordCountLine = book.isPdf
+        ? 'PDF 原版页面'
+        : formatBookWordCount(book.wordCount);
 
     return Semantics(
       button: true,
       label:
-          '$metaLine。${book.title}${book.author.isNotEmpty ? '，作者 ${book.author}' : ''}',
+          '$metaLine。$wordCountLine。${book.title}${book.author.isNotEmpty ? '，作者 ${book.author}' : ''}',
       child: Material(
         color: Colors.transparent,
         borderRadius: BorderRadius.circular(AppRadius.md),
@@ -161,7 +179,7 @@ class BookCard extends StatelessWidget {
                             right: 0,
                             bottom: 0,
                             child: Padding(
-                              padding: const EdgeInsets.all(AppSpacing.lg),
+                              padding: const EdgeInsets.all(AppSpacing.md),
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -170,10 +188,10 @@ class BookCard extends StatelessWidget {
                                     book.title,
                                     style: TextStyle(
                                       fontFamily: 'Georgia',
-                                      fontSize: 16,
+                                      fontSize: 14,
                                       fontWeight: FontWeight.w600,
                                       color: palette.text,
-                                      height: 1.3,
+                                      height: 1.25,
                                     ),
                                     maxLines: 3,
                                     overflow: TextOverflow.ellipsis,
@@ -183,7 +201,7 @@ class BookCard extends StatelessWidget {
                                     Text(
                                       book.author,
                                       style: TextStyle(
-                                        fontSize: 12,
+                                        fontSize: 11,
                                         color: palette.secondary,
                                       ),
                                       maxLines: 1,
@@ -196,11 +214,11 @@ class BookCard extends StatelessWidget {
                           ),
                           // 5. Format badge
                           Positioned(
-                            top: AppSpacing.sm,
-                            right: AppSpacing.sm,
+                            top: AppSpacing.xs,
+                            right: AppSpacing.xs,
                             child: Container(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: AppSpacing.sm,
+                                horizontal: 6,
                                 vertical: 2,
                               ),
                               decoration: BoxDecoration(
@@ -212,7 +230,7 @@ class BookCard extends StatelessWidget {
                               child: Text(
                                 book.format.name.toUpperCase(),
                                 style: const TextStyle(
-                                  fontSize: 11,
+                                  fontSize: 9,
                                   fontWeight: FontWeight.w600,
                                   color: Colors.white,
                                 ),
@@ -223,13 +241,35 @@ class BookCard extends StatelessWidget {
                       ),
                     ),
                   ),
-                  const SizedBox(height: AppSpacing.sm),
+                  const SizedBox(height: 6),
                   // Meta line: author + chapter count / progress
                   Text(
                     metaLine,
-                    style: TextStyle(fontSize: 12, color: palette.secondary),
+                    style: TextStyle(fontSize: 11, color: palette.secondary),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: AppSpacing.xs),
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.text_snippet_outlined,
+                        size: 12,
+                        color: palette.secondary,
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          wordCountLine,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: palette.secondary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: AppSpacing.xs),
                   ClipRRect(

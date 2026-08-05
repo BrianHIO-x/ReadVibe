@@ -1,202 +1,123 @@
-# ReadVibe — 本地离线小说阅读器
+# ReadVibe
 
-ReadVibe 是一个使用 Flutter 构建的 Android 本地小说阅读器。它支持导入 TXT 和 EPUB，在设备本地完成解析、分章、排版、阅读设置和进度保存，不依赖账号、服务器或云同步。
+ReadVibe 是面向 Android 的本地离线阅读器。当前公开版本为 `v0.6.2`，正式发布目标为 Android `arm64-v8a`，最低支持 Android 8.0（API 26）。
 
-## 当前发布状态
+当前发布文件：
 
-| 项目 | 当前值 |
-|---|---|
-| 公开版本 | `v0.1.7` |
-| 正式目标端 | Android `arm64-v8a` |
-| APK | `ReadVibe/dist/ReadVibe-Android-v0.1.7-arm64-v8a.apk` |
-| APK 大小 | 51,261,470 字节，约 48.9 MiB |
-| SHA-256 | `B1A83E6C008BE3F115FD986BC63D1CDDF1C443D23A45A34FA6D89BF032DF2967` |
-| 静态检查 | `flutter analyze` 已通过 |
-| Release 构建 | Android arm64 release 已成功生成 |
+| 项目 | 值 |
+| --- | --- |
+| APK | `ReadVibe/dist/ReadVibe-Android-v0.6.2-arm64-v8a.apk` |
+| 应用 ID | `com.readvibe.app` |
+| `versionName` | `0.6.2` |
+| `versionCode` | `2046` |
+| 最低 / 目标 SDK | `26 / 36` |
+| ABI | `arm64-v8a` |
+| 文件大小 | `39,240,243` 字节（`37.42 MiB`） |
+| SHA-256 | `048DCF840FA7B379B0BE5DA2102FDCF0E5D4E4411B6DBAB026DF11E1139BD3F7` |
+| APK 签名 | APK Signature Scheme v2 验证通过 |
 
-公开版本号只允许使用三段式语义版本。Android 内部升级编号独立维护，不得拼接到公开版本或 APK 文件名中。
+## 已实现功能
 
-## 仓库结构
+### 书架与导入
 
-```text
-1.ReadVibe_Project/
-├── AGENTS.md                         仓库级协作与文档同步规则
-├── README.md                         当前文件，仓库入口
-└── ReadVibe/
-    ├── AGENTS.md                     Flutter 应用级协作规则
-    ├── README.md                     功能、开发、构建和数据说明
-    ├── android/                      当前唯一可发布的平台工程
-    ├── lib/                          Dart / Flutter 主代码
-    ├── docs/UI_OPTIMIZATION.md       阅读交互与性能实现说明
-    ├── windows/README.md             Windows 占位状态与恢复步骤
-    ├── samples/                      示例 TXT
-    ├── dist/                         本地 APK 发布产物
-    ├── pubspec.yaml
-    └── analysis_options.yaml
-```
+- 导入 TXT、EPUB、PDF、DOCX 和 DOC 文件。
+- 手机书架固定三列显示，书卡展示格式、章节或页数、阅读进度和全文字数。
+- 全文字数与每章字数在后台 isolate 计算，书架和开书不等待统计完成。
+- 长按书籍打开“修改名称 / 移动 / 删除”三项操作。
+- 移动操作进入独立整理界面，支持长按拖动、相邻书卡动画让位、边缘滚动和顺序持久化。
+- 修改名称只改变 ReadVibe 内的显示名称；删除同时清理正文、进度以及由应用管理的 EPUB 图片或 PDF 源文件。
 
+### 小说阅读器
 
-## 文档导航
+TXT、EPUB、DOCX 和 DOC 使用同一套小说阅读器，具有一致的菜单、目录、选择、搜索、设置和进度行为。
 
-- [`AGENTS.md`](AGENTS.md)：仓库最高级规则，包括“每次变更必须同步全部 Markdown”的硬性要求。
-- [`ReadVibe/AGENTS.md`](ReadVibe/AGENTS.md)：应用级版本、交互、验证和发布规则。
-- [`ReadVibe/README.md`](ReadVibe/README.md)：完整功能、目录结构、开发环境和构建命令。
-- [`ReadVibe/docs/UI_OPTIMIZATION.md`](ReadVibe/docs/UI_OPTIMIZATION.md)：阅读页稳定性、进度、翻页、性能与回归检查说明。
-- [`ReadVibe/windows/README.md`](ReadVibe/windows/README.md)：Windows 端为何不能构建，以及以后如何恢复。
+- “分章”模式：单章纵向滚动，左右切换章节。
+- “滚动”模式：全书章节组成一个连续纵向阅读流。
+- “仿真”模式：正文按固定整屏页距分页，章尾只补空白纸面，不重复上一页正文；提供仿真翻页和平滑翻页。
+- 仿真翻页使用直线纸边、垂直折痕、阴影和纸背反向字迹；前翻折回当前页，后翻由上一页展开覆盖当前页。
+- 阅读模式切换使用正文字符锚点定位，避免复用不同排版的像素位置。
+- 阅读进度按书保存当前章节、章节内位置和全书比例；跨章、关书和设置变更都会保存当前位置。
+- 开书和关书使用主题安全的正反转场，深色主题不会以浅色页面作为中间帧。
 
+### EPUB
 
-## 产品原则
+- 按 OPF spine 顺序解析 XHTML，并优先用 EPUB3 NAV 或 EPUB2 NCX 的标题建立目录；缺少导航时使用正文语义标题或文档标题。
+- 普通正文统一使用与 TXT 相同的字号、字体、字重、行高、字距、首行缩进和段落空行；标准标题、带标题语义/类名的元素及与目录标题一致的正文首段继续保留 EPUB 的层级、颜色、强调与对齐样式。
+- 正文存在语义标题时，阅读页直接显示该 EPUB 标题块，不再额外绘制一次目录标题，因此同章只出现一个标题。
+- 读取 EPUB 包内外链 CSS、文档内 `<style>` 和行内 `style`。
+- 支持常用标签、类、ID、后代和直接子级选择器；标题与行内强调可保留相对字号、字重、斜体、下划线、对齐、文字色、背景色和本地背景图。
+- 支持 EPUB 包内 JPEG、PNG、GIF、WebP、BMP 及 base64 图片；不请求远程图片或远程 CSS。
+- 外部 CSS、已解析规则和元素声明在单次导入中复用；重复文本样式会合并，富文本章节落盘时不再重复保存一份完整纯文本。
+- 加载富文本章节时恢复同步纯文本，用于目录字数、全文搜索和字符锚点跳转。
 
-### 本地与私有
+### PDF
 
-- 书籍正文、书架元数据、阅读进度和阅读设置保存在设备本地。
-- 当前不提供账号、云同步或远程服务器。
-- Android 系统云备份已禁用。
-- 卸载应用通常会同时删除书籍、进度和导入字体。
+PDF 使用独立的 Android 固定版式阅读器，保留原页面布局，支持横向逐页浏览、双指缩放、页码显示和阅读页进度恢复。
 
-### 小说阅读优先
+### 目录与搜索
 
-- TXT 自动识别编码、章节和段落，统一为稳定的小说排版。
-- EPUB 按 spine 顺序提取为纯文本阅读版。
-- 复杂 EPUB CSS、漫画、教材和图文混排不会完整还原原版版式。
-- 正文默认首行缩进两格，段落之间默认不空行；用户可以切换为“空一行”。
+- 目录展示全书章节数、全文字数和每章字数。
+- 检测到明确卷标题时，目录显示卷与章节两级结构；卷标题为粘性分组行，展开状态按书保存。
+- 简介、前言等卷外内容显示在目录顶部；章节标题前不添加装饰编号。
+- TXT、EPUB、DOCX 和 DOC 的全文搜索入口始终可用。提交关键词后，后台 isolate 直接扫描全部章节，连续 Unicode 空白按一个空格处理，拉丁字母匹配不区分大小写。
+- 搜索结果保留章节、段落、原始字符位置和上下文，点击后由小说阅读器定位到命中字符；单次最多返回 500 条。
 
-### 沉浸与位置稳定
+### 文本选择与外部操作
 
-- 阅读时隐藏顶部状态栏，保留 Android 底部手势导航区域。
-- 单击正文只控制菜单显示和关闭。
-- 双击正文不会选中文字；长按仍可选择和复制。
-- 纵向滚动阅读，左右滑动切换上一章或下一章。
-- 菜单、主题、字体和排版设置变化不得把正文重置到章节顶部。
-
-## 主要功能
-
-### 书籍导入
-
-- 导入 `.txt` 和 `.epub`。
-- TXT 支持 UTF-8、UTF-8 BOM、UTF-16 LE/BE BOM 和常见 GBK。
-- 兼容 CR、LF、CRLF、NEL、Unicode 行分隔符和段落分隔符。
-- 识别常见中文、英文和 Markdown 章节标题，例如 `第1章`、`Chapter 1`、`# 第1章`。
-- 避免把句号结尾的普通“第一卷……。”或“第一节……。”误判成章节。
-- 保留首个真实章节前的开篇文字，过滤没有正文的伪目录项。
-- 旧版被存为“全文”的 TXT 首次打开时会按新解析器重新分章，并迁移阅读比例。
-- EPUB 按线性 spine 顺序读取，跳过非线性或空白页面，并限制异常归档的条目数和解压体积。
-
-### 阅读与菜单
-
-| 手势 | 行为 |
-|---|---|
-| 单击正文 | 呼出或关闭顶部、底部菜单 |
-| 双击正文 | 不选择文本，不显示选择工具栏 |
-| 长按正文 | 选择文本并保留复制能力 |
-| 上下滑动 | 阅读当前章节 |
-| 左右滑动 | 切换上一章或下一章 |
-| 点击目录项 | 打开指定章节并从章首开始 |
-
-正文列表始终保持在稳定的 `SelectionArea` 层级中。菜单开关前会记录当前像素和阅读比例，并在布局完成后核对滚动位置，避免系统栏或组件重建造成回顶。
-
-### 章节进度
-
-- 每章独立保存滚动像素和归一化阅读比例。
-- 手势开始时锁定离章快照，并在切换章节前先排队保存离开的章节。
-- 设置变化导致正文高度改变时，按阅读比例恢复，而不是复用失效像素。
-- 退出页面时使用最后一个真实滚动快照，避免控制器断开后用 0 覆盖进度。
-- 上一章和下一章分别使用独立的离屏预览控制器。
-- 相邻章节在进入翻页画面前就恢复到各自保存位置。
-- 翻页提交时，新活动页继承预览页真实像素，不会先显示章首再突然跳到进度。
-
-### 翻页模式
-
-平滑翻页：
-
-- 当前页跟随手指水平移动。
-- 相邻章节预热后参与同一画面。
-- 松手后根据滑动距离和速度决定完成翻章或回弹。
-
-仿书籍翻页：
-
-- 折痕使用三次贝塞尔曲线。
-- 折痕倾斜方向跟随手指纵向落点。
-- 翻动页包含独立纸张背面和淡化透印纹理。
-- 当前页、目标页和纸张背面分别使用动态明暗与投影。
-- 卷边绘制暗边、柔光和纸张厚度高光。
-- 向前、向后翻章使用镜像几何，并继续使用正确的相邻章节进度。
+- 双击正文不触发文本选择；长按形成有效非空选区后显示“复制 / 分享 / 全选 / 翻译 / 搜索”。
+- 选择手势生效期间，阅读器阻止底层翻页或正文拖动与选择手柄争用。
+- 翻译目标来自 Android 系统查询到的已安装文字处理应用，界面仅展示 DeepSeek、ChatGPT、Gemini、Claude、Microsoft Copilot 和 Perplexity。发送文本统一包装为 `翻译如下内容：“所选文字”`。
+- 网页搜索目标为 Edge、Chrome 和系统浏览器。
+- 翻译与网页搜索均可记住默认应用，也可在全局设置中重新选择。
 
 ### 阅读设置
 
-- 字号：16、18、20、22、24。
-- 行距：1.4、1.6、1.8、2.0、2.2。
-- 字重：细、常规、粗。
-- 页边距：窄、中、宽，默认中档。
-- 段落间距：不空行、空一行，默认不空行。
-- 翻页模式：平滑、仿书籍。
-- 主题：跟随系统、浅色、暖色、深色。
-- 字体：系统字体、内置宋体、用户导入的 `.ttf` / `.otf`。
+- 主题：系统、浅色、暖色、深色。
+- 字号：`16 / 18 / 20 / 22 / 24`，默认 `20`。
+- 字体：系统字体、内置宋体、本地导入的 TTF/OTF 字体。
+- 字重：细、中、粗；内置宋体对三档字重进行单独映射。
+- 排版：行高、窄/中/宽页边距、不空行/空一行；默认段落不空行。
+- 亮屏、阅读模式和仿真翻页子选项随设置保存。
 
-## 技术架构
+## 本地数据与隐私
 
-| 层面 | 实现 |
-|---|---|
-| UI | Flutter / Material 3 / StatefulWidget |
-| TXT 解析 | Dart 编码处理、`fast_gbk` 回退、后台 isolate |
-| EPUB 解析 | `archive`、XML、HTML、后台 isolate |
-| 书架与设置 | SharedPreferences |
-| 章节正文 | 应用文档目录中的 JSON 文件 |
-| 字体 | 本地文件复制与 Flutter `FontLoader` |
-| 翻页 | 手势驱动页面组合、CustomClipper、CustomPainter |
-| 发布 | Android arm64-v8a release APK |
+ReadVibe 不需要账号，不上传书籍正文。书籍元数据、解析后的章节、EPUB 图片、受管理的 PDF 源文件、字数、阅读进度、目录展开状态、书架顺序和阅读设置保存在应用私有目录或本地偏好设置中。DOC 二进制解析在 Android 本地工作线程完成。
 
-存储采用“元数据轻量加载、正文按需读取”的方式。章节文件使用原子替换，并能从完整的 `.tmp` 或 `.bak` 恢复；较大的章节 JSON 编解码在后台 isolate 中执行。
+## 技术结构
 
-## 平台状态
+- Flutter / Dart：书架、小说阅读器、EPUB/TXT/DOCX 解析、搜索、设置和本地状态。
+- Android Kotlin：DOC 二进制文本提取、PDF 导入信息与页面渲染、系统翻译/搜索应用查询和启动。
+- `SharedPreferences`：轻量元数据、顺序、设置和阅读进度。
+- 应用文档目录：分章正文、EPUB 私有图片、受管理的 PDF 和导入字体。
 
-| 平台 | 状态 |
-|---|---|
-| Android arm64-v8a | 当前唯一正式维护与发布目标 |
+## 构建
 
-## 快速开始
-
-默认环境为 PowerShell 7。
+在 `ReadVibe/` 目录执行：
 
 ```powershell
-cd D:\0_Study\0_Stdio\0_Codex_work\1.ReadVibe_Project\ReadVibe
 flutter pub get
 flutter analyze
-flutter devices
-flutter run -d <设备编号>
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.2 --build-number 46
 ```
 
-构建当前 Android arm64 release：
+Flutter 构建输出为：
 
-```powershell
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.1.7 --build-number 8
+```text
+ReadVibe/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
 ```
 
-复制为规范发布文件名：
+正式文件名为：
 
-```powershell
-New-Item -ItemType Directory -Force -Path dist | Out-Null
-Copy-Item build\app\outputs\flutter-apk\app-arm64-v8a-release.apk dist\ReadVibe-Android-v0.1.7-arm64-v8a.apk -Force
+```text
+ReadVibe/dist/ReadVibe-Android-v0.6.2-arm64-v8a.apk
 ```
 
-APK 清单必须显示 `versionName='0.1.7'` 和 `native-code: 'arm64-v8a'`。正式对外发布前还需要配置并妥善保管正式签名；当前产物用于本地 demo 和真机预览。
+当前 release 构建使用仓库 Android 配置中的本地调试证书签名，并启用代码压缩与资源收缩。
 
-## 验证口径
+## 文档
 
-- Flutter 代码变更：至少执行静态分析和 Android arm64 release 构建。
-- 阅读手势、进度、系统栏和动画：优先在 Android 真机验证。
-- 如果手机厂商安全页要求人工确认安装，必须明确记录未完成的真机步骤，不得宣称已经通过。
-- 文档变更：全量盘点全部 Markdown，检查版本、路径、命令、功能、平台状态和交叉链接。
-- 当前不运行或恢复自动化测试，除非用户明确要求。
-
-## 当前边界
-
-ReadVibe 仍是demo阶段的本地小说阅读器，暂未实现：
-
-- 真实封面图片提取和管理；
-- 书签、批注和全文搜索；
-- 听书或 TTS；
-- 云同步和账号系统；
-- 复杂 EPUB CSS 与图文版式还原；
-- Android 平板专门布局；
-- Windows、iOS、macOS、Linux 或 Web 正式版本。
+- [仓库协作规则](AGENTS.md)
+- [应用说明](ReadVibe/README.md)
+- [应用协作规则](ReadVibe/AGENTS.md)
+- [当前界面与交互](ReadVibe/docs/UI_OPTIMIZATION.md)
+- [Windows 目录状态](ReadVibe/windows/README.md)

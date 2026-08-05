@@ -1,56 +1,21 @@
-# ReadVibe Windows 平台占位说明
+# Windows 目录状态
 
-## 当前状态
+ReadVibe `v0.6.2` 的正式运行与发布目标只有 Android `arm64-v8a`，最低系统为 Android 8.0（API 26）。
 
-`windows/` 当前不是 Flutter Windows 原生工程，只保留本说明文件作为平台占位。
+本目录只保存平台状态说明，不包含 Windows Flutter runner、构建配置或发布产物，因此不执行 Windows 构建。应用的 DOC 二进制解析、PDF 页面渲染和系统外部应用调用均使用 Android 原生实现。
 
-ReadVibe `v0.1.7` 的唯一正式目标端是 Android `arm64-v8a`。Windows Runner、CMake 配置、插件注册文件和桌面资源已经删除，因此以下命令当前不能使用：
+Android 小说阅读器的仿真模式使用固定整屏页距；章节末页仅以空白纸面补足剩余高度，随后直接切换到下一章。
 
-```powershell
-flutter run -d windows
-flutter build windows
+Android 的 EPUB 导入按 OPF spine 与 NAV/NCX 建立章节，普通段落采用 TXT 排版规则，正文语义标题保留 EPUB 样式且不重复显示。
+
+当前 Android 正式产物为：
+
+```text
+../dist/ReadVibe-Android-v0.6.2-arm64-v8a.apk
 ```
 
-不要把本目录描述为“已支持 Windows”，也不要在普通 Android 修复中自动重新生成 Windows 工程。
+相关文档：
 
-## 为什么只保留占位
-
-- 当前产品交互围绕 Android 手机触摸、系统栏和手势导航设计。
-- 阅读页的上下滚动、左右翻章、长按选择和沉浸式系统栏逻辑需要针对桌面键鼠重新设计。
-- 保留未维护的 Flutter 平台模板会扩大构建范围并产生误导。
-- 当前发布、静态检查结论和 APK 产物只针对 Android arm64-v8a。
-
-## 以后恢复 Windows 的前提
-
-只有用户明确决定重新支持桌面端时，才在 `ReadVibe/` 根目录执行：
-
-```powershell
-flutter create --platforms=windows .
-```
-
-重新生成平台工程后，至少需要单独处理：
-
-- Windows 文件选择与文件权限；
-- 可调整窗口尺寸和最小窗口约束；
-- 鼠标滚轮、触控板、键盘翻章和快捷键；
-- 双击、拖选、右键菜单与长按选择的桌面等价交互；
-- 标题栏、窗口背景和深浅色主题；
-- 桌面端阅读栏宽度和大屏排版；
-- Windows 字体发现与用户字体导入；
-- 安装包、图标、签名和更新方式；
-- Windows 专属静态检查、运行验证和发布流程。
-
-完成这些工作之前，不能把 Windows 写入受支持平台列表。
-
-## 文档同步规则
-
-恢复、删除或改变 Windows 平台状态属于项目级变更。根据仓库根目录 `../../AGENTS.md` 和应用规则 `../AGENTS.md`，每次相关变更都必须逐一检查并同步修正仓库内全部 Markdown，包括：
-
-- `../../AGENTS.md`
-- `../../README.md`
-- `../AGENTS.md`
-- `../README.md`
-- `../docs/UI_OPTIMIZATION.md`
-- 当前文件
-
-同时需要更新平台表、项目结构、构建命令、验证口径和发布产物说明，不能只修改本文件。
+- [应用说明](../README.md)
+- [当前界面与交互](../docs/UI_OPTIMIZATION.md)
+- [仓库说明](../../README.md)
