@@ -1,18 +1,18 @@
 # ReadVibe Android 应用
 
-ReadVibe 是使用 Flutter 与 Android Kotlin 实现的本地离线阅读器。当前版本为 `v0.6.2`，正式目标为 Android `arm64-v8a`，最低支持 Android 8.0（API 26）。
+ReadVibe 是使用 Flutter 与 Android Kotlin 实现的本地离线阅读器。当前版本为 `v0.6.3`，正式目标为 Android `arm64-v8a`，最低支持 Android 8.0（API 26）。
 
 ## 当前发布文件
 
 | 项目 | 值 |
 | --- | --- |
-| 文件 | `dist/ReadVibe-Android-v0.6.2-arm64-v8a.apk` |
+| 文件 | `dist/ReadVibe-Android-v0.6.3-arm64-v8a.apk` |
 | 应用 ID | `com.readvibe.app` |
-| 版本名 / 内部版本码 | `0.6.2 / 2046` |
+| 版本名 / 内部版本码 | `0.6.3 / 2047` |
 | 最低 / 目标 SDK | `26 / 36` |
 | ABI | `arm64-v8a` |
-| 大小 | `39,240,243` 字节（`37.42 MiB`） |
-| SHA-256 | `048DCF840FA7B379B0BE5DA2102FDCF0E5D4E4411B6DBAB026DF11E1139BD3F7` |
+| 大小 | `40,355,599` 字节（`38.49 MiB`） |
+| SHA-256 | `30E7A37FD160E0281BEABED594E5793623398757C1415521C12D7F44502FAEF0` |
 | 签名 | APK Signature Scheme v2 验证通过；Android 本地调试证书 |
 
 ## 文件支持
@@ -31,7 +31,8 @@ ReadVibe 是使用 Flutter 与 Android Kotlin 实现的本地离线阅读器。�
 
 - 手机布局每行三本书，书卡显示格式、章节或页数、阅读比例和全文字数。
 - 解析完成即可打开书籍；全书与每章字数由后台 isolate 静默计算并持久化。
-- 长按书卡显示“修改名称 / 移动 / 删除”。
+- 长按书卡显示“修改名称 / 智能分章 / 移动 / 删除”。
+- “智能分章”面向章节识别异常的 TXT、DOCX 和 DOC 书籍：抽取候选标题行发给 DeepSeek 分析格式，校验通过后在本机重新分章，原分章自动备份并可一键恢复；密钥只保存在本机，不上传完整正文。
 - “修改名称”只修改书架显示名。
 - “移动”进入独立整理界面；拖动时保留原位占位，相邻书卡动画让位，靠近边缘时自动滚动，完成后保存顺序。
 - “删除”清理书籍元数据、正文、阅读进度、目录状态以及由应用管理的 EPUB 图片目录或 PDF 文件。
@@ -149,6 +150,8 @@ TXT、EPUB、DOCX 和 DOC 的全文搜索入口始终可用。
 - 分章正文、EPUB 图片、PDF 源文件和导入字体保存在应用私有目录。
 - 同一偏好键的异步写入串行执行，只有最新状态可以落盘。
 - 字数结果写回前会核对格式、源文件大小、解析版本和章节数，避免旧后台任务覆盖新导入内容。
+- DeepSeek API 密钥保存在本地偏好设置中；智能分章前的原章节目录备份在应用私有目录，恢复或删除书籍时清理。
+- 应用内更新只请求 GitHub Releases 的版本信息，下载的安装包经 SHA-256 校验后交给系统安装器。
 
 ## 源码结构
 
@@ -174,7 +177,7 @@ dist/
 ```powershell
 flutter pub get
 flutter analyze
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.2 --build-number 46
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.3 --build-number 2047
 ```
 
 构建输出：
@@ -186,7 +189,7 @@ build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
 正式产物：
 
 ```text
-dist/ReadVibe-Android-v0.6.2-arm64-v8a.apk
+dist/ReadVibe-Android-v0.6.3-arm64-v8a.apk
 ```
 
 ## 相关文档

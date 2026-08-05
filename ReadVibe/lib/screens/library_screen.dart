@@ -18,10 +18,12 @@ import '../services/book_search_service.dart';
 import '../services/word_parser.dart';
 import '../services/word_count_service.dart';
 import '../services/update_service.dart';
+import '../services/ai_chapter_service.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../widgets/app_update_dialog.dart';
 import '../widgets/book_card.dart';
+import '../widgets/deepseek_key_dialog.dart';
 import '../widgets/global_settings_sheet.dart';
 import 'reader_screen.dart';
 import 'pdf_reader_screen.dart';
@@ -36,7 +38,7 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-enum _BookAction { rename, move, delete }
+enum _BookAction { rename, move, delete, smartSplit, restoreSplit }
 
 class _LibraryScreenState extends State<LibraryScreen>
     with TickerProviderStateMixin {
@@ -617,6 +619,11 @@ class _LibraryScreenState extends State<LibraryScreen>
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
+    final canSmartSplit =
+        !book.isPdf && book.format != BookFormat.epub;
+    final hasSplitBackup =
+        canSmartSplit && await _storage.hasChapterBackup(book.id);
+    if (!mounted) return;
     final action = await showModalBottomSheet<_BookAction>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -672,6 +679,44 @@ class _LibraryScreenState extends State<LibraryScreen>
                 ),
                 onTap: () => Navigator.pop(sheetContext, _BookAction.rename),
               ),
+              if (canSmartSplit) ...[
+                const SizedBox(height: AppSpacing.xs),
+                ListTile(
+                  leading: Icon(
+                    Icons.auto_fix_high_rounded,
+                    color: colors.accent,
+                  ),
+                  title: Text('智能分章', style: TextStyle(color: colors.text)),
+                  subtitle: Text(
+                    '章节识别异常时，用 DeepSeek 分析标题格式并重新分章',
+                    style: TextStyle(color: colors.secondary),
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                  ),
+                  onTap: () =>
+                      Navigator.pop(sheetContext, _BookAction.smartSplit),
+                ),
+              ],
+              if (hasSplitBackup) ...[
+                const SizedBox(height: AppSpacing.xs),
+                ListTile(
+                  leading: Icon(
+                    Icons.undo_rounded,
+                    color: colors.accent,
+                  ),
+                  title: Text('恢复原分章', style: TextStyle(color: colors.text)),
+                  subtitle: Text(
+                    '撤销上一次智能分章，回到之前的章节目录',
+                    style: TextStyle(color: colors.secondary),
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                  ),
+                  onTap: () =>
+                      Navigator.pop(sheetContext, _BookAction.restoreSplit),
+                ),
+              ],
               const SizedBox(height: AppSpacing.xs),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
@@ -713,6 +758,134 @@ class _LibraryScreenState extends State<LibraryScreen>
         _enterReorderMode(book.id);
       case _BookAction.delete:
         _confirmDeleteBook(book);
+      case _BookAction.smartSplit:
+        await _smartSplitBook(book);
+      case _BookAction.restoreSplit:
+        await _restoreSplit(book);
+    }
+  }
+
+  /// Smart re-split flow: ensure a DeepSeek key, confirm the network send,
+  /// then run the analysis with a progress dialog and report the outcome.
+  Future<void> _smartSplitBook(Book book) async {
+    final colors = AppTheme.getReaderTheme(
+      _settings.theme,
+      systemBrightness: MediaQuery.platformBrightnessOf(context),
+    );
+    final service = AiChapterService();
+
+    if (await service.getApiKey() == null) {
+      if (!mounted) return;
+      final saved = await DeepSeekKeyDialog.show(context, colors);
+      if (!saved || !mounted) return;
+    }
+    if (!mounted) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: colors.headerBg,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+        ),
+        title: Text('智能分章', style: TextStyle(color: colors.text)),
+        content: Text(
+          'DeepSeek 会分析「${book.title}」的候选标题行并给出章节格式，随后在本机重新分章。只会发送少量候选行，不会上传完整正文。原分章会自动备份，可随时恢复。',
+          style: TextStyle(color: colors.text, fontSize: 14, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('取消', style: TextStyle(color: colors.secondary)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: colors.accent,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadius.pill),
+              ),
+            ),
+            child: const Text('开始'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final statusNotifier = ValueNotifier('正在准备…');
+    final dialogFuture = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          backgroundColor: colors.headerBg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+          ),
+          content: Row(
+            children: [
+              SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.5,
+                  color: colors.accent,
+                ),
+              ),
+              const SizedBox(width: AppSpacing.md),
+              Expanded(
+                child: ValueListenableBuilder<String>(
+                  valueListenable: statusNotifier,
+                  builder: (_, status, _) => Text(
+                    status,
+                    style: TextStyle(color: colors.text, fontSize: 14),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    String? errorMessage;
+    int? chapterCount;
+    try {
+      chapterCount = await service.resplitBookWithAi(
+        book,
+        _storage,
+        onStatus: (status) => statusNotifier.value = status,
+      );
+    } on FormatException catch (error) {
+      errorMessage = error.message;
+    } on Object {
+      errorMessage = '智能分章失败，请稍后重试';
+    }
+
+    if (mounted) Navigator.of(context).pop();
+    await dialogFuture;
+    statusNotifier.dispose();
+    if (!mounted) return;
+
+    if (chapterCount != null) {
+      _showMessage('已按新格式重新分章，共 $chapterCount 章。原分章已备份。');
+      await _loadData();
+    } else {
+      _showError(errorMessage ?? '智能分章失败，请稍后重试');
+    }
+  }
+
+  Future<void> _restoreSplit(Book book) async {
+    final restored = await _storage.restoreChapterBackup(book);
+    if (!mounted) return;
+    if (restored) {
+      _showMessage('已恢复原分章');
+      await _loadData();
+    } else {
+      _showError('没有可恢复的分章备份');
     }
   }
 

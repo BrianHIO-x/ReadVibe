@@ -4,13 +4,13 @@
 
 ## 当前发布配置
 
-- 公开版本：`v0.6.2`。
+- 公开版本：`v0.6.3`。
 - Android 应用 ID：`com.readvibe.app`。
 - 正式 ABI：`arm64-v8a`。
 - 最低系统：Android 8.0（API 26）。
 - Dart SDK 约束：`^3.12.2`。
 - Java 与 Kotlin JVM 目标：17。
-- 正式 APK：`dist/ReadVibe-Android-v0.6.2-arm64-v8a.apk`。
+- 正式 APK：`dist/ReadVibe-Android-v0.6.3-arm64-v8a.apk`。
 - `pubspec.yaml` 只写公开三段式版本；Android 内部 `versionCode` 通过构建号单独传入。
 
 ## 代码范围
@@ -86,7 +86,7 @@
 
 ```powershell
 flutter analyze
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.2 --build-number 46
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.3 --build-number 2047
 ```
 
-构建完成后把 `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk` 复制为 `dist/ReadVibe-Android-v0.6.2-arm64-v8a.apk`，并核对版本名、内部版本码、最低 SDK、ABI、签名、体积和 SHA-256。
+构建完成后把 `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk` 复制为 `dist/ReadVibe-Android-v0.6.3-arm64-v8a.apk`，并核对版本名、内部版本码、最低 SDK、ABI、签名、体积和 SHA-256。

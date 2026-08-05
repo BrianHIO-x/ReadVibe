@@ -4,6 +4,7 @@ import '../models/reader_settings.dart';
 import '../services/system_text_action_service.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'deepseek_key_dialog.dart';
 import 'font_settings_section.dart';
 
 class GlobalSettingsSheet extends StatelessWidget {
@@ -113,6 +114,34 @@ class GlobalSettingsSheet extends StatelessWidget {
                       },
                       icon: const Icon(Icons.restart_alt_rounded, size: 18),
                       label: const Text('重新选择默认应用'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: colors.accent,
+                        side: BorderSide(color: colors.border),
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.xl),
+                    Text(
+                      '智能分章',
+                      style: TextStyle(
+                        color: colors.text,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    Text(
+                      '章节识别异常的 TXT 书籍，可借助 DeepSeek 分析标题格式并重新分章。密钥只保存在本机。',
+                      style: TextStyle(
+                        color: colors.secondary,
+                        fontSize: 12,
+                        height: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    OutlinedButton.icon(
+                      onPressed: () => DeepSeekKeyDialog.show(context, colors),
+                      icon: const Icon(Icons.key_rounded, size: 18),
+                      label: const Text('设置 DeepSeek API 密钥'),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: colors.accent,
                         side: BorderSide(color: colors.border),

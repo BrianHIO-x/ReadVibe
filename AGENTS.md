@@ -27,9 +27,9 @@
 
 ## 发布基线
 
-- 公开版本为 `v0.6.2`。
+- 公开版本为 `v0.6.3`。
 - 唯一正式目标为 Android `arm64-v8a`，最低 Android 8.0（API 26）。
-- 正式产物路径为 `ReadVibe/dist/ReadVibe-Android-v0.6.2-arm64-v8a.apk`。
+- 正式产物路径为 `ReadVibe/dist/ReadVibe-Android-v0.6.3-arm64-v8a.apk`。
 - 用户可见版本采用 `v主版本.次版本.修订版本`。`ReadVibe/pubspec.yaml` 只保存三段式版本；Android `versionCode` 独立递增，不进入公开版本号、APK 文件名或发布标题。
 - APK 文件名固定为 `ReadVibe-Android-v主版本.次版本.修订版本-arm64-v8a.apk`。
 - `ReadVibe/windows/` 只有平台状态说明，不是可构建的 Windows 工程。

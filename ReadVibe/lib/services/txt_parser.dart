@@ -182,10 +182,36 @@ String _decodeUtf16(List<int> bytes, Endian endian) {
 }
 
 List<Chapter> extractTxtChapters(List<String> lines) {
+  return _splitIntoChapters(lines, (line) {
+    final heading = _parseChapterHeading(line);
+    if (heading == null) return null;
+    return (title: heading.title, marker: heading.marker);
+  });
+}
+
+/// Splits lines into chapters using a caller-supplied heading test, e.g. the
+/// AI-inferred pattern from smart re-splitting. Mirrors [extractTxtChapters]
+/// bookkeeping: opening prose becomes "开篇", empty sections are dropped, and
+/// volume titles keep grouping their chapters.
+List<Chapter> extractChaptersWithHeadingTest(
+  List<String> lines,
+  String? Function(String line) headingOf,
+) {
+  return _splitIntoChapters(lines, (line) {
+    final title = headingOf(line);
+    if (title == null) return null;
+    return (title: title, marker: title);
+  });
+}
+
+List<Chapter> _splitIntoChapters(
+  List<String> lines,
+  ({String title, String marker})? Function(String line) headingOf,
+) {
   final chapterStarts = <({int index, String title, String marker})>[];
 
   for (var i = 0; i < lines.length; i++) {
-    final heading = _parseChapterHeading(lines[i]);
+    final heading = headingOf(lines[i]);
     if (heading != null) {
       // Lines such as "第一章正文如下" can occur immediately below a real
       // "第一章 标题" and resemble another heading. Suppress only an adjacent
