@@ -49,6 +49,8 @@ android {
 
 dependencies {
     implementation("org.apache.poi:poi-scratchpad:5.5.1")
+    // FileProvider hands downloaded update APKs to the system installer.
+    implementation("androidx.core:core:1.13.1")
 }
 
 kotlin {

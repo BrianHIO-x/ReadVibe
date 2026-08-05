@@ -22,6 +22,7 @@ class MainActivity : FlutterActivity() {
         private const val TEXT_ACTION_CHANNEL = "com.readvibe.app/system_text_actions"
         private const val DOCUMENT_PARSER_CHANNEL = "com.readvibe.app/document_parser"
         private const val PDF_RENDERER_CHANNEL = "com.readvibe.app/pdf_renderer"
+        private const val APP_UPDATE_CHANNEL = "com.readvibe.app/app_update"
         private const val ACTION_TRANSLATE = "android.intent.action.TRANSLATE"
         private val AI_PACKAGE_ALLOWLIST = setOf(
             "com.deepseek.chat",
@@ -158,6 +159,56 @@ class MainActivity : FlutterActivity() {
                         )
                     }
                 }
+            }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            APP_UPDATE_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            try {
+                when (call.method) {
+                    "canRequestInstalls" -> {
+                        result.success(packageManager.canRequestPackageInstalls())
+                    }
+
+                    "openInstallSettings" -> {
+                        val intent = Intent(
+                            android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:$packageName"),
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(intent)
+                        result.success(null)
+                    }
+
+                    "installApk" -> {
+                        val filePath = call.argument<String>("filePath")
+                        val apk = filePath?.let(::File)
+                        if (apk == null || !apk.isFile) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
+                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                            this,
+                            "$packageName.fileprovider",
+                            apk,
+                        )
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "application/vnd.android.package-archive")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        if (intent.resolveActivity(packageManager) == null) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
+                        startActivity(intent)
+                        result.success(true)
+                    }
+
+                    else -> result.notImplemented()
+                }
+            } catch (error: Exception) {
+                result.error("APP_UPDATE_FAILED", error.message, null)
             }
         }
 

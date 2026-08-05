@@ -17,13 +17,16 @@ import '../services/pdf_import_service.dart';
 import '../services/book_search_service.dart';
 import '../services/word_parser.dart';
 import '../services/word_count_service.dart';
+import '../services/update_service.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
+import '../widgets/app_update_dialog.dart';
 import '../widgets/book_card.dart';
 import '../widgets/global_settings_sheet.dart';
 import 'reader_screen.dart';
 import 'pdf_reader_screen.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Library / bookshelf screen
 class LibraryScreen extends StatefulWidget {
@@ -81,6 +84,38 @@ class _LibraryScreenState extends State<LibraryScreen>
     _gridScrollController.addListener(_handleGridScroll);
     unawaited(BookSearchService.removeObsoleteData(_storage));
     _loadData();
+    _scheduleUpdateCheck();
+  }
+
+  /// Silent GitHub release check once the shelf has settled. A dismissed
+  /// version stays quiet for three days so offline reading is never nagged.
+  void _scheduleUpdateCheck() {
+    Timer(const Duration(seconds: 2), () async {
+      if (!mounted) return;
+      final info = await UpdateService().checkForUpdate();
+      if (!mounted || info == null) return;
+      final prefs = await SharedPreferences.getInstance();
+      final dismissedKey = 'update_dismissed_${info.version}';
+      final dismissedAt = prefs.getInt(dismissedKey) ?? 0;
+      final quietDays = DateTime.now().millisecondsSinceEpoch - dismissedAt;
+      if (quietDays < const Duration(days: 3).inMilliseconds) return;
+      if (!mounted) return;
+      final colors = AppTheme.getReaderTheme(
+        _settings.theme,
+        systemBrightness: MediaQuery.platformBrightnessOf(context),
+      );
+      await showGeneralDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: '取消',
+        barrierColor: Colors.black54,
+        transitionDuration: AppMotion.normal,
+        pageBuilder: (ctx, animation, secondaryAnimation) {
+          return AppUpdateDialog(info: info, colors: colors);
+        },
+      );
+      unawaited(prefs.setInt(dismissedKey, DateTime.now().millisecondsSinceEpoch));
+    });
   }
 
   void _handleGridScroll() {
@@ -1233,9 +1268,13 @@ class _LibraryScreenState extends State<LibraryScreen>
             ),
           ),
           const SizedBox(height: AppSpacing.sm),
-          Text(
-            '点击下方按钮，导入 TXT、EPUB、PDF、DOCX 或 DOC',
-            style: TextStyle(fontSize: 14, color: colors.secondary),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
+            child: Text(
+              '点击下方按钮，导入 TXT、EPUB、PDF、DOCX 或 DOC',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, color: colors.secondary),
+            ),
           ),
           const SizedBox(height: AppSpacing.xl),
           ElevatedButton.icon(

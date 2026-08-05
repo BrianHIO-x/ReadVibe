@@ -3517,7 +3517,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                         curve: AppMotion.standard,
                         padding: EdgeInsets.only(
                           bottom: viewPadding.bottom,
-                          top: AppSpacing.md,
+                          top: AppSpacing.sm,
                           left: AppSpacing.xl,
                           right: AppSpacing.xl,
                         ),
@@ -4324,7 +4324,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           behavior: HitTestBehavior.opaque,
           child: Padding(
             padding: const EdgeInsets.symmetric(
-              vertical: AppSpacing.xs,
+              vertical: 2,
               horizontal: AppSpacing.md,
             ),
             child: ExcludeSemantics(
