@@ -19,8 +19,15 @@ import 'txt_parser.dart';
 /// full text.
 class AiChapterService {
   static const _apiKeyPref = 'deepseek_api_key';
+  static const _modelPref = 'deepseek_model';
+  static const _thinkingPref = 'deepseek_thinking';
+  static const _effortPref = 'deepseek_reasoning_effort';
   static const _endpoint = 'https://api.deepseek.com/chat/completions';
-  static const _timeout = Duration(seconds: 45);
+  // Thinking mode can reason for tens of seconds before answering.
+  static const _timeout = Duration(seconds: 90);
+
+  static const modelFlash = 'deepseek-v4-flash';
+  static const modelPro = 'deepseek-v4-pro';
 
   Future<String?> getApiKey() async {
     final prefs = await SharedPreferences.getInstance();
@@ -40,6 +47,53 @@ class AiChapterService {
 
   Future<bool> hasApiKey() async => await getApiKey() != null;
 
+  Future<String> getModel() async {
+    final prefs = await SharedPreferences.getInstance();
+    final model = prefs.getString(_modelPref);
+    return model == modelPro ? modelPro : modelFlash;
+  }
+
+  Future<void> setModel(String model) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _modelPref,
+      model == modelPro ? modelPro : modelFlash,
+    );
+  }
+
+  /// Thinking mode is off by default: chapter heading analysis is a
+  /// formatting task where the faster, cheaper non-thinking path is enough.
+  Future<bool> getThinkingEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_thinkingPref) ?? false;
+  }
+
+  Future<void> setThinkingEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_thinkingPref, enabled);
+  }
+
+  /// One of low / high / max, per the DeepSeek reasoning_effort parameter.
+  Future<String> getReasoningEffort() async {
+    final prefs = await SharedPreferences.getInstance();
+    final effort = prefs.getString(_effortPref);
+    return switch (effort) {
+      'low' || 'max' => effort!,
+      _ => 'high',
+    };
+  }
+
+  Future<void> setReasoningEffort(String effort) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _effortPref,
+      switch (effort) {
+        'low' || 'max' => effort,
+        _ => 'high',
+      },
+    );
+  }
+
   /// Asks DeepSeek for a chapter-heading regex based on [sampleLines].
   /// Throws [FormatException] with a user-facing message on failure.
   Future<String> inferChapterPattern(List<String> sampleLines) async {
@@ -53,6 +107,35 @@ class AiChapterService {
       for (var i = 0; i < sample.length; i++) '$i: ${sample[i]}',
     ].join('\n');
 
+    final model = await getModel();
+    final thinking = await getThinkingEnabled();
+    final effort = await getReasoningEffort();
+    final requestBody = <String, Object>{
+      'model': model,
+      'max_tokens': 600,
+      'response_format': {'type': 'json_object'},
+      'messages': [
+        {
+          'role': 'system',
+          'content':
+              '你是小说文本格式分析助手。用户会给出从一本小说中抽取的候选行（每行带编号）。'
+              '其中混有真正的章节标题行和普通正文行。请找出章节标题行的共同格式，'
+              '返回一个匹配章节标题行的正则表达式。要求：'
+              '1) 兼容 Dart RegExp，不使用环视、反向引用和命名捕获组；'
+              '2) 只匹配标题行，不匹配正文句子；'
+              '3) 用 ^ 和 \$ 锚定整行；'
+              '4) 如果样本中没有可识别的章节标题格式，regex 返回空字符串。'
+              '只返回 JSON：{"regex": "...", "reason": "一句话说明"}',
+        },
+        {'role': 'user', 'content': numbered},
+      ],
+      // Thinking mode ignores temperature on DeepSeek, so only send it on the
+      // non-thinking path where it still steers determinism.
+      if (!thinking) 'temperature': 0.1,
+      'thinking': {'type': thinking ? 'enabled' : 'disabled'},
+      if (thinking) 'reasoning_effort': effort,
+    };
+
     final client = HttpClient();
     try {
       final request = await client
@@ -61,29 +144,7 @@ class AiChapterService {
       request.headers
         ..set(HttpHeaders.contentTypeHeader, 'application/json')
         ..set(HttpHeaders.authorizationHeader, 'Bearer $apiKey');
-      request.write(
-        jsonEncode({
-          'model': 'deepseek-chat',
-          'temperature': 0.1,
-          'max_tokens': 600,
-          'response_format': {'type': 'json_object'},
-          'messages': [
-            {
-              'role': 'system',
-              'content':
-                  '你是小说文本格式分析助手。用户会给出从一本小说中抽取的候选行（每行带编号）。'
-                  '其中混有真正的章节标题行和普通正文行。请找出章节标题行的共同格式，'
-                  '返回一个匹配章节标题行的正则表达式。要求：'
-                  '1) 兼容 Dart RegExp，不使用环视、反向引用和命名捕获组；'
-                  '2) 只匹配标题行，不匹配正文句子；'
-                  '3) 用 ^ 和 \$ 锚定整行；'
-                  '4) 如果样本中没有可识别的章节标题格式，regex 返回空字符串。'
-                  '只返回 JSON：{"regex": "...", "reason": "一句话说明"}',
-            },
-            {'role': 'user', 'content': numbered},
-          ],
-        }),
-      );
+      request.write(jsonEncode(requestBody));
       final response = await request.close().timeout(_timeout);
       final body = await utf8.decoder.bind(response).join().timeout(_timeout);
       if (response.statusCode == 401) {
@@ -208,8 +269,11 @@ class AiChapterService {
     StorageService storage, {
     void Function(String status)? onStatus,
   }) async {
-    if (book.isPdf || book.chapters.isEmpty) {
+    if (book.isPdf || book.format == BookFormat.epub) {
       throw const FormatException('这本书不支持智能分章');
+    }
+    if (book.chapters.isEmpty) {
+      throw const FormatException('书籍正文读取失败，请重新导入后再试');
     }
 
     onStatus?.call('正在整理候选行…');

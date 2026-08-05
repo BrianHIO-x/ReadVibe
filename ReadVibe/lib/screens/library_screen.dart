@@ -783,36 +783,18 @@ class _LibraryScreenState extends State<LibraryScreen>
 
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: colors.headerBg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.lg),
-        ),
-        title: Text('智能分章', style: TextStyle(color: colors.text)),
-        content: Text(
-          'DeepSeek 会分析「${book.title}」的候选标题行并给出章节格式，随后在本机重新分章。只会发送少量候选行，不会上传完整正文。原分章会自动备份，可随时恢复。',
-          style: TextStyle(color: colors.text, fontSize: 14, height: 1.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text('取消', style: TextStyle(color: colors.secondary)),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: colors.accent,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(AppRadius.pill),
-              ),
-            ),
-            child: const Text('开始'),
-          ),
-        ],
-      ),
+      builder: (ctx) => _SmartSplitConfirmDialog(book: book, colors: colors),
     );
     if (confirmed != true || !mounted) return;
+
+    // Shelf entries are summaries without chapter payloads; load the full
+    // book before re-splitting.
+    final fullBook = await _storage.getBook(book.id);
+    if (!mounted) return;
+    if (fullBook == null || fullBook.chapters.isEmpty) {
+      _showError('书籍正文读取失败，请重新导入后再试');
+      return;
+    }
 
     final statusNotifier = ValueNotifier('正在准备…');
     final dialogFuture = showDialog<void>(
@@ -855,7 +837,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     int? chapterCount;
     try {
       chapterCount = await service.resplitBookWithAi(
-        book,
+        fullBook,
         _storage,
         onStatus: (status) => statusNotifier.value = status,
       );
@@ -879,7 +861,13 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _restoreSplit(Book book) async {
-    final restored = await _storage.restoreChapterBackup(book);
+    final fullBook = await _storage.getBook(book.id);
+    if (!mounted) return;
+    if (fullBook == null) {
+      _showError('书籍信息读取失败');
+      return;
+    }
+    final restored = await _storage.restoreChapterBackup(fullBook);
     if (!mounted) return;
     if (restored) {
       _showMessage('已恢复原分章');
@@ -1734,6 +1722,199 @@ class _LibraryScreenState extends State<LibraryScreen>
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Confirm dialog for smart re-splitting. Beyond consent it exposes the
+/// DeepSeek request knobs — model, thinking mode, and reasoning effort —
+/// persisted by [AiChapterService] so the next run reuses them.
+class _SmartSplitConfirmDialog extends StatefulWidget {
+  final Book book;
+  final ReaderThemeColors colors;
+
+  const _SmartSplitConfirmDialog({required this.book, required this.colors});
+
+  @override
+  State<_SmartSplitConfirmDialog> createState() =>
+      _SmartSplitConfirmDialogState();
+}
+
+class _SmartSplitConfirmDialogState extends State<_SmartSplitConfirmDialog> {
+  final _service = AiChapterService();
+  String _model = AiChapterService.modelFlash;
+  bool _thinking = false;
+  String _effort = 'high';
+
+  @override
+  void initState() {
+    super.initState();
+    () async {
+      final model = await _service.getModel();
+      final thinking = await _service.getThinkingEnabled();
+      final effort = await _service.getReasoningEffort();
+      if (!mounted) return;
+      setState(() {
+        _model = model;
+        _thinking = thinking;
+        _effort = effort;
+      });
+    }();
+  }
+
+  Future<void> _start() async {
+    await _service.setModel(_model);
+    await _service.setThinkingEnabled(_thinking);
+    await _service.setReasoningEffort(_effort);
+    if (mounted) Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = widget.colors;
+    return AlertDialog(
+      backgroundColor: colors.headerBg,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+      ),
+      title: Text('智能分章', style: TextStyle(color: colors.text)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'DeepSeek 会分析「${widget.book.title}」的候选标题行并给出章节格式，随后在本机重新分章。只会发送少量候选行，不会上传完整正文。原分章会自动备份，可随时恢复。',
+            style: TextStyle(color: colors.text, fontSize: 14, height: 1.5),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          _buildModelPicker(colors),
+          const SizedBox(height: AppSpacing.sm),
+          _buildThinkingRow(colors),
+          if (_thinking) ...[
+            const SizedBox(height: AppSpacing.sm),
+            _buildEffortPicker(colors),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: Text('取消', style: TextStyle(color: colors.secondary)),
+        ),
+        FilledButton(
+          onPressed: _start,
+          style: FilledButton.styleFrom(
+            backgroundColor: colors.accent,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppRadius.pill),
+            ),
+          ),
+          child: const Text('开始'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildModelPicker(ReaderThemeColors colors) {
+    return Row(
+      children: [
+        Text('模型', style: TextStyle(color: colors.secondary, fontSize: 13)),
+        const SizedBox(width: AppSpacing.md),
+        Expanded(
+          child: SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: AiChapterService.modelFlash,
+                label: Text('快速', style: TextStyle(fontSize: 12)),
+              ),
+              ButtonSegment(
+                value: AiChapterService.modelPro,
+                label: Text('专业', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+            selected: {_model},
+            onSelectionChanged: (selection) =>
+                setState(() => _model = selection.first),
+            style: ButtonStyle(
+              foregroundColor: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.selected)
+                    ? Colors.white
+                    : colors.secondary,
+              ),
+              backgroundColor: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.selected)
+                    ? colors.accent
+                    : colors.background,
+              ),
+              side: WidgetStateProperty.all(BorderSide(color: colors.border)),
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildThinkingRow(ReaderThemeColors colors) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            '思考模式（更深入但更慢）',
+            style: TextStyle(color: colors.secondary, fontSize: 13),
+          ),
+        ),
+        Switch(
+          value: _thinking,
+          activeTrackColor: colors.accent,
+          onChanged: (value) => setState(() => _thinking = value),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEffortPicker(ReaderThemeColors colors) {
+    return Row(
+      children: [
+        Text('推理强度', style: TextStyle(color: colors.secondary, fontSize: 13)),
+        const SizedBox(width: AppSpacing.md),
+        Expanded(
+          child: SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: 'low',
+                label: Text('低', style: TextStyle(fontSize: 12)),
+              ),
+              ButtonSegment(
+                value: 'high',
+                label: Text('高', style: TextStyle(fontSize: 12)),
+              ),
+              ButtonSegment(
+                value: 'max',
+                label: Text('最高', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+            selected: {_effort},
+            onSelectionChanged: (selection) =>
+                setState(() => _effort = selection.first),
+            style: ButtonStyle(
+              foregroundColor: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.selected)
+                    ? Colors.white
+                    : colors.secondary,
+              ),
+              backgroundColor: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.selected)
+                    ? colors.accent
+                    : colors.background,
+              ),
+              side: WidgetStateProperty.all(BorderSide(color: colors.border)),
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

@@ -1,19 +1,19 @@
 # ReadVibe
 
-ReadVibe 是面向 Android 的本地离线阅读器。当前公开版本为 `v0.6.3`，正式发布目标为 Android `arm64-v8a`，最低支持 Android 8.0（API 26）。
+ReadVibe 是面向 Android 的本地离线阅读器。当前公开版本为 `v0.6.4`，正式发布目标为 Android `arm64-v8a`，最低支持 Android 8.0（API 26）。
 
 当前发布文件：
 
 | 项目 | 值 |
 | --- | --- |
-| APK | `ReadVibe/dist/ReadVibe-Android-v0.6.3-arm64-v8a.apk` |
+| APK | `ReadVibe/dist/ReadVibe-Android-v0.6.4-arm64-v8a.apk` |
 | 应用 ID | `com.readvibe.app` |
-| `versionName` | `0.6.3` |
-| `versionCode` | `2047` |
+| `versionName` | `0.6.4` |
+| `versionCode` | `2048` |
 | 最低 / 目标 SDK | `26 / 36` |
 | ABI | `arm64-v8a` |
-| 文件大小 | `40,355,599` 字节（`38.49 MiB`） |
-| SHA-256 | `30E7A37FD160E0281BEABED594E5793623398757C1415521C12D7F44502FAEF0` |
+| 文件大小 | `40,552,243` 字节（`38.68 MiB`） |
+| SHA-256 | `5D303C48DBBC0B523B8FBABE044149469F0AA0B4F58A340A06A2BDB25EED49A6` |
 | APK 签名 | APK Signature Scheme v2 验证通过 |
 
 ## 已实现功能
@@ -99,7 +99,7 @@ ReadVibe 不需要账号，不上传书籍正文。书籍元数据、解析后�
 ```powershell
 flutter pub get
 flutter analyze
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.3 --build-number 2047
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.4 --build-number 2048
 ```
 
 Flutter 构建输出为：
@@ -111,7 +111,7 @@ ReadVibe/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
 正式文件名为：
 
 ```text
-ReadVibe/dist/ReadVibe-Android-v0.6.3-arm64-v8a.apk
+ReadVibe/dist/ReadVibe-Android-v0.6.4-arm64-v8a.apk
 ```
 
 当前 release 构建使用仓库 Android 配置中的本地调试证书签名，并启用代码压缩与资源收缩。

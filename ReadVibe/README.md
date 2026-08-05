@@ -1,18 +1,18 @@
 # ReadVibe Android 应用
 
-ReadVibe 是使用 Flutter 与 Android Kotlin 实现的本地离线阅读器。当前版本为 `v0.6.3`，正式目标为 Android `arm64-v8a`，最低支持 Android 8.0（API 26）。
+ReadVibe 是使用 Flutter 与 Android Kotlin 实现的本地离线阅读器。当前版本为 `v0.6.4`，正式目标为 Android `arm64-v8a`，最低支持 Android 8.0（API 26）。
 
 ## 当前发布文件
 
 | 项目 | 值 |
 | --- | --- |
-| 文件 | `dist/ReadVibe-Android-v0.6.3-arm64-v8a.apk` |
+| 文件 | `dist/ReadVibe-Android-v0.6.4-arm64-v8a.apk` |
 | 应用 ID | `com.readvibe.app` |
-| 版本名 / 内部版本码 | `0.6.3 / 2047` |
+| 版本名 / 内部版本码 | `0.6.4 / 2048` |
 | 最低 / 目标 SDK | `26 / 36` |
 | ABI | `arm64-v8a` |
-| 大小 | `40,355,599` 字节（`38.49 MiB`） |
-| SHA-256 | `30E7A37FD160E0281BEABED594E5793623398757C1415521C12D7F44502FAEF0` |
+| 大小 | `40,552,243` 字节（`38.68 MiB`） |
+| SHA-256 | `5D303C48DBBC0B523B8FBABE044149469F0AA0B4F58A340A06A2BDB25EED49A6` |
 | 签名 | APK Signature Scheme v2 验证通过；Android 本地调试证书 |
 
 ## 文件支持
@@ -177,7 +177,7 @@ dist/
 ```powershell
 flutter pub get
 flutter analyze
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.3 --build-number 2047
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.4 --build-number 2048
 ```
 
 构建输出：
@@ -189,7 +189,7 @@ build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
 正式产物：
 
 ```text
-dist/ReadVibe-Android-v0.6.3-arm64-v8a.apk
+dist/ReadVibe-Android-v0.6.4-arm64-v8a.apk
 ```
 
 ## 相关文档
