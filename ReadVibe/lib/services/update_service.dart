@@ -26,6 +26,18 @@ class AppUpdateInfo {
   });
 }
 
+/// Outcome of an update check. [info] is set when a newer release exists.
+/// [failed] distinguishes "could not reach the release feed" from "already
+/// up to date", which the manual check entry needs for its feedback.
+class UpdateCheckResult {
+  final AppUpdateInfo? info;
+  final bool failed;
+
+  const UpdateCheckResult.upToDate() : info = null, failed = false;
+  const UpdateCheckResult.available(AppUpdateInfo this.info) : failed = false;
+  const UpdateCheckResult.error() : info = null, failed = true;
+}
+
 /// Silent update check against the project's GitHub Releases.
 ///
 /// The app is sideloaded, so updates mean: compare versions, download the APK
@@ -37,9 +49,10 @@ class UpdateService {
       'https://api.github.com/repos/BrianHIO-x/ReadVibe/releases/latest';
   static const _timeout = Duration(seconds: 12);
 
-  /// Returns the latest release when it is newer than the running build,
-  /// or null when up to date / unreachable / unparsable.
-  Future<AppUpdateInfo?> checkForUpdate() async {
+  /// Checks the release feed: a newer release when available, up-to-date
+  /// when the feed answers with the current version, or an error when the
+  /// feed cannot be reached or parsed.
+  Future<UpdateCheckResult> checkForUpdate() async {
     final client = HttpClient();
     try {
       final request = await client
@@ -48,40 +61,46 @@ class UpdateService {
       request.headers.set('Accept', 'application/vnd.github+json');
       request.headers.set('User-Agent', 'ReadVibe-Android');
       final response = await request.close().timeout(_timeout);
-      if (response.statusCode != 200) return null;
+      if (response.statusCode != 200) {
+        return const UpdateCheckResult.error();
+      }
       final body = await utf8.decoder.bind(response).join().timeout(_timeout);
       final json = jsonDecode(body);
-      if (json is! Map<String, dynamic>) return null;
+      if (json is! Map<String, dynamic>) return const UpdateCheckResult.error();
 
       final latest = _versionFromTag(json['tag_name'] as String? ?? '');
-      if (latest == null) return null;
+      if (latest == null) return const UpdateCheckResult.error();
       final current = (await PackageInfo.fromPlatform()).version;
-      if (!isNewerVersion(latest, current)) return null;
+      if (!isNewerVersion(latest, current)) {
+        return const UpdateCheckResult.upToDate();
+      }
 
       final assets = json['assets'];
-      if (assets is! List) return null;
+      if (assets is! List) return const UpdateCheckResult.error();
       final apks = assets
           .whereType<Map<String, dynamic>>()
           .where((a) => (a['name'] as String? ?? '').endsWith('.apk'))
           .toList();
-      if (apks.isEmpty) return null;
+      if (apks.isEmpty) return const UpdateCheckResult.error();
       final asset = apks.firstWhere(
         (a) => (a['name'] as String).contains('arm64-v8a'),
         orElse: () => apks.first,
       );
       final url = asset['browser_download_url'] as String?;
-      if (url == null || url.isEmpty) return null;
+      if (url == null || url.isEmpty) return const UpdateCheckResult.error();
 
-      return AppUpdateInfo(
-        version: latest,
-        notes: (json['body'] as String? ?? '').trim(),
-        apkUrl: url,
-        apkName: asset['name'] as String,
-        apkSize: (asset['size'] as num?)?.toInt() ?? 0,
-        sha256: sha256FromNotes(json['body'] as String? ?? ''),
+      return UpdateCheckResult.available(
+        AppUpdateInfo(
+          version: latest,
+          notes: (json['body'] as String? ?? '').trim(),
+          apkUrl: url,
+          apkName: asset['name'] as String,
+          apkSize: (asset['size'] as num?)?.toInt() ?? 0,
+          sha256: sha256FromNotes(json['body'] as String? ?? ''),
+        ),
       );
     } on Object {
-      return null;
+      return const UpdateCheckResult.error();
     } finally {
       client.close();
     }

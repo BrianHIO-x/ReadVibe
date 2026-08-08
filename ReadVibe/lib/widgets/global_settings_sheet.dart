@@ -4,7 +4,6 @@ import '../models/reader_settings.dart';
 import '../services/system_text_action_service.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
-import 'deepseek_key_dialog.dart';
 import 'font_settings_section.dart';
 
 class GlobalSettingsSheet extends StatelessWidget {
@@ -12,6 +11,7 @@ class GlobalSettingsSheet extends StatelessWidget {
   final ReaderThemeColors colors;
   final ValueChanged<ReaderSettings> onChange;
   final Future<void> Function() onImportFont;
+  final Future<void> Function() onCheckUpdate;
 
   const GlobalSettingsSheet({
     super.key,
@@ -19,6 +19,7 @@ class GlobalSettingsSheet extends StatelessWidget {
     required this.colors,
     required this.onChange,
     required this.onImportFont,
+    required this.onCheckUpdate,
   });
 
   @override
@@ -121,7 +122,7 @@ class GlobalSettingsSheet extends StatelessWidget {
                     ),
                     const SizedBox(height: AppSpacing.xl),
                     Text(
-                      '智能分章',
+                      '应用更新',
                       style: TextStyle(
                         color: colors.text,
                         fontSize: 15,
@@ -130,7 +131,7 @@ class GlobalSettingsSheet extends StatelessWidget {
                     ),
                     const SizedBox(height: AppSpacing.sm),
                     Text(
-                      '章节识别异常的 TXT 书籍，可借助 DeepSeek 分析标题格式并重新分章。密钥只保存在本机。',
+                      '发现新版本时会自动提示。也可以随时手动检查。',
                       style: TextStyle(
                         color: colors.secondary,
                         fontSize: 12,
@@ -139,9 +140,9 @@ class GlobalSettingsSheet extends StatelessWidget {
                     ),
                     const SizedBox(height: AppSpacing.sm),
                     OutlinedButton.icon(
-                      onPressed: () => DeepSeekKeyDialog.show(context, colors),
-                      icon: const Icon(Icons.key_rounded, size: 18),
-                      label: const Text('设置 DeepSeek API 密钥'),
+                      onPressed: onCheckUpdate,
+                      icon: const Icon(Icons.system_update_alt_rounded, size: 18),
+                      label: const Text('检查更新'),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: colors.accent,
                         side: BorderSide(color: colors.border),

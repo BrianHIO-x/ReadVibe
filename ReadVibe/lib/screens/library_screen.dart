@@ -18,12 +18,10 @@ import '../services/book_search_service.dart';
 import '../services/word_parser.dart';
 import '../services/word_count_service.dart';
 import '../services/update_service.dart';
-import '../services/ai_chapter_service.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../widgets/app_update_dialog.dart';
 import '../widgets/book_card.dart';
-import '../widgets/deepseek_key_dialog.dart';
 import '../widgets/global_settings_sheet.dart';
 import 'reader_screen.dart';
 import 'pdf_reader_screen.dart';
@@ -38,7 +36,7 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-enum _BookAction { rename, move, delete, smartSplit, restoreSplit }
+enum _BookAction { rename, move, delete }
 
 class _LibraryScreenState extends State<LibraryScreen>
     with TickerProviderStateMixin {
@@ -94,7 +92,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   void _scheduleUpdateCheck() {
     Timer(const Duration(seconds: 2), () async {
       if (!mounted) return;
-      final info = await UpdateService().checkForUpdate();
+      final result = await UpdateService().checkForUpdate();
+      final info = result.info;
       if (!mounted || info == null) return;
       final prefs = await SharedPreferences.getInstance();
       final dismissedKey = 'update_dismissed_${info.version}';
@@ -102,22 +101,56 @@ class _LibraryScreenState extends State<LibraryScreen>
       final quietDays = DateTime.now().millisecondsSinceEpoch - dismissedAt;
       if (quietDays < const Duration(days: 3).inMilliseconds) return;
       if (!mounted) return;
-      final colors = AppTheme.getReaderTheme(
-        _settings.theme,
-        systemBrightness: MediaQuery.platformBrightnessOf(context),
-      );
-      await showGeneralDialog<void>(
-        context: context,
-        barrierDismissible: true,
-        barrierLabel: '取消',
-        barrierColor: Colors.black54,
-        transitionDuration: AppMotion.normal,
-        pageBuilder: (ctx, animation, secondaryAnimation) {
-          return AppUpdateDialog(info: info, colors: colors);
-        },
-      );
+      await _showUpdateDialog(info);
       unawaited(prefs.setInt(dismissedKey, DateTime.now().millisecondsSinceEpoch));
     });
+  }
+
+  /// Manual check from the global settings sheet. Reports every outcome —
+  /// new version, up to date, or unreachable — and ignores the three-day
+  /// dismiss window because the user explicitly asked.
+  Future<void> _checkUpdateManually() async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.md),
+        ),
+        duration: const Duration(seconds: 15),
+        content: const Text('正在检查更新…'),
+      ),
+    );
+    final result = await UpdateService().checkForUpdate();
+    if (!mounted) return;
+    messenger.hideCurrentSnackBar();
+    final info = result.info;
+    if (info != null) {
+      await _showUpdateDialog(info);
+      return;
+    }
+    if (result.failed) {
+      _showError('检查更新失败，请检查网络后重试');
+      return;
+    }
+    _showMessage('当前已是最新版本');
+  }
+
+  Future<void> _showUpdateDialog(AppUpdateInfo info) {
+    final colors = AppTheme.getReaderTheme(
+      _settings.theme,
+      systemBrightness: MediaQuery.platformBrightnessOf(context),
+    );
+    return showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: '取消',
+      barrierColor: Colors.black54,
+      transitionDuration: AppMotion.normal,
+      pageBuilder: (ctx, animation, secondaryAnimation) {
+        return AppUpdateDialog(info: info, colors: colors);
+      },
+    );
   }
 
   void _handleGridScroll() {
@@ -589,6 +622,12 @@ class _LibraryScreenState extends State<LibraryScreen>
                           );
                         }
                       },
+                      onCheckUpdate: () async {
+                        // Close the sheet first so the result dialog or
+                        // snackbar lands on the shelf instead of the sheet.
+                        Navigator.of(context).pop();
+                        await _checkUpdateManually();
+                      },
                     );
                   },
                 ),
@@ -619,11 +658,6 @@ class _LibraryScreenState extends State<LibraryScreen>
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
-    final canSmartSplit =
-        !book.isPdf && book.format != BookFormat.epub;
-    final hasSplitBackup =
-        canSmartSplit && await _storage.hasChapterBackup(book.id);
-    if (!mounted) return;
     final action = await showModalBottomSheet<_BookAction>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -679,44 +713,6 @@ class _LibraryScreenState extends State<LibraryScreen>
                 ),
                 onTap: () => Navigator.pop(sheetContext, _BookAction.rename),
               ),
-              if (canSmartSplit) ...[
-                const SizedBox(height: AppSpacing.xs),
-                ListTile(
-                  leading: Icon(
-                    Icons.auto_fix_high_rounded,
-                    color: colors.accent,
-                  ),
-                  title: Text('智能分章', style: TextStyle(color: colors.text)),
-                  subtitle: Text(
-                    '章节识别异常时，用 DeepSeek 分析标题格式并重新分章',
-                    style: TextStyle(color: colors.secondary),
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                  ),
-                  onTap: () =>
-                      Navigator.pop(sheetContext, _BookAction.smartSplit),
-                ),
-              ],
-              if (hasSplitBackup) ...[
-                const SizedBox(height: AppSpacing.xs),
-                ListTile(
-                  leading: Icon(
-                    Icons.undo_rounded,
-                    color: colors.accent,
-                  ),
-                  title: Text('恢复原分章', style: TextStyle(color: colors.text)),
-                  subtitle: Text(
-                    '撤销上一次智能分章，回到之前的章节目录',
-                    style: TextStyle(color: colors.secondary),
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                  ),
-                  onTap: () =>
-                      Navigator.pop(sheetContext, _BookAction.restoreSplit),
-                ),
-              ],
               const SizedBox(height: AppSpacing.xs),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
@@ -758,122 +754,6 @@ class _LibraryScreenState extends State<LibraryScreen>
         _enterReorderMode(book.id);
       case _BookAction.delete:
         _confirmDeleteBook(book);
-      case _BookAction.smartSplit:
-        await _smartSplitBook(book);
-      case _BookAction.restoreSplit:
-        await _restoreSplit(book);
-    }
-  }
-
-  /// Smart re-split flow: ensure a DeepSeek key, confirm the network send,
-  /// then run the analysis with a progress dialog and report the outcome.
-  Future<void> _smartSplitBook(Book book) async {
-    final colors = AppTheme.getReaderTheme(
-      _settings.theme,
-      systemBrightness: MediaQuery.platformBrightnessOf(context),
-    );
-    final service = AiChapterService();
-
-    if (await service.getApiKey() == null) {
-      if (!mounted) return;
-      final saved = await DeepSeekKeyDialog.show(context, colors);
-      if (!saved || !mounted) return;
-    }
-    if (!mounted) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => _SmartSplitConfirmDialog(book: book, colors: colors),
-    );
-    if (confirmed != true || !mounted) return;
-
-    // Shelf entries are summaries without chapter payloads; load the full
-    // book before re-splitting.
-    final fullBook = await _storage.getBook(book.id);
-    if (!mounted) return;
-    if (fullBook == null || fullBook.chapters.isEmpty) {
-      _showError('书籍正文读取失败，请重新导入后再试');
-      return;
-    }
-
-    final statusNotifier = ValueNotifier('正在准备…');
-    final dialogFuture = showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => PopScope(
-        canPop: false,
-        child: AlertDialog(
-          backgroundColor: colors.headerBg,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadius.lg),
-          ),
-          content: Row(
-            children: [
-              SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2.5,
-                  color: colors.accent,
-                ),
-              ),
-              const SizedBox(width: AppSpacing.md),
-              Expanded(
-                child: ValueListenableBuilder<String>(
-                  valueListenable: statusNotifier,
-                  builder: (_, status, _) => Text(
-                    status,
-                    style: TextStyle(color: colors.text, fontSize: 14),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-
-    String? errorMessage;
-    int? chapterCount;
-    try {
-      chapterCount = await service.resplitBookWithAi(
-        fullBook,
-        _storage,
-        onStatus: (status) => statusNotifier.value = status,
-      );
-    } on FormatException catch (error) {
-      errorMessage = error.message;
-    } on Object {
-      errorMessage = '智能分章失败，请稍后重试';
-    }
-
-    if (mounted) Navigator.of(context).pop();
-    await dialogFuture;
-    statusNotifier.dispose();
-    if (!mounted) return;
-
-    if (chapterCount != null) {
-      _showMessage('已按新格式重新分章，共 $chapterCount 章。原分章已备份。');
-      await _loadData();
-    } else {
-      _showError(errorMessage ?? '智能分章失败，请稍后重试');
-    }
-  }
-
-  Future<void> _restoreSplit(Book book) async {
-    final fullBook = await _storage.getBook(book.id);
-    if (!mounted) return;
-    if (fullBook == null) {
-      _showError('书籍信息读取失败');
-      return;
-    }
-    final restored = await _storage.restoreChapterBackup(fullBook);
-    if (!mounted) return;
-    if (restored) {
-      _showMessage('已恢复原分章');
-      await _loadData();
-    } else {
-      _showError('没有可恢复的分章备份');
     }
   }
 
@@ -1726,195 +1606,3 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 }
 
-/// Confirm dialog for smart re-splitting. Beyond consent it exposes the
-/// DeepSeek request knobs — model, thinking mode, and reasoning effort —
-/// persisted by [AiChapterService] so the next run reuses them.
-class _SmartSplitConfirmDialog extends StatefulWidget {
-  final Book book;
-  final ReaderThemeColors colors;
-
-  const _SmartSplitConfirmDialog({required this.book, required this.colors});
-
-  @override
-  State<_SmartSplitConfirmDialog> createState() =>
-      _SmartSplitConfirmDialogState();
-}
-
-class _SmartSplitConfirmDialogState extends State<_SmartSplitConfirmDialog> {
-  final _service = AiChapterService();
-  String _model = AiChapterService.modelFlash;
-  bool _thinking = false;
-  String _effort = 'high';
-
-  @override
-  void initState() {
-    super.initState();
-    () async {
-      final model = await _service.getModel();
-      final thinking = await _service.getThinkingEnabled();
-      final effort = await _service.getReasoningEffort();
-      if (!mounted) return;
-      setState(() {
-        _model = model;
-        _thinking = thinking;
-        _effort = effort;
-      });
-    }();
-  }
-
-  Future<void> _start() async {
-    await _service.setModel(_model);
-    await _service.setThinkingEnabled(_thinking);
-    await _service.setReasoningEffort(_effort);
-    if (mounted) Navigator.of(context).pop(true);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = widget.colors;
-    return AlertDialog(
-      backgroundColor: colors.headerBg,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppRadius.lg),
-      ),
-      title: Text('智能分章', style: TextStyle(color: colors.text)),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'DeepSeek 会分析「${widget.book.title}」的候选标题行并给出章节格式，随后在本机重新分章。只会发送少量候选行，不会上传完整正文。原分章会自动备份，可随时恢复。',
-            style: TextStyle(color: colors.text, fontSize: 14, height: 1.5),
-          ),
-          const SizedBox(height: AppSpacing.lg),
-          _buildModelPicker(colors),
-          const SizedBox(height: AppSpacing.sm),
-          _buildThinkingRow(colors),
-          if (_thinking) ...[
-            const SizedBox(height: AppSpacing.sm),
-            _buildEffortPicker(colors),
-          ],
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: Text('取消', style: TextStyle(color: colors.secondary)),
-        ),
-        FilledButton(
-          onPressed: _start,
-          style: FilledButton.styleFrom(
-            backgroundColor: colors.accent,
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(AppRadius.pill),
-            ),
-          ),
-          child: const Text('开始'),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildModelPicker(ReaderThemeColors colors) {
-    return Row(
-      children: [
-        Text('模型', style: TextStyle(color: colors.secondary, fontSize: 13)),
-        const SizedBox(width: AppSpacing.md),
-        Expanded(
-          child: SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(
-                value: AiChapterService.modelFlash,
-                label: Text('快速', style: TextStyle(fontSize: 12)),
-              ),
-              ButtonSegment(
-                value: AiChapterService.modelPro,
-                label: Text('专业', style: TextStyle(fontSize: 12)),
-              ),
-            ],
-            selected: {_model},
-            onSelectionChanged: (selection) =>
-                setState(() => _model = selection.first),
-            style: ButtonStyle(
-              foregroundColor: WidgetStateProperty.resolveWith(
-                (states) => states.contains(WidgetState.selected)
-                    ? Colors.white
-                    : colors.secondary,
-              ),
-              backgroundColor: WidgetStateProperty.resolveWith(
-                (states) => states.contains(WidgetState.selected)
-                    ? colors.accent
-                    : colors.background,
-              ),
-              side: WidgetStateProperty.all(BorderSide(color: colors.border)),
-              visualDensity: VisualDensity.compact,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildThinkingRow(ReaderThemeColors colors) {
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            '思考模式（更深入但更慢）',
-            style: TextStyle(color: colors.secondary, fontSize: 13),
-          ),
-        ),
-        Switch(
-          value: _thinking,
-          activeTrackColor: colors.accent,
-          onChanged: (value) => setState(() => _thinking = value),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildEffortPicker(ReaderThemeColors colors) {
-    return Row(
-      children: [
-        Text('推理强度', style: TextStyle(color: colors.secondary, fontSize: 13)),
-        const SizedBox(width: AppSpacing.md),
-        Expanded(
-          child: SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(
-                value: 'low',
-                label: Text('低', style: TextStyle(fontSize: 12)),
-              ),
-              ButtonSegment(
-                value: 'high',
-                label: Text('高', style: TextStyle(fontSize: 12)),
-              ),
-              ButtonSegment(
-                value: 'max',
-                label: Text('最高', style: TextStyle(fontSize: 12)),
-              ),
-            ],
-            selected: {_effort},
-            onSelectionChanged: (selection) =>
-                setState(() => _effort = selection.first),
-            style: ButtonStyle(
-              foregroundColor: WidgetStateProperty.resolveWith(
-                (states) => states.contains(WidgetState.selected)
-                    ? Colors.white
-                    : colors.secondary,
-              ),
-              backgroundColor: WidgetStateProperty.resolveWith(
-                (states) => states.contains(WidgetState.selected)
-                    ? colors.accent
-                    : colors.background,
-              ),
-              side: WidgetStateProperty.all(BorderSide(color: colors.border)),
-              visualDensity: VisualDensity.compact,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}

@@ -13,6 +13,7 @@ import 'package:flutter/rendering.dart'
         RenderSliver,
         ScrollCacheExtent,
         SelectedContent;
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../theme/app_theme.dart';
@@ -3334,7 +3335,14 @@ class _ReaderScreenState extends State<ReaderScreen>
                   _readerViewportHeight = reportedHeight;
                 }
                 _readerViewPadding = stableViewPadding;
-                _readerTextScaler = MediaQuery.textScalerOf(context);
+                // The simulation grid computes page height in unscaled line
+                // extents while Flutter would render each line scaled by the
+                // system font scale. On devices with a non-default scale the
+                // two disagree and page boundaries land mid-line, clipping
+                // the first/last row of glyphs. The reader has its own font
+                // size setting, so lock the scale: measurement and rendering
+                // share one grid on every device.
+                _readerTextScaler = TextScaler.noScaling;
                 final readerHeight =
                     _readerModalOpen &&
                         _settings.readingMode == ReaderReadingMode.simulation &&
@@ -3375,13 +3383,18 @@ class _ReaderScreenState extends State<ReaderScreen>
                         fit: StackFit.expand,
                         children: [
                           ClipRect(
-                            child: _buildReadingModeView(
-                              width: width,
-                              height: readerHeight,
-                              themeColors: themeColors,
-                              fontFamily: fontFamily,
-                              viewPadding: stableViewPadding,
-                              horizontalPadding: horizontalPadding,
+                            child: MediaQuery(
+                              data: MediaQuery.of(context).copyWith(
+                                textScaler: TextScaler.noScaling,
+                              ),
+                              child: _buildReadingModeView(
+                                width: width,
+                                height: readerHeight,
+                                themeColors: themeColors,
+                                fontFamily: fontFamily,
+                                viewPadding: stableViewPadding,
+                                horizontalPadding: horizontalPadding,
+                              ),
                             ),
                           ),
                           if (_readingModeReloading)
@@ -5157,7 +5170,7 @@ class _FullViewportPagingScrollController extends ScrollController {
 }
 
 class _FullViewportPagingScrollPosition
-    extends ScrollPositionWithSingleContext {
+    extends ScrollPositionWithSingleContext with _PageGridRealignMixin {
   _FullViewportPagingScrollPosition({
     required super.physics,
     required super.context,
@@ -5168,11 +5181,60 @@ class _FullViewportPagingScrollPosition
   });
 
   @override
+  bool get pageGridRealignEnabled => true;
+
+  @override
   bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
-    return super.applyContentDimensions(
+    final applied = super.applyContentDimensions(
       minScrollExtent,
       _fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension),
     );
+    _schedulePageGridRealign();
+    return applied;
+  }
+}
+
+/// Self-healing page-grid guard for simulation pages.
+///
+/// Flutter silently re-interprets a ScrollPosition's pixels whenever content
+/// dimensions change — a new font size, different device metrics, system
+/// inset changes — and any drift from the page grid shows up as half-clipped
+/// first/last glyph rows, or as the chapter tail bouncing between two
+/// candidate offsets. After every layout, drift beyond half a pixel is
+/// snapped back to the nearest page boundary on the next frame.
+mixin _PageGridRealignMixin on ScrollPositionWithSingleContext {
+  bool get pageGridRealignEnabled;
+
+  bool _pageGridRealignScheduled = false;
+
+  void _schedulePageGridRealign() {
+    if (!pageGridRealignEnabled ||
+        _pageGridRealignScheduled ||
+        !hasPixels ||
+        !hasContentDimensions) {
+      return;
+    }
+    final snapped = _nearestPageGridOffset();
+    if (snapped == null || (pixels - snapped).abs() <= 0.5) return;
+    _pageGridRealignScheduled = true;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      _pageGridRealignScheduled = false;
+      if (!hasPixels || !hasContentDimensions) return;
+      final target = _nearestPageGridOffset();
+      if (target == null || (pixels - target).abs() <= 0.5) return;
+      jumpTo(target);
+    });
+  }
+
+  double? _nearestPageGridOffset() {
+    final extent = viewportDimension;
+    if (!extent.isFinite || extent <= 0) return null;
+    final minExtent = minScrollExtent;
+    final maxExtent = maxScrollExtent;
+    if (!minExtent.isFinite || !maxExtent.isFinite) return null;
+    return ((pixels / extent).round() * extent)
+        .clamp(minExtent, maxExtent)
+        .toDouble();
   }
 }
 
@@ -5216,7 +5278,8 @@ class _SelectionAwareScrollController extends ScrollController {
   }
 }
 
-class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext {
+class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext
+    with _PageGridRealignMixin {
   final ValueListenable<bool> selectionActive;
   final bool Function() viewportIsFrozen;
   final bool paginateToFullViewports;
@@ -5237,13 +5300,18 @@ class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext {
   }
 
   @override
+  bool get pageGridRealignEnabled => paginateToFullViewports;
+
+  @override
   bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
-    return super.applyContentDimensions(
+    final applied = super.applyContentDimensions(
       minScrollExtent,
       paginateToFullViewports
           ? _fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension)
           : maxScrollExtent,
     );
+    _schedulePageGridRealign();
+    return applied;
   }
 
   void _handleSelectionActivityChanged() {
