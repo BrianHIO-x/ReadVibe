@@ -4,14 +4,14 @@
 
 ## 当前发布配置
 
-- 公开版本：`v0.6.5`。
+- 公开版本：`v0.6.6`。
 - Android 应用 ID：`com.readvibe.app`。
 - 正式 ABI：`arm64-v8a`。
 - 最低系统：Android 8.0（API 26）。
 - Dart SDK 约束：`^3.12.2`。
 - Java 与 Kotlin JVM 目标：17。
-- 正式 APK：`dist/ReadVibe-Android-v0.6.5-arm64-v8a.apk`。
-- `pubspec.yaml` 只写公开三段式版本；Android 内部 `versionCode` 通过构建号单独传入。
+- 正式 APK：`dist/ReadVibe-Android-v0.6.6-arm64-v8a.apk`。
+- `pubspec.yaml` 只写公开三段式版本；Flutter 的 arm64 分包在基础构建号上增加 `2000`，当前构建传入 `52`，APK 清单中的实际 `versionCode` 为 `2052`。
 
 ## 代码范围
 
@@ -40,13 +40,14 @@
 - 阅读模式顺序为“分章 / 滚动 / 仿真”，默认“分章”。仿真模式显示“仿真翻页 / 平滑翻页”，默认“仿真翻页”。
 - 菜单、主题、字体、字号、字重、行高、页边距、段落空行或阅读模式变化后，正文恢复到变更前的字符锚点，不能回到章节顶部。
 - 分章模式只滚动当前章；滚动模式用一个连续纵向流承载全书；仿真模式按完整正文行分页。
-- 进入或离开仿真模式时重新创建阅读控制器，通过当前视口顶部正文字符确定目标页或目标滚动位置，不复用另一排版的像素偏移。
+- 进入或离开仿真模式，以及在仿真模式内修改字体或排版时，重新创建阅读控制器，通过当前视口顶部正文字符确定目标页或目标滚动位置，不复用另一排版的像素偏移。
 - 搜索跳转、相邻章预览和阅读恢复在页面可见前完成目标定位，不先显示章节开头再二次跳转。
 
 ### 仿真翻页
 
-- 仿真页包含章节小字页眉、上下纸页留白和完整行正文视口。
-- 仿真页的滚动范围扩展到整数个正文视口，翻页只在整屏边界间移动；章尾不足一页的区域使用空白纸面补齐，不以底部对齐方式重复上一页内容。
+- 仿真页包含章节小字页眉、上下纸页留白和完整行正文视口；行网格使用当前字体实际排出的相邻基线距离，不能用 `字号 × 行高倍率` 的理论值代替。
+- 章节标题块必须扩展到正文行网格的整数倍；仿真模式内的字体与排版变化立即使用最终文本指标，不对会影响行盒的样式做插值动画。
+- 仿真页先按整章文本或 EPUB 内容块的实际排版高度确定滚动范围，再扩展到整数个正文视口；翻页只在整屏边界间移动，章尾不足一页的区域使用空白纸面补齐，不使用惰性列表的估算范围生成重复末页。
 - 左滑前翻折回当前页；右滑后翻由上一页展开并覆盖当前页。
 - 双向翻页共用直线纸边、垂直折痕、裁切和阴影几何；页面不使用弯曲、斜折或波浪纸边。
 - 纸背显示运动纸页的水平镜像反向字迹。快照未完成时使用绑定同一章节和位置的镜像页面层，不能变成纯色纸带或平移翻页。
@@ -82,11 +83,12 @@
 
 ## 验证与产物
 
-当前项目不包含 `test/`、`.dart_tool/test/` 或 `flutter_test`。代码变更后执行：
+当前项目包含 `test/parser_sanity_test.dart`、`test/update_service_test.dart` 和 `flutter_test`。代码变更后执行：
 
 ```powershell
 flutter analyze
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.5 --build-number 2049
+flutter test
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.6 --build-number 52
 ```
 
-构建完成后把 `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk` 复制为 `dist/ReadVibe-Android-v0.6.5-arm64-v8a.apk`，并核对版本名、内部版本码、最低 SDK、ABI、签名、体积和 SHA-256。
+构建完成后把 `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk` 复制为 `dist/ReadVibe-Android-v0.6.6-arm64-v8a.apk`，并核对版本名、内部版本码、最低 SDK、ABI、签名、体积和 SHA-256。

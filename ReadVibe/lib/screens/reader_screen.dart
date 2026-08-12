@@ -26,6 +26,7 @@ import '../services/book_search_service.dart';
 import '../services/storage_service.dart';
 import '../services/system_text_action_service.dart';
 import '../services/word_count_service.dart';
+import '../widgets/app_toast.dart';
 import '../widgets/chapter_list.dart';
 import '../widgets/book_search_sheet.dart';
 import '../widgets/reader_settings_sheet.dart';
@@ -143,6 +144,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _progressSaveQueue = Future<void>.value();
   final LinkedHashMap<Chapter, List<String>> _paragraphCache =
       LinkedHashMap<Chapter, List<String>>();
+  final LinkedHashMap<Chapter, double> _simulationContentExtentCache =
+      LinkedHashMap<Chapter, double>();
+  _SimulationLayoutSignature? _simulationContentExtentSignature;
+  _SimulationLayoutSignature? _simulationLineExtentSignature;
+  double? _simulationLineExtentCache;
   double _readerViewportWidth = 0;
   double _readerViewportHeight = 0;
   EdgeInsets _readerViewPadding = EdgeInsets.zero;
@@ -1320,6 +1326,59 @@ class _ReaderScreenState extends State<ReaderScreen>
         anchor.characterOffset.clamp(0, paragraphs[paragraphIndex].length);
   }
 
+  double _resolvedSimulationLineExtent(ReaderSettings settings) {
+    final signature = _SimulationLayoutSignature(
+      contentWidth: 0,
+      settings: settings,
+    );
+    final cached = _simulationLineExtentCache;
+    if (cached != null &&
+        cached.isFinite &&
+        cached > 0 &&
+        _simulationLineExtentSignature?.matches(signature) == true) {
+      return cached;
+    }
+
+    final nominalExtent = settings.fontSize * settings.lineHeight;
+    final painter = TextPainter(
+      text: TextSpan(
+        text: '汉Ag\n汉Ag',
+        style: TextStyle(
+          fontFamily: settings.effectiveFontFamily,
+          fontSize: settings.fontSize,
+          fontWeight: settings.effectiveFontWeight,
+          height: settings.lineHeight,
+          letterSpacing: 0.2,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      textScaler: _readerTextScaler,
+      strutStyle: StrutStyle(
+        fontFamily: settings.effectiveFontFamily,
+        fontSize: settings.fontSize,
+        height: settings.lineHeight,
+        fontWeight: settings.effectiveFontWeight,
+        forceStrutHeight: true,
+      ),
+    )..layout(maxWidth: math.max(1.0, nominalExtent * 8));
+    try {
+      final lineMetrics = painter.computeLineMetrics();
+      final measuredExtent = lineMetrics.length >= 2
+          ? lineMetrics[1].baseline - lineMetrics[0].baseline
+          : lineMetrics.isNotEmpty
+          ? lineMetrics.first.height
+          : painter.height;
+      final resolved = measuredExtent.isFinite && measuredExtent > 0
+          ? measuredExtent
+          : nominalExtent;
+      _simulationLineExtentSignature = signature;
+      _simulationLineExtentCache = resolved;
+      return resolved;
+    } finally {
+      painter.dispose();
+    }
+  }
+
   double _bodyStartOffset(
     Chapter chapter, {
     required ReaderSettings settings,
@@ -1327,7 +1386,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     required double width,
   }) {
     final simulation = mode == ReaderReadingMode.simulation;
-    final lineExtent = settings.fontSize * settings.lineHeight;
+    final lineExtent = simulation
+        ? _resolvedSimulationLineExtent(settings)
+        : settings.fontSize * settings.lineHeight;
     final topPadding = switch (mode) {
       ReaderReadingMode.simulation => 0.0,
       ReaderReadingMode.chapter => _readerViewPadding.top + AppSpacing.lg,
@@ -1367,8 +1428,19 @@ class _ReaderScreenState extends State<ReaderScreen>
       strutStyle: titleStrut,
     )..layout(maxWidth: width);
     try {
-      final titleGap = simulation ? lineExtent : AppSpacing.xl;
-      return topPadding + titlePainter.height + titleGap;
+      if (simulation) {
+        // The title uses a different font size, so even a forced strut can
+        // resolve to a slightly different physical line box. Snap the whole
+        // title block (plus one blank body line) to the measured body grid;
+        // otherwise every later page inherits the title's fractional phase.
+        final titleLineCount = math.max(
+          1,
+          ((titlePainter.height - _simulationPageExtentTolerance) / lineExtent)
+              .ceil(),
+        );
+        return topPadding + (titleLineCount + 1) * lineExtent;
+      }
+      return topPadding + titlePainter.height + AppSpacing.xl;
     } finally {
       titlePainter.dispose();
     }
@@ -1530,7 +1602,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     required ReaderReadingMode mode,
     required double width,
   }) {
-    final baseLine = settings.fontSize * settings.lineHeight;
+    final baseLine = mode == ReaderReadingMode.simulation
+        ? _resolvedSimulationLineExtent(settings)
+        : settings.fontSize * settings.lineHeight;
     final leading = block.style.marginTopEm * settings.fontSize;
     final paragraphGap =
         settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
@@ -2231,7 +2305,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           previousMode == ReaderReadingMode.continuous ||
           pending.readingMode == ReaderReadingMode.continuous;
       final rebuildsSimulation =
-          modeChanged &&
+          textLayoutChanged &&
           (previousMode == ReaderReadingMode.simulation ||
               pending.readingMode == ReaderReadingMode.simulation);
       final rebuildsReadingController =
@@ -2243,11 +2317,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (rebuildsReadingController) {
         final previousController = _scrollController;
         previousController.removeListener(_scheduleProgressSave);
-        // Simulation and the scrolling modes use different viewport and
-        // padding models. Reusing a ScrollPosition across those layouts lets
-        // Flutter reinterpret old pixels as a different page. Build a fresh
-        // controller at zero and restore the normalized chapter position only
-        // after the target layout has reported its own dimensions.
+        // Simulation owns a fixed page grid whose viewport is derived from
+        // the current font metrics. Reusing its ScrollPosition across either
+        // a mode switch or an in-place typography change makes Flutter
+        // reinterpret old pixels against the new grid and can expose a frame
+        // whose clipping window and glyph metrics disagree. Build a fresh
+        // controller at zero so the new reading subtree starts directly at
+        // the final metrics, then restore the captured text anchor after the
+        // target layout reports its own dimensions.
         final nextController = _createScrollController(
           rebuildsSimulation ? 0 : snapshot.offset,
           pending.readingMode == ReaderReadingMode.simulation,
@@ -3206,16 +3283,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _showReaderMessage(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        behavior: SnackBarBehavior.floating,
-        dismissDirection: DismissDirection.horizontal,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.md),
-        ),
-        content: Text(message),
-      ),
-    );
+    AppToast.info(context, message);
   }
 
   @override
@@ -3384,9 +3452,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                         children: [
                           ClipRect(
                             child: MediaQuery(
-                              data: MediaQuery.of(context).copyWith(
-                                textScaler: TextScaler.noScaling,
-                              ),
+                              data: MediaQuery.of(
+                                context,
+                              ).copyWith(textScaler: TextScaler.noScaling),
                               child: _buildReadingModeView(
                                 width: width,
                                 height: readerHeight,
@@ -4110,6 +4178,77 @@ class _ReaderScreenState extends State<ReaderScreen>
     return ExcludeSemantics(child: IgnorePointer(child: child));
   }
 
+  double _simulationChapterContentExtent({
+    required Chapter chapter,
+    required List<String> paragraphs,
+    required List<EpubContentBlock> richBlocks,
+    required double contentWidth,
+  }) {
+    final signature = _SimulationLayoutSignature(
+      contentWidth: contentWidth,
+      settings: _settings,
+    );
+    if (_simulationContentExtentSignature?.matches(signature) != true) {
+      _simulationContentExtentSignature = signature;
+      _simulationContentExtentCache.clear();
+    }
+    final cached = _simulationContentExtentCache.remove(chapter);
+    if (cached != null) {
+      _simulationContentExtentCache[chapter] = cached;
+      return cached;
+    }
+
+    final titleExtent = _bodyStartOffset(
+      chapter,
+      settings: _settings,
+      mode: ReaderReadingMode.simulation,
+      width: contentWidth,
+    );
+    if (chapter.hasRichEpubContent) {
+      final extent =
+          titleExtent +
+          richBlocks.fold<double>(
+            0,
+            (extent, block) =>
+                extent +
+                _epubBlockExtent(
+                  block,
+                  settings: _settings,
+                  mode: ReaderReadingMode.simulation,
+                  width: contentWidth,
+                ),
+          );
+      _cacheSimulationContentExtent(chapter, extent);
+      return extent;
+    }
+
+    final bodyPainter = _layoutBodyText(
+      _joinedBodyText(paragraphs, _settings),
+      settings: _settings,
+      mode: ReaderReadingMode.simulation,
+      width: contentWidth,
+    );
+    try {
+      final bodyLineCount = bodyPainter.computeLineMetrics().length;
+      final extent =
+          titleExtent +
+          bodyLineCount * _resolvedSimulationLineExtent(_settings);
+      _cacheSimulationContentExtent(chapter, extent);
+      return extent;
+    } finally {
+      bodyPainter.dispose();
+    }
+  }
+
+  void _cacheSimulationContentExtent(Chapter chapter, double extent) {
+    _simulationContentExtentCache[chapter] = extent;
+    while (_simulationContentExtentCache.length > 5) {
+      _simulationContentExtentCache.remove(
+        _simulationContentExtentCache.keys.first,
+      );
+    }
+  }
+
   Widget _buildChapterPage({
     required Chapter chapter,
     required ReaderThemeColors themeColors,
@@ -4125,7 +4264,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     final richBlocks = chapter.hasRichEpubContent
         ? chapter.epubBlocks
         : const <EpubContentBlock>[];
-    final lineExtent = _settings.fontSize * _settings.lineHeight;
+    final contentWidth = math.max(
+      1.0,
+      _readerViewportWidth - horizontalPadding * 2,
+    );
+    final lineExtent = simulationPage
+        ? _resolvedSimulationLineExtent(_settings)
+        : _settings.fontSize * _settings.lineHeight;
     final paragraphGap =
         _settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
         ? lineExtent
@@ -4134,107 +4279,153 @@ class _ReaderScreenState extends State<ReaderScreen>
         ? richBlocks.length
         : paragraphs.length;
     final hasStandaloneTitle = !_hasEmbeddedEpubHeading(chapter);
+    final simulationTitleExtent = simulationPage && hasStandaloneTitle
+        ? _bodyStartOffset(
+            chapter,
+            settings: _settings,
+            mode: ReaderReadingMode.simulation,
+            width: contentWidth,
+          )
+        : 0.0;
     final titleItemCount = hasStandaloneTitle ? 1 : 0;
     final itemCount = bodyItemCount + titleItemCount + 1;
-    final scrollView = ListView.builder(
-      key: ValueKey<String>(
-        'chapter-${identityHashCode(chapter)}-controller-${identityHashCode(controller)}-${simulationPage ? 'simulation' : 'scroll'}',
-      ),
-      controller: controller,
-      primary: false,
-      physics: physics,
-      scrollCacheExtent: simulationPage
-          ? const ScrollCacheExtent.pixels(0)
-          : const ScrollCacheExtent.pixels(900),
-      padding: EdgeInsets.fromLTRB(
-        horizontalPadding,
-        simulationPage ? 0 : viewPadding.top + AppSpacing.lg,
-        horizontalPadding,
-        simulationPage ? 0 : viewPadding.bottom + 80,
-      ),
-      itemCount: itemCount,
-      itemBuilder: (context, index) {
-        if (hasStandaloneTitle && index == 0) {
-          return Padding(
-            padding: EdgeInsets.only(
-              bottom: simulationPage ? lineExtent : AppSpacing.xl,
-            ),
-            child: AnimatedDefaultTextStyle(
-              duration: AppMotion.normal,
-              curve: AppMotion.standard,
-              style: TextStyle(
-                fontFamily: fontFamily,
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-                color: themeColors.text,
-                height: simulationPage ? lineExtent / 20 : 1.5,
-              ),
-              child: Text(
-                _formatChapterTitle(chapter.title),
-                strutStyle: simulationPage
-                    ? StrutStyle(
-                        fontFamily: fontFamily,
-                        fontSize: 20,
-                        height: lineExtent / 20,
-                        fontWeight: FontWeight.w600,
-                        forceStrutHeight: true,
-                      )
-                    : null,
-              ),
-            ),
-          );
-        }
-        if (index == itemCount - 1) {
-          return simulationPage
-              ? const SizedBox.shrink()
-              : const SizedBox(height: AppSpacing.xxl);
-        }
-
-        final paragraphIndex = index - titleItemCount;
-        if (chapter.hasRichEpubContent) {
-          final contentWidth = math.max(
-            1.0,
-            _readerViewportWidth - horizontalPadding * 2,
-          );
-          return _buildEpubBlockWidget(
-            block: richBlocks[paragraphIndex],
-            themeColors: themeColors,
-            width: contentWidth,
-            simulationPage: simulationPage,
+    final scrollViewKey = ValueKey<String>(
+      'chapter-${identityHashCode(chapter)}-controller-${identityHashCode(controller)}-${simulationPage ? 'simulation' : 'scroll'}',
+    );
+    final scrollViewPadding = EdgeInsets.fromLTRB(
+      horizontalPadding,
+      simulationPage ? 0 : viewPadding.top + AppSpacing.lg,
+      horizontalPadding,
+      simulationPage ? 0 : viewPadding.bottom + 80,
+    );
+    Widget buildItem(BuildContext context, int index) {
+      if (hasStandaloneTitle && index == 0) {
+        final titleStyle = TextStyle(
+          fontFamily: fontFamily,
+          fontSize: 20,
+          fontWeight: FontWeight.w600,
+          color: themeColors.text,
+          height: simulationPage ? lineExtent / 20 : 1.5,
+        );
+        final titleText = Text(
+          _formatChapterTitle(chapter.title),
+          style: simulationPage ? titleStyle : null,
+          strutStyle: simulationPage
+              ? StrutStyle(
+                  fontFamily: fontFamily,
+                  fontSize: 20,
+                  height: lineExtent / 20,
+                  fontWeight: FontWeight.w600,
+                  forceStrutHeight: true,
+                )
+              : null,
+        );
+        if (simulationPage) {
+          // A fixed-height title item keeps the first body line on the same
+          // measured grid as every later page. Do not animate typography in a
+          // clipped paper viewport: the final metrics must be used immediately.
+          return SizedBox(
+            height: simulationTitleExtent,
+            width: double.infinity,
+            child: Align(alignment: Alignment.topLeft, child: titleText),
           );
         }
         return Padding(
-          padding: EdgeInsets.only(
-            bottom: paragraphIndex == paragraphs.length - 1 ? 0 : paragraphGap,
-          ),
+          padding: const EdgeInsets.only(bottom: AppSpacing.xl),
           child: AnimatedDefaultTextStyle(
             duration: AppMotion.normal,
             curve: AppMotion.standard,
-            style: TextStyle(
-              fontFamily: fontFamily,
-              fontSize: _settings.fontSize,
-              fontWeight: _settings.effectiveFontWeight,
-              shadows: _settings.effectiveFontShadows(themeColors.text),
-              height: _settings.lineHeight,
-              color: themeColors.text,
-              letterSpacing: 0.2,
-            ),
-            child: Text(
-              paragraphs[paragraphIndex],
-              strutStyle: simulationPage
-                  ? StrutStyle(
-                      fontFamily: fontFamily,
-                      fontSize: _settings.fontSize,
-                      height: _settings.lineHeight,
-                      fontWeight: _settings.effectiveFontWeight,
-                      forceStrutHeight: true,
-                    )
-                  : null,
-            ),
+            style: titleStyle,
+            child: titleText,
           ),
         );
-      },
-    );
+      }
+      if (index == itemCount - 1) {
+        return simulationPage
+            ? const SizedBox.shrink()
+            : const SizedBox(height: AppSpacing.xxl);
+      }
+
+      final paragraphIndex = index - titleItemCount;
+      if (chapter.hasRichEpubContent) {
+        return _buildEpubBlockWidget(
+          block: richBlocks[paragraphIndex],
+          themeColors: themeColors,
+          width: contentWidth,
+          simulationPage: simulationPage,
+        );
+      }
+      final bodyStyle = TextStyle(
+        fontFamily: fontFamily,
+        fontSize: _settings.fontSize,
+        fontWeight: _settings.effectiveFontWeight,
+        shadows: _settings.effectiveFontShadows(themeColors.text),
+        height: _settings.lineHeight,
+        color: themeColors.text,
+        letterSpacing: 0.2,
+      );
+      final bodyText = Text(
+        paragraphs[paragraphIndex],
+        style: simulationPage ? bodyStyle : null,
+        strutStyle: simulationPage
+            ? StrutStyle(
+                fontFamily: fontFamily,
+                fontSize: _settings.fontSize,
+                height: _settings.lineHeight,
+                fontWeight: _settings.effectiveFontWeight,
+                forceStrutHeight: true,
+              )
+            : null,
+      );
+      return Padding(
+        padding: EdgeInsets.only(
+          bottom: paragraphIndex == paragraphs.length - 1 ? 0 : paragraphGap,
+        ),
+        child: simulationPage
+            ? bodyText
+            : AnimatedDefaultTextStyle(
+                duration: AppMotion.normal,
+                curve: AppMotion.standard,
+                style: bodyStyle,
+                child: bodyText,
+              ),
+      );
+    }
+
+    final Widget scrollView;
+    if (simulationPage) {
+      final exactScrollExtent = _simulationChapterContentExtent(
+        chapter: chapter,
+        paragraphs: paragraphs,
+        richBlocks: richBlocks,
+        contentWidth: contentWidth,
+      );
+      scrollView = ListView.custom(
+        key: scrollViewKey,
+        controller: controller,
+        primary: false,
+        physics: physics,
+        scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+        padding: scrollViewPadding,
+        semanticChildCount: itemCount,
+        childrenDelegate: _ExactScrollExtentSliverChildBuilderDelegate(
+          buildItem,
+          childCount: itemCount,
+          exactScrollExtent: exactScrollExtent,
+        ),
+      );
+    } else {
+      scrollView = ListView.builder(
+        key: scrollViewKey,
+        controller: controller,
+        primary: false,
+        physics: physics,
+        scrollCacheExtent: const ScrollCacheExtent.pixels(900),
+        padding: scrollViewPadding,
+        itemCount: itemCount,
+        itemBuilder: buildItem,
+      );
+    }
 
     Widget readingContent = _DoubleTapFilteredSelectionArea(
       colors: themeColors,
@@ -4641,23 +4832,13 @@ class _DoubleTapFilteredSelectionAreaState
         );
       }
       if (!launched && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            behavior: SnackBarBehavior.floating,
-            content: Text(translate ? '所选 AI 应用无法接收翻译内容' : '所选浏览器无法打开搜索'),
-          ),
-        );
+        AppToast.error(context, translate ? '所选 AI 应用无法接收翻译内容' : '所选浏览器无法打开搜索');
       }
     } on Object catch (error, stackTrace) {
       debugPrint('Failed to launch a system text action: $error');
       debugPrintStack(stackTrace: stackTrace);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            behavior: SnackBarBehavior.floating,
-            content: Text('无法打开所选外部应用'),
-          ),
-        );
+        AppToast.error(context, '无法打开所选外部应用');
       }
     }
   }
@@ -4669,15 +4850,11 @@ class _DoubleTapFilteredSelectionAreaState
   }) async {
     final availableTargets = targets.where((target) => target.available);
     if (availableTargets.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          content: Text(
-            action == SystemTextActionType.translate
-                ? '没有检测到可接收文字的 AI 应用'
-                : '没有可用的浏览器',
-          ),
-        ),
+      AppToast.info(
+        context,
+        action == SystemTextActionType.translate
+            ? '没有检测到可接收文字的 AI 应用'
+            : '没有可用的浏览器',
       );
       return null;
     }
@@ -5105,6 +5282,66 @@ class _DoubleTapFilteredSelectionAreaState
   }
 }
 
+class _SimulationLayoutSignature {
+  final double contentWidth;
+  final double fontSize;
+  final double lineHeight;
+  final String fontFamily;
+  final String? importedFontFamily;
+  final String? importedFontPath;
+  final FontWeight fontWeight;
+  final ReaderParagraphSpacing paragraphSpacing;
+
+  _SimulationLayoutSignature({
+    required this.contentWidth,
+    required ReaderSettings settings,
+  }) : fontSize = settings.fontSize,
+       lineHeight = settings.lineHeight,
+       fontFamily = settings.fontFamily,
+       importedFontFamily = settings.importedFontFamily,
+       importedFontPath = settings.importedFontPath,
+       fontWeight = settings.effectiveFontWeight,
+       paragraphSpacing = settings.paragraphSpacing;
+
+  bool matches(_SimulationLayoutSignature other) {
+    return contentWidth == other.contentWidth &&
+        fontSize == other.fontSize &&
+        lineHeight == other.lineHeight &&
+        fontFamily == other.fontFamily &&
+        importedFontFamily == other.importedFontFamily &&
+        importedFontPath == other.importedFontPath &&
+        fontWeight == other.fontWeight &&
+        paragraphSpacing == other.paragraphSpacing;
+  }
+}
+
+/// Keeps a lazily built simulation chapter's scroll metrics exact before its
+/// final paragraph is materialized. Flutter's default variable-height sliver
+/// extrapolates unseen children from the currently visible average; a one-page
+/// overestimate at the chapter tail makes a forward turn target a phantom page
+/// and then clamp back to the same visible page when the real tail is laid out.
+class _ExactScrollExtentSliverChildBuilderDelegate
+    extends SliverChildBuilderDelegate {
+  final double exactScrollExtent;
+
+  _ExactScrollExtentSliverChildBuilderDelegate(
+    super.builder, {
+    required int childCount,
+    required double exactScrollExtent,
+  }) : exactScrollExtent = exactScrollExtent.isFinite
+           ? math.max(0.0, exactScrollExtent)
+           : 0,
+       super(childCount: childCount);
+
+  @override
+  double estimateMaxScrollOffset(
+    int firstIndex,
+    int lastIndex,
+    double leadingScrollOffset,
+    double trailingScrollOffset,
+  ) => exactScrollExtent;
+}
+
 class _SimulationPageTarget {
   final int chapterIndex;
   final double offset;
@@ -5169,8 +5406,8 @@ class _FullViewportPagingScrollController extends ScrollController {
   }
 }
 
-class _FullViewportPagingScrollPosition
-    extends ScrollPositionWithSingleContext with _PageGridRealignMixin {
+class _FullViewportPagingScrollPosition extends ScrollPositionWithSingleContext
+    with _PageGridRealignMixin {
   _FullViewportPagingScrollPosition({
     required super.physics,
     required super.context,

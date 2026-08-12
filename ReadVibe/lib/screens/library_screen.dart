@@ -20,6 +20,7 @@ import '../services/word_count_service.dart';
 import '../services/update_service.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
+import '../widgets/app_toast.dart';
 import '../widgets/app_update_dialog.dart';
 import '../widgets/book_card.dart';
 import '../widgets/global_settings_sheet.dart';
@@ -37,6 +38,15 @@ class LibraryScreen extends StatefulWidget {
 }
 
 enum _BookAction { rename, move, delete }
+
+Offset _centerDragAnchorStrategy(
+  Draggable<Object> draggable,
+  BuildContext context,
+  Offset position,
+) {
+  final renderBox = context.findRenderObject()! as RenderBox;
+  return renderBox.size.center(Offset.zero);
+}
 
 class _LibraryScreenState extends State<LibraryScreen>
     with TickerProviderStateMixin {
@@ -110,20 +120,10 @@ class _LibraryScreenState extends State<LibraryScreen>
   /// new version, up to date, or unreachable — and ignores the three-day
   /// dismiss window because the user explicitly asked.
   Future<void> _checkUpdateManually() async {
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(
-      SnackBar(
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.md),
-        ),
-        duration: const Duration(seconds: 15),
-        content: const Text('正在检查更新…'),
-      ),
-    );
+    AppToast.loading(context, '正在检查更新…');
     final result = await UpdateService().checkForUpdate();
     if (!mounted) return;
-    messenger.hideCurrentSnackBar();
+    AppToast.hide(context);
     final info = result.info;
     if (info != null) {
       await _showUpdateDialog(info);
@@ -355,60 +355,12 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   void _showError(String message) {
     if (!mounted) return;
-    final snackColors = AppTheme.getReaderTheme(
-      _settings.theme,
-      systemBrightness: MediaQuery.platformBrightnessOf(context),
-    );
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.md),
-        ),
-        backgroundColor: snackColors.accent,
-        content: Row(
-          children: [
-            const Icon(Icons.error_outline, color: Colors.white, size: 20),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: Text(
-                message,
-                style: const TextStyle(color: Colors.white),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    AppToast.error(context, message);
   }
 
   void _showMessage(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.md),
-        ),
-        backgroundColor: AppTheme.success,
-        content: Row(
-          children: [
-            const Icon(
-              Icons.check_circle_outline,
-              color: Colors.white,
-              size: 20,
-            ),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: Text(
-                message,
-                style: const TextStyle(color: Colors.white),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    AppToast.success(context, message);
   }
 
   void _handleShelfPointerDown(PointerDownEvent event) {
@@ -1527,7 +1479,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                 child: Draggable<String>(
                   data: book.id,
                   maxSimultaneousDrags: _openingBook ? 0 : 1,
-                  dragAnchorStrategy: pointerDragAnchorStrategy,
+                  dragAnchorStrategy: _centerDragAnchorStrategy,
                   onDragStarted: () => _startBookDrag(book),
                   onDragUpdate: _updateBookDrag,
                   onDragEnd: (_) => _finishBookDrag(book),
@@ -1605,4 +1557,3 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 }
-

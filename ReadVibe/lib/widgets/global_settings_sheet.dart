@@ -4,6 +4,7 @@ import '../models/reader_settings.dart';
 import '../services/system_text_action_service.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_toast.dart';
 import 'font_settings_section.dart';
 
 class GlobalSettingsSheet extends StatelessWidget {
@@ -106,12 +107,7 @@ class GlobalSettingsSheet extends StatelessWidget {
                       onPressed: () async {
                         await SystemTextActionService.clearDefaults();
                         if (!context.mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            behavior: SnackBarBehavior.floating,
-                            content: Text('已清除翻译和搜索的默认应用'),
-                          ),
-                        );
+                        AppToast.success(context, '已清除翻译和搜索的默认应用');
                       },
                       icon: const Icon(Icons.restart_alt_rounded, size: 18),
                       label: const Text('重新选择默认应用'),

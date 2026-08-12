@@ -161,6 +161,14 @@ class AppTheme {
     highlightColor: Colors.transparent,
     hoverColor: Colors.transparent,
     focusColor: Colors.transparent,
+    // App toasts own their surface paint; keep the host SnackBar invisible so
+    // Material's default dark bar never peeks around the card.
+    snackBarTheme: const SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      elevation: 0,
+      backgroundColor: Colors.transparent,
+      contentTextStyle: TextStyle(color: textPrimary, fontSize: 14),
+    ),
     useMaterial3: true,
   );
 
@@ -233,6 +241,12 @@ class AppTheme {
     highlightColor: Colors.transparent,
     hoverColor: Colors.transparent,
     focusColor: Colors.transparent,
+    snackBarTheme: const SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      elevation: 0,
+      backgroundColor: Colors.transparent,
+      contentTextStyle: TextStyle(color: Color(0xFFE8DFD4), fontSize: 14),
+    ),
     useMaterial3: true,
   );
 }
