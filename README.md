@@ -6,7 +6,7 @@ ReadVibe 是一款面向 Android 的本地离线阅读器，支持导入 TXT、E
 
 ## 开始使用
 
-1. 下载并安装 [ReadVibe v0.6.6 Android 安装包](ReadVibe/dist/ReadVibe-Android-v0.6.6-arm64-v8a.apk)。首次安装时，请按 Android 系统提示允许当前来源安装应用。
+1. 下载并安装 [ReadVibe v0.6.6 Android 安装包](https://github.com/BrianHIO-x/ReadVibe/releases/download/v0.6.6/ReadVibe-Android-v0.6.6-arm64-v8a.apk)。首次安装时，请按 Android 系统提示允许当前来源安装应用。
 2. 打开 ReadVibe，点击书架上的导入按钮，从设备中选择 TXT、EPUB、PDF、DOCX 或 DOC 文件。
 3. 点击书卡开始阅读；在阅读页打开菜单后，可以使用目录、全文搜索和阅读设置。长按书卡可以修改名称、调整顺序或删除书籍。
 

@@ -142,8 +142,6 @@
 
 ## 相关文档
 
-- [项目说明](../../README.md)
-- [应用说明](../README.md)
-- [仓库协作规则](../../AGENTS.md)
-- [应用协作规则](../AGENTS.md)
+- [项目说明](../README.md)
+- [仓库协作规则](../AGENTS.md)
 - [Windows 目录状态](../windows/README.md)

@@ -16,6 +16,6 @@ Android 的 EPUB 导入按 OPF spine 与 NAV/NCX 建立章节，普通段落采�
 
 相关文档：
 
-- [应用说明](../README.md)
+- [项目说明](../README.md)
 - [当前界面与交互](../docs/UI_OPTIMIZATION.md)
-- [仓库说明](../../README.md)
+- [仓库协作规则](../AGENTS.md)
