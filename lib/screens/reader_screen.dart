@@ -166,11 +166,18 @@ class _ReaderScreenState extends State<ReaderScreen>
       (_) => GlobalKey(),
       growable: false,
     );
-    _wordCountNotifier = ValueNotifier<int?>(_book.wordCount);
+    final storedChapterWordCounts =
+        _book.chapterWordCounts?.length == _book.chapters.length
+        ? _book.chapterWordCounts
+        : null;
+    final storedChapterTotal = storedChapterWordCounts == null
+        ? null
+        : WordCountService.totalFromChapterCounts(storedChapterWordCounts);
+    _wordCountNotifier = ValueNotifier<int?>(
+      storedChapterTotal ?? _book.wordCount,
+    );
     _chapterWordCountsNotifier = ValueNotifier<List<int>?>(
-      _book.chapterWordCounts?.length == _book.chapters.length
-          ? _book.chapterWordCounts
-          : null,
+      storedChapterWordCounts,
     );
     _visibleProgressNotifier = ValueNotifier<double>(0);
     _scrollController = _createScrollController();
@@ -194,30 +201,24 @@ class _ReaderScreenState extends State<ReaderScreen>
             _setPageDragOffset(animation.value);
           });
     _loadInitialState();
-    if (_book.wordCount == null) unawaited(_ensureBookWordCount());
-    if (_chapterWordCountsNotifier.value == null) {
-      unawaited(_ensureChapterWordCounts());
+    if (storedChapterWordCounts == null ||
+        _book.wordCount != storedChapterTotal) {
+      unawaited(_ensureWordCounts());
     }
   }
 
-  Future<void> _ensureBookWordCount() async {
-    try {
-      final wordCount = await WordCountService().count(_book);
-      await _storage.saveBookWordCount(_book, wordCount);
-      if (mounted) _wordCountNotifier.value = wordCount;
-    } on Object catch (error, stackTrace) {
-      debugPrint('Failed to count reader text: $error');
-      debugPrintStack(stackTrace: stackTrace);
-    }
-  }
-
-  Future<void> _ensureChapterWordCounts() async {
+  Future<void> _ensureWordCounts() async {
     try {
       final chapterWordCounts = await WordCountService().countChapters(_book);
-      await _storage.saveChapterWordCounts(_book, chapterWordCounts);
-      if (mounted) _chapterWordCountsNotifier.value = chapterWordCounts;
+      final wordCount = WordCountService.totalFromChapterCounts(
+        chapterWordCounts,
+      );
+      await _storage.saveWordCounts(_book, chapterWordCounts);
+      if (!mounted) return;
+      _chapterWordCountsNotifier.value = chapterWordCounts;
+      _wordCountNotifier.value = wordCount;
     } on Object catch (error, stackTrace) {
-      debugPrint('Failed to count chapter text: $error');
+      debugPrint('Failed to count reader text: $error');
       debugPrintStack(stackTrace: stackTrace);
     }
   }
@@ -3208,6 +3209,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _presentSearch() async {
     if (!mounted || _readerModalOpen) return;
+    final searchSession = BookSearchService.openSession(_book);
     final themeColors = AppTheme.getReaderTheme(
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
@@ -3229,7 +3231,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             heightFactor: 0.88,
             child: BookSearchSheet(
               colors: themeColors,
-              onSearch: (query) => BookSearchService.search(_book, query),
+              onSearch: searchSession.search,
               onSelect: (result) =>
                   Navigator.of(sheetContext).pop<BookSearchResult>(result),
             ),
@@ -3237,6 +3239,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         ),
       );
     } finally {
+      searchSession.dispose();
       _endReaderModal();
     }
 

@@ -9,34 +9,10 @@ import '../models/book.dart';
 /// counted once, so supplementary-plane characters are not double-counted as
 /// two UTF-16 code units.
 class WordCountService {
-  static final Map<String, Future<int>> _inFlight = <String, Future<int>>{};
   static final Map<String, List<int>> _chapterCountCache =
       <String, List<int>>{};
   static final Map<String, Future<List<int>>> _chapterCountsInFlight =
       <String, Future<List<int>>>{};
-
-  Future<int> count(Book book) {
-    final stored = book.wordCount;
-    if (stored != null) return Future<int>.value(stored);
-
-    final cacheKey = _chapterCacheKey(book);
-    final existing = _inFlight[cacheKey];
-    if (existing != null) return existing;
-
-    final contents = <String>[
-      for (final chapter in book.chapters) ...[chapter.title, chapter.content],
-    ];
-    late final Future<int> operation;
-    operation = Isolate.run(() => _countVisibleRunes(contents)).whenComplete(
-      () {
-        if (identical(_inFlight[cacheKey], operation)) {
-          _inFlight.remove(cacheKey);
-        }
-      },
-    );
-    _inFlight[cacheKey] = operation;
-    return operation;
-  }
 
   /// Counts each chapter body independently without blocking the UI isolate.
   ///
@@ -74,18 +50,23 @@ class WordCountService {
     _chapterCountsInFlight[cacheKey] = operation;
     return operation;
   }
+
+  /// Derives the whole-book count from the one authoritative chapter scan.
+  /// Values are saturated to the same range accepted by persisted metadata.
+  static int totalFromChapterCounts(Iterable<int> counts) {
+    var total = 0;
+    for (final count in counts) {
+      total = (total + count.clamp(0, 0x7fffffffffffffff)).clamp(
+        0,
+        0x7fffffffffffffff,
+      );
+    }
+    return total;
+  }
 }
 
 String _chapterCacheKey(Book book) =>
     '${book.id}:${book.fileSize}:${book.txtParserVersion}:${book.chapters.length}';
-
-int _countVisibleRunes(List<String> contents) {
-  var total = 0;
-  for (final content in contents) {
-    total += _countVisibleRunesIn(content);
-  }
-  return total;
-}
 
 List<int> _countVisibleRunesByEntry(List<String> contents) =>
     List<int>.unmodifiable(contents.map(_countVisibleRunesIn));
@@ -114,7 +95,7 @@ bool _isUnicodeWhitespace(int rune) {
 }
 
 String formatBookWordCount(int? wordCount) {
-  if (wordCount == null) return '全文字数统计中…';
+  if (wordCount == null) return '全文字数未统计';
   return '全文 ${_withThousandsSeparators(wordCount)} 字';
 }
 

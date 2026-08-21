@@ -126,18 +126,37 @@ class GlobalSettingsSheet extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: AppSpacing.sm),
-                    Text(
-                      '发现新版本时会自动提示。也可以随时手动检查。',
-                      style: TextStyle(
-                        color: colors.secondary,
-                        fontSize: 12,
-                        height: 1.5,
+                    SwitchListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: Text(
+                        '自动检查更新',
+                        style: TextStyle(
+                          color: colors.text,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        '默认关闭；开启后，进入书架时会连接 GitHub Releases。',
+                        style: TextStyle(
+                          color: colors.secondary,
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                      value: settings.automaticUpdateChecks,
+                      onChanged: (enabled) => onChange(
+                        settings.copyWith(automaticUpdateChecks: enabled),
                       ),
                     ),
                     const SizedBox(height: AppSpacing.sm),
                     OutlinedButton.icon(
                       onPressed: onCheckUpdate,
-                      icon: const Icon(Icons.system_update_alt_rounded, size: 18),
+                      icon: const Icon(
+                        Icons.system_update_alt_rounded,
+                        size: 18,
+                      ),
                       label: const Text('检查更新'),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: colors.accent,

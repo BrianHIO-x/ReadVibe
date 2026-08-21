@@ -21,6 +21,18 @@ const _kChapterPrefix = 'readvibe_chapters_';
 const _kChapterIoTimeout = Duration(seconds: 30);
 const _kLegacyMigrationTimeout = Duration(milliseconds: 250);
 
+class StorageCleanupResult {
+  final int removedFiles;
+  final int removedDirectories;
+
+  const StorageCleanupResult({
+    required this.removedFiles,
+    required this.removedDirectories,
+  });
+
+  int get removedEntries => removedFiles + removedDirectories;
+}
+
 /// Persists small preferences in SharedPreferences and book content in files.
 ///
 /// Storing an entire novel in SharedPreferences is slow and can exceed platform
@@ -212,26 +224,14 @@ class StorageService {
     });
   }
 
-  Future<void> saveBookWordCount(Book sourceBook, int wordCount) async {
-    if (sourceBook.id.isEmpty || sourceBook.isPdf || wordCount < 0) return;
-    await _enqueueLibraryMutation(() async {
-      final prefs = await SharedPreferences.getInstance();
-      final metadata = _readBookMetadata(prefs);
-      final index = metadata.indexWhere((book) => book['id'] == sourceBook.id);
-      // A background count may finish after the user deletes the book. Never
-      // recreate deleted metadata just to save a stale result.
-      if (index < 0) return;
-      if (!_matchesBookRevision(metadata[index], sourceBook)) return;
-      metadata[index]['wordCount'] = wordCount.clamp(0, 0x7fffffffffffffff);
-      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
-    });
-  }
-
-  Future<void> saveChapterWordCounts(
+  /// Persists per-chapter counts and their sum in one metadata transaction.
+  /// A single chapter-body scan is therefore authoritative for both displays.
+  Future<void> saveWordCounts(
     Book sourceBook,
     List<int> chapterWordCounts,
   ) async {
     if (sourceBook.id.isEmpty ||
+        sourceBook.isPdf ||
         chapterWordCounts.length != sourceBook.chapterCount ||
         chapterWordCounts.any((count) => count < 0)) {
       return;
@@ -250,6 +250,11 @@ class StorageService {
       // or migrated directory that happens to reuse the same book ID.
       if (!_matchesBookRevision(current, sourceBook)) return;
       current['chapterWordCounts'] = safeCounts;
+      var total = 0;
+      for (final count in safeCounts) {
+        total = (total + count).clamp(0, 0x7fffffffffffffff);
+      }
+      current['wordCount'] = total;
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
     });
   }
@@ -303,6 +308,130 @@ class StorageService {
     await _deleteManagedSourcePath(book.sourcePath);
   }
 
+  /// Reclaims private payloads that are no longer referenced by shelf
+  /// metadata. A grace period protects imports that wrote their files but have
+  /// not committed metadata yet, as well as recoverable interrupted writes.
+  Future<StorageCleanupResult> collectOrphanedData({
+    Duration gracePeriod = const Duration(hours: 24),
+    DateTime? referenceTime,
+  }) async {
+    if (gracePeriod.isNegative) {
+      throw ArgumentError.value(gracePeriod, 'gracePeriod', '不能为负数');
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final metadata = _readBookMetadataForCleanup(prefs);
+    // A malformed shelf record is not proof that every private payload is an
+    // orphan. Preserve all data and retry after the metadata issue is resolved.
+    if (metadata == null) {
+      return const StorageCleanupResult(removedFiles: 0, removedDirectories: 0);
+    }
+    final root = (await getAppDataDirectory()).absolute;
+    final cutoff = (referenceTime ?? DateTime.now()).subtract(gracePeriod);
+    var removedFiles = 0;
+    var removedDirectories = 0;
+
+    final booksDirectory = Directory(p.join(root.path, 'books')).absolute;
+    final referencedChapterPaths = <String>{};
+    for (final book in metadata) {
+      final id = book['id'];
+      if (id is! String || id.isEmpty) continue;
+      final file = File(
+        p.join(booksDirectory.path, '${_safeBookId(id)}.json'),
+      ).absolute;
+      referencedChapterPaths.addAll(<String>{
+        file.path,
+        '${file.path}.tmp',
+        '${file.path}.bak',
+        '${file.path}.presplit',
+      });
+    }
+    if (await booksDirectory.exists()) {
+      try {
+        await for (final entity in booksDirectory.list(followLinks: false)) {
+          if (entity is! File ||
+              !_isManagedChild(booksDirectory.path, entity.absolute.path) ||
+              !_isChapterPayloadName(p.basename(entity.path)) ||
+              _pathsContain(referencedChapterPaths, entity.absolute.path) ||
+              !await _isOlderThan(entity, cutoff)) {
+            continue;
+          }
+          try {
+            await entity.delete();
+            removedFiles++;
+          } on FileSystemException {
+            // Best-effort cleanup; a later maintenance pass can retry.
+          }
+        }
+      } on FileSystemException {
+        // One inaccessible managed directory must not block other cleanup.
+      }
+    }
+
+    final epubDirectory = Directory(p.join(root.path, 'epub')).absolute;
+    final pdfDirectory = Directory(p.join(root.path, 'pdf')).absolute;
+    final referencedEpubPaths = <String>{};
+    final referencedPdfPaths = <String>{};
+    for (final book in metadata) {
+      final sourcePath = book['sourcePath'];
+      if (sourcePath is! String || sourcePath.trim().isEmpty) continue;
+      final absolutePath = p.normalize(File(sourcePath.trim()).absolute.path);
+      if (book['format'] == BookFormat.epub.name &&
+          _isManagedChild(epubDirectory.path, absolutePath)) {
+        referencedEpubPaths.add(absolutePath);
+      } else if (book['format'] == BookFormat.pdf.name &&
+          _isManagedChild(pdfDirectory.path, absolutePath)) {
+        referencedPdfPaths.add(absolutePath);
+      }
+    }
+
+    if (await epubDirectory.exists()) {
+      try {
+        await for (final entity in epubDirectory.list(followLinks: false)) {
+          if (entity is! Directory ||
+              !_isManagedChild(epubDirectory.path, entity.absolute.path) ||
+              _pathsContain(referencedEpubPaths, entity.absolute.path) ||
+              !await _isOlderThan(entity, cutoff)) {
+            continue;
+          }
+          try {
+            await entity.delete(recursive: true);
+            removedDirectories++;
+          } on FileSystemException {
+            // Best-effort cleanup; a later maintenance pass can retry.
+          }
+        }
+      } on FileSystemException {
+        // Continue with PDF cleanup.
+      }
+    }
+
+    if (await pdfDirectory.exists()) {
+      try {
+        await for (final entity in pdfDirectory.list(followLinks: false)) {
+          if (entity is! File ||
+              !_isManagedChild(pdfDirectory.path, entity.absolute.path) ||
+              _pathsContain(referencedPdfPaths, entity.absolute.path) ||
+              !await _isOlderThan(entity, cutoff)) {
+            continue;
+          }
+          try {
+            await entity.delete();
+            removedFiles++;
+          } on FileSystemException {
+            // Best-effort cleanup; a later maintenance pass can retry.
+          }
+        }
+      } on FileSystemException {
+        // Cleanup is intentionally non-fatal.
+      }
+    }
+
+    return StorageCleanupResult(
+      removedFiles: removedFiles,
+      removedDirectories: removedDirectories,
+    );
+  }
+
   List<Map<String, dynamic>> _readBookMetadata(SharedPreferences prefs) {
     final raw = prefs.getString(_kBooksKey);
     if (raw == null) return <Map<String, dynamic>>[];
@@ -318,6 +447,28 @@ class StorageService {
           .toList();
     } on Object {
       return <Map<String, dynamic>>[];
+    }
+  }
+
+  List<Map<String, dynamic>>? _readBookMetadataForCleanup(
+    SharedPreferences prefs,
+  ) {
+    final raw = prefs.getString(_kBooksKey);
+    if (raw == null) return <Map<String, dynamic>>[];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return null;
+      final metadata = <Map<String, dynamic>>[];
+      for (final value in decoded) {
+        if (value is! Map) return null;
+        final map = Map<String, dynamic>.from(value);
+        final id = map['id'];
+        if (id is! String || id.isEmpty) return null;
+        metadata.add(map);
+      }
+      return metadata;
+    } on Object {
+      return null;
     }
   }
 
@@ -602,7 +753,7 @@ class StorageService {
     if (!await directory.exists()) {
       await directory.create(recursive: true);
     }
-    final safeId = base64Url.encode(utf8.encode(bookId)).replaceAll('=', '');
+    final safeId = _safeBookId(bookId);
     return File(p.join(directory.path, '$safeId.json'));
   }
 
@@ -722,6 +873,27 @@ bool _matchesBookRevision(Map<String, dynamic> metadata, Book sourceBook) {
       currentChapterCount is num &&
       currentChapterCount.toInt() == sourceBook.chapterCount &&
       currentFormat == sourceBook.format.name;
+}
+
+String _safeBookId(String bookId) =>
+    base64Url.encode(utf8.encode(bookId)).replaceAll('=', '');
+
+bool _isManagedChild(String parentPath, String candidatePath) =>
+    p.isWithin(p.normalize(parentPath), p.normalize(candidatePath));
+
+bool _pathsContain(Set<String> paths, String candidate) =>
+    paths.any((path) => p.equals(path, candidate));
+
+bool _isChapterPayloadName(String name) =>
+    RegExp(r'^[A-Za-z0-9_-]+\.json(?:\.(?:tmp|bak|presplit))?$').hasMatch(name);
+
+Future<bool> _isOlderThan(FileSystemEntity entity, DateTime cutoff) async {
+  try {
+    final stat = await entity.stat();
+    return !stat.modified.isAfter(cutoff);
+  } on FileSystemException {
+    return false;
+  }
 }
 
 List<Chapter> _chaptersFromJson(String raw) {

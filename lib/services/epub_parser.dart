@@ -13,17 +13,35 @@ import 'package:xml/xml.dart';
 import '../models/book.dart';
 import 'storage_service.dart';
 
-const _maxArchiveEntries = 20000;
-const _maxExpandedBytes = 512 * 1024 * 1024;
-const _maxSingleImageBytes = 64 * 1024 * 1024;
+/// Resource limits are grouped so the security boundaries can be exercised by
+/// small fixtures without allocating hundreds of megabytes in tests.
+class EpubParseLimits {
+  final int maxInputBytes;
+  final int maxArchiveEntries;
+  final int maxExpandedBytes;
+  final int maxSingleImageBytes;
+
+  const EpubParseLimits({
+    this.maxInputBytes = 256 * 1024 * 1024,
+    this.maxArchiveEntries = 20000,
+    this.maxExpandedBytes = 512 * 1024 * 1024,
+    this.maxSingleImageBytes = 64 * 1024 * 1024,
+  }) : assert(maxInputBytes > 0),
+       assert(maxArchiveEntries > 0),
+       assert(maxExpandedBytes > 0),
+       assert(maxSingleImageBytes > 0);
+}
+
+const _defaultEpubParseLimits = EpubParseLimits();
 
 /// Parses an EPUB into the same chapter model used by TXT while retaining a
 /// safe, offline subset of publisher CSS and local images.
 Future<Book> parseEpub(
   String filePath,
   String fileName,
-  StorageService storage,
-) async {
+  StorageService storage, {
+  EpubParseLimits limits = _defaultEpubParseLimits,
+}) async {
   final now = DateTime.now();
   final bookId = 'epub_${now.microsecondsSinceEpoch}';
   final root = await storage.getAppDataDirectory();
@@ -36,6 +54,7 @@ Future<Book> parseEpub(
         bookId,
         now,
         resourceDirectory.path,
+        limits,
       ),
     );
   } on Object {
@@ -57,9 +76,21 @@ Book _parseEpubSync(
   String bookId,
   DateTime importDate,
   String resourceDirectoryPath,
+  EpubParseLimits limits,
 ) {
-  final bytes = File(filePath).readAsBytesSync();
-  if (bytes.isEmpty) throw const FormatException('EPUB 文件为空');
+  final source = File(filePath);
+  final stat = source.statSync();
+  if (stat.type != FileSystemEntityType.file) {
+    throw const FormatException('EPUB 文件不存在或无法读取');
+  }
+  final inputLength = source.lengthSync();
+  if (inputLength <= 0) throw const FormatException('EPUB 文件为空');
+  if (inputLength > limits.maxInputBytes) {
+    throw FormatException(
+      'EPUB 文件过大，请选择不超过 ${_formatMegabytes(limits.maxInputBytes)} MB 的文件',
+    );
+  }
+  final bytes = source.readAsBytesSync();
 
   late final Archive archive;
   try {
@@ -67,7 +98,7 @@ Book _parseEpubSync(
   } on FormatException {
     throw const FormatException('无效的 EPUB 文件：ZIP 数据已损坏');
   }
-  if (archive.files.length > _maxArchiveEntries) {
+  if (archive.files.length > limits.maxArchiveEntries) {
     throw const FormatException('EPUB 文件包含过多条目，无法安全解析');
   }
 
@@ -75,7 +106,7 @@ Book _parseEpubSync(
   final archiveFiles = <String, ArchiveFile>{};
   for (final file in archive.files) {
     expandedBytes += file.size;
-    if (expandedBytes > _maxExpandedBytes) {
+    if (expandedBytes > limits.maxExpandedBytes) {
       throw const FormatException('EPUB 解压后的内容过大，无法安全解析');
     }
     archiveFiles.putIfAbsent(_normalizeArchivePath(file.name), () => file);
@@ -124,6 +155,7 @@ Book _parseEpubSync(
   final imageStore = _EpubImageStore(
     archiveFiles: archiveFiles,
     outputDirectory: resourceDirectory,
+    maxSingleImageBytes: limits.maxSingleImageBytes,
   );
   final chapters = <Chapter>[];
   String? activeVolumeTitle;
@@ -216,7 +248,7 @@ Book _parseEpubSync(
     format: BookFormat.epub,
     chapters: chapters,
     importDate: importDate,
-    fileSize: bytes.length,
+    fileSize: inputLength,
     sourcePath: resourceDirectory.path,
   );
 }
@@ -1290,10 +1322,15 @@ class _ExtractedImage {
 class _EpubImageStore {
   final Map<String, ArchiveFile> archiveFiles;
   final Directory outputDirectory;
+  final int maxSingleImageBytes;
   final Map<String, _ExtractedImage?> _cache = <String, _ExtractedImage?>{};
   var _dataImageIndex = 0;
 
-  _EpubImageStore({required this.archiveFiles, required this.outputDirectory});
+  _EpubImageStore({
+    required this.archiveFiles,
+    required this.outputDirectory,
+    required this.maxSingleImageBytes,
+  });
 
   _ExtractedImage? extract(String rawReference, {required String relativeTo}) {
     final reference = rawReference.trim();
@@ -1308,7 +1345,7 @@ class _EpubImageStore {
     if (archivePath.isEmpty) return null;
     return _cache.putIfAbsent(archivePath, () {
       final file = _findArchiveFile(archiveFiles, archivePath);
-      if (file == null || file.size <= 0 || file.size > _maxSingleImageBytes) {
+      if (file == null || file.size <= 0 || file.size > maxSingleImageBytes) {
         return null;
       }
       final bytes = Uint8List.fromList(_bytesOf(file));
@@ -1337,8 +1374,17 @@ class _EpubImageStore {
       return null;
     }
     try {
-      final bytes = base64.decode(reference.substring(comma + 1));
-      if (bytes.isEmpty || bytes.length > _maxSingleImageBytes) return null;
+      final payloadStart = comma + 1;
+      if (!_base64PayloadFitsByteLimit(
+        reference,
+        payloadStart,
+        maxSingleImageBytes,
+      )) {
+        return null;
+      }
+      final payload = reference.substring(payloadStart);
+      final bytes = base64.decode(payload);
+      if (bytes.isEmpty || bytes.length > maxSingleImageBytes) return null;
       final extension = _safeImageExtension(
         reference.substring(0, comma),
         bytes,
@@ -1366,6 +1412,46 @@ class _EpubImageStore {
     }
   }
 }
+
+bool _base64PayloadFitsByteLimit(String source, int start, int maxBytes) {
+  if (start < 0 || start >= source.length || maxBytes <= 0) return false;
+  final maxEncodedCharacters = ((maxBytes + 2) ~/ 3) * 4;
+  // Base64Codec normalizes whitespace before decoding. Bound the original
+  // string too so a whitespace-heavy data URI cannot force a huge temporary
+  // normalization allocation despite decoding to only a few bytes.
+  if (source.length - start > maxEncodedCharacters) return false;
+
+  var symbols = 0;
+  var previousSymbol = -1;
+  var lastSymbol = -1;
+  for (var index = start; index < source.length; index++) {
+    final codeUnit = source.codeUnitAt(index);
+    if (_isAsciiWhitespace(codeUnit)) continue;
+    symbols++;
+    previousSymbol = lastSymbol;
+    lastSymbol = codeUnit;
+  }
+  if (symbols == 0 || symbols % 4 == 1) return false;
+
+  final fullGroups = symbols ~/ 4;
+  final remainder = symbols % 4;
+  var decodedBytes = fullGroups * 3;
+  if (remainder == 2) decodedBytes += 1;
+  if (remainder == 3) decodedBytes += 2;
+  if (remainder == 0 && lastSymbol == 0x3d) {
+    decodedBytes--;
+    if (previousSymbol == 0x3d) decodedBytes--;
+  }
+  return decodedBytes >= 0 && decodedBytes <= maxBytes;
+}
+
+bool _isAsciiWhitespace(int codeUnit) =>
+    codeUnit == 0x20 ||
+    codeUnit == 0x09 ||
+    codeUnit == 0x0a ||
+    codeUnit == 0x0d;
+
+int _formatMegabytes(int bytes) => (bytes / (1024 * 1024)).ceil();
 
 String? _safeImageExtension(String pathOrMime, Uint8List bytes) {
   final value = pathOrMime.toLowerCase();

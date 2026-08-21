@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 
@@ -13,6 +14,8 @@ class BookSearchResult {
   final String chapterTitle;
   final String snippet;
   final String matchedText;
+  final int snippetMatchStart;
+  final int snippetMatchEnd;
 
   const BookSearchResult({
     required this.chapterIndex,
@@ -21,14 +24,17 @@ class BookSearchResult {
     required this.chapterTitle,
     required this.snippet,
     required this.matchedText,
+    required this.snippetMatchStart,
+    required this.snippetMatchEnd,
   });
 }
 
 /// Searches the chapter payload that is already used by the reader.
 ///
 /// Search never depends on a generated file or a persisted completion flag.
-/// Every query is executed in a worker isolate, so even a large TXT book stays
-/// searchable without blocking reader animations or input handling.
+/// A search panel owns one worker session. The book and its normalized
+/// paragraphs cross the isolate boundary once, while subsequent keywords send
+/// only the small query string.
 class BookSearchService {
   BookSearchService._();
 
@@ -40,12 +46,13 @@ class BookSearchService {
   );
   static Future<void>? _obsoleteDataRemoval;
 
+  static BookSearchSession openSession(Book book) => BookSearchSession._(book);
+
+  /// Convenience entry for callers that only issue one query. ReaderScreen
+  /// uses [openSession] so repeated submissions reuse the prepared document.
   static Future<List<BookSearchResult>> search(Book book, String rawQuery) {
-    final query = _normalizeForSearch(rawQuery);
-    if (query.isEmpty || book.isPdf || book.chapters.isEmpty) {
-      return Future<List<BookSearchResult>>.value(const <BookSearchResult>[]);
-    }
-    return Isolate.run(() => _scanBook(book, query));
+    final session = openSession(book);
+    return session.search(rawQuery).whenComplete(session.dispose);
   }
 
   /// Removes files created by older releases. The current search path never
@@ -67,53 +74,86 @@ class BookSearchService {
     }();
   }
 
-  static List<BookSearchResult> _scanBook(Book book, String query) {
-    final results = <BookSearchResult>[];
+  static _SearchDocument _prepareDocument(Book book) {
+    final chapters = <_SearchChapter>[];
     for (
       var chapterIndex = 0;
       chapterIndex < book.chapters.length;
       chapterIndex++
     ) {
       final chapter = book.chapters[chapterIndex];
+      final paragraphs = <_SearchParagraph>[];
       var paragraphIndex = 0;
       for (final rawParagraph in chapter.content.split(
         _paragraphBreakPattern,
       )) {
         final paragraph = _readerParagraphBody(rawParagraph);
         if (paragraph.isEmpty) continue;
+        paragraphs.add(
+          _SearchParagraph(
+            index: paragraphIndex,
+            source: paragraph,
+            normalized: _normalizeForSearch(paragraph),
+          ),
+        );
+        paragraphIndex++;
+      }
+      chapters.add(
+        _SearchChapter(
+          index: chapterIndex,
+          title: chapter.title,
+          paragraphs: paragraphs,
+        ),
+      );
+    }
+    return _SearchDocument(chapters);
+  }
 
-        final searchable = _normalizeForSearch(paragraph);
+  static List<BookSearchResult> _scanDocument(
+    _SearchDocument document,
+    String query,
+  ) {
+    final results = <BookSearchResult>[];
+    for (final chapter in document.chapters) {
+      for (final paragraph in chapter.paragraphs) {
+        final searchable = paragraph.normalized;
         var matchOffset = searchable.indexOf(query);
         while (matchOffset >= 0) {
           final range = _sourceRangeForNormalizedMatch(
-            paragraph,
+            paragraph.source,
             matchOffset,
             matchOffset + query.length,
           );
           final snippetStart = _safeSubstringStart(
-            paragraph,
-            (range.start - 28).clamp(0, paragraph.length),
+            paragraph.source,
+            (range.start - 28).clamp(0, paragraph.source.length),
           );
           final snippetEnd = _safeSubstringEnd(
-            paragraph,
-            (range.end + 42).clamp(0, paragraph.length),
+            paragraph.source,
+            (range.end + 42).clamp(0, paragraph.source.length),
           );
+          final hasLeadingEllipsis = snippetStart > 0;
+          final hasTrailingEllipsis = snippetEnd < paragraph.source.length;
+          final snippet =
+              '${hasLeadingEllipsis ? '…' : ''}${paragraph.source.substring(snippetStart, snippetEnd)}${hasTrailingEllipsis ? '…' : ''}';
+          final snippetMatchStart =
+              (hasLeadingEllipsis ? 1 : 0) + range.start - snippetStart;
           results.add(
             BookSearchResult(
-              chapterIndex: chapterIndex,
-              paragraphIndex: paragraphIndex,
+              chapterIndex: chapter.index,
+              paragraphIndex: paragraph.index,
               characterOffset: range.start,
               chapterTitle: chapter.title,
-              snippet:
-                  '${snippetStart > 0 ? '…' : ''}${paragraph.substring(snippetStart, snippetEnd)}${snippetEnd < paragraph.length ? '…' : ''}',
-              matchedText: paragraph.substring(range.start, range.end),
+              snippet: snippet,
+              matchedText: paragraph.source.substring(range.start, range.end),
+              snippetMatchStart: snippetMatchStart,
+              snippetMatchEnd: snippetMatchStart + range.end - range.start,
             ),
           );
           if (results.length >= maxResults) return results;
           final nextStart = matchOffset + query.length;
           matchOffset = searchable.indexOf(query, nextStart);
         }
-        paragraphIndex++;
       }
     }
     return results;
@@ -215,4 +255,199 @@ class BookSearchService {
       rune == 0x205f ||
       rune == 0x3000 ||
       rune == 0xfeff;
+}
+
+class BookSearchSession {
+  final Book _book;
+  Future<_BookSearchWorker>? _worker;
+  bool _disposed = false;
+
+  BookSearchSession._(this._book);
+
+  Future<List<BookSearchResult>> search(String rawQuery) async {
+    if (_disposed) throw StateError('搜索会话已关闭');
+    final query = BookSearchService._normalizeForSearch(rawQuery);
+    if (query.isEmpty || _book.isPdf || _book.chapters.isEmpty) {
+      return const <BookSearchResult>[];
+    }
+    final worker = await (_worker ??= _BookSearchWorker.start(_book));
+    if (_disposed) {
+      worker.dispose();
+      throw StateError('搜索会话已关闭');
+    }
+    return worker.search(query);
+  }
+
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    final worker = _worker;
+    if (worker == null) return;
+    unawaited(
+      worker.then(
+        (value) => value.dispose(),
+        onError: (Object _, StackTrace _) {},
+      ),
+    );
+  }
+}
+
+class _BookSearchWorker {
+  final Isolate _isolate;
+  final SendPort _commands;
+  final Set<_PendingSearch> _pending = <_PendingSearch>{};
+  bool _disposed = false;
+
+  _BookSearchWorker(this._isolate, this._commands);
+
+  static Future<_BookSearchWorker> start(Book book) async {
+    final readyPort = ReceivePort();
+    final errorPort = ReceivePort();
+    final exitPort = ReceivePort();
+    final isolate = await Isolate.spawn<List<Object>>(
+      _bookSearchWorkerMain,
+      <Object>[readyPort.sendPort, book],
+      onError: errorPort.sendPort,
+      onExit: exitPort.sendPort,
+    );
+    try {
+      final signal = await Future.any<Object>([
+        readyPort.first.then<Object>((value) => value as Object),
+        errorPort.first.then<Object>(
+          (error) => _WorkerStartupFailure('搜索 worker 启动失败：$error'),
+        ),
+        exitPort.first.then<Object>(
+          (_) => const _WorkerStartupFailure('搜索 worker 在初始化前退出'),
+        ),
+      ]);
+      if (signal case final SendPort commands) {
+        return _BookSearchWorker(isolate, commands);
+      }
+      isolate.kill(priority: Isolate.immediate);
+      throw StateError((signal as _WorkerStartupFailure).message);
+    } finally {
+      readyPort.close();
+      errorPort.close();
+      exitPort.close();
+    }
+  }
+
+  Future<List<BookSearchResult>> search(String query) {
+    if (_disposed) {
+      return Future<List<BookSearchResult>>.error(StateError('搜索 worker 已关闭'));
+    }
+    final responsePort = ReceivePort();
+    final completer = Completer<List<BookSearchResult>>();
+    late final _PendingSearch pending;
+    late final StreamSubscription<Object?> subscription;
+    subscription = responsePort.listen((message) {
+      if (completer.isCompleted) return;
+      if (message case [true, final List<Object?> rawResults]) {
+        completer.complete(rawResults.cast<BookSearchResult>());
+      } else if (message case [false, final Object error]) {
+        completer.completeError(StateError(error.toString()));
+      } else {
+        completer.completeError(StateError('搜索 worker 返回了无效结果'));
+      }
+      pending.close();
+      _pending.remove(pending);
+    });
+    pending = _PendingSearch(responsePort, subscription, completer);
+    _pending.add(pending);
+    _commands.send(<Object>[query, responsePort.sendPort]);
+    return completer.future;
+  }
+
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    for (final pending in _pending.toList(growable: false)) {
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(StateError('搜索会话已关闭'));
+      }
+      pending.close();
+    }
+    _pending.clear();
+    _commands.send(null);
+    _isolate.kill(priority: Isolate.beforeNextEvent);
+  }
+}
+
+class _PendingSearch {
+  final ReceivePort port;
+  final StreamSubscription<Object?> subscription;
+  final Completer<List<BookSearchResult>> completer;
+
+  const _PendingSearch(this.port, this.subscription, this.completer);
+
+  void close() {
+    unawaited(subscription.cancel());
+    port.close();
+  }
+}
+
+class _WorkerStartupFailure {
+  final String message;
+
+  const _WorkerStartupFailure(this.message);
+}
+
+class _SearchDocument {
+  final List<_SearchChapter> chapters;
+
+  const _SearchDocument(this.chapters);
+}
+
+class _SearchChapter {
+  final int index;
+  final String title;
+  final List<_SearchParagraph> paragraphs;
+
+  const _SearchChapter({
+    required this.index,
+    required this.title,
+    required this.paragraphs,
+  });
+}
+
+class _SearchParagraph {
+  final int index;
+  final String source;
+  final String normalized;
+
+  const _SearchParagraph({
+    required this.index,
+    required this.source,
+    required this.normalized,
+  });
+}
+
+void _bookSearchWorkerMain(List<Object> arguments) {
+  final readyPort = arguments[0] as SendPort;
+  final book = arguments[1] as Book;
+  final document = BookSearchService._prepareDocument(book);
+  final commands = ReceivePort();
+  readyPort.send(commands.sendPort);
+  commands.listen((message) {
+    if (message == null) {
+      commands.close();
+      return;
+    }
+    if (message is! List ||
+        message.length != 2 ||
+        message[0] is! String ||
+        message[1] is! SendPort) {
+      return;
+    }
+    final query = message[0] as String;
+    final response = message[1] as SendPort;
+    try {
+      response.send(<Object>[
+        true,
+        BookSearchService._scanDocument(document, query),
+      ]);
+    } on Object catch (error, stackTrace) {
+      response.send(<Object>[false, '$error\n$stackTrace']);
+    }
+  });
 }

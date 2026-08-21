@@ -24,7 +24,7 @@
 
 ## 代码范围
 
-- `lib/screens/library_screen.dart`：书架、导入、书卡操作、后台字数任务和整理顺序。
+- `lib/screens/library_screen.dart`：书架、导入、书卡操作、整理顺序、延迟存储维护和可选更新检查。
 - `lib/screens/reader_screen.dart`：TXT、EPUB、DOCX、DOC 共用的小说阅读器。
 - `lib/screens/pdf_reader_screen.dart`：PDF 固定版式逐页阅读器。
 - `lib/services/`：文件解析、搜索、字数、字体、存储、PDF 渲染和系统外部应用桥接。
@@ -40,7 +40,8 @@
 - 书籍和阅读数据保持本地离线，不上传正文。
 - 同一设置、进度或目录状态的异步写入按键串行，旧写入不能覆盖新状态。
 - 删除书籍后，仍在运行的字数或进度任务不能重新写回该书数据。
-- 书籍元数据与分章正文分开存储；后台字数只在源文件大小、解析版本、章节数和格式均匹配时写回。
+- 书籍元数据与章节正文载荷分开存储；书架启动不为缺失字数逐本加载正文。打开未统计书籍时只扫描一次各章正文，全文字数由分章结果求和，并且只在源文件大小、解析版本、章节数和格式均匹配时原子写回两项统计。
+- 书架首屏完成后延迟扫描 `books/`、`epub/` 和 `pdf/`；只清理失去 metadata 引用且超过 24 小时的私有载荷。
 - 删除 EPUB 同步清理应用私有图片目录；删除 PDF 同步清理受管理源文件和原生页面缓存。
 
 ### 小说阅读器
@@ -77,14 +78,16 @@
 - 外部 CSS 文本、解析规则和元素声明在一次导入内缓存；相邻同样式文本合并，结构化块落盘时不重复保存完整纯文本副本。
 - EPUB 输出结构化正文块并在加载时恢复搜索、字数和字符定位所需的纯文本；它与 TXT 共用阅读页面和手势。
 - EPUB 只解析包内相对资源和 base64 图片，不加载网络资源。
+- EPUB 在读取压缩包前限制输入为 256 MB，展开后总量限制为 512 MB；单张图片限制为 64 MB，data URI 在 Base64 解码前先校验编码长度对应的最大体积。
 - PDF 使用独立固定版式页面阅读器，原生渲染任务按文件、页码和目标宽度缓存；缓存数量有上限，失败任务可重试，页面位图始终释放。
 
 ### 搜索与外部应用
 
-- TXT、EPUB、DOCX 和 DOC 每次提交搜索关键词时都在后台 isolate 扫描当前书籍章节，最多返回 500 条。
-- 搜索结果以章节、段落和原始 UTF-16 字符位置作为跳转锚点。
+- TXT、EPUB、DOCX 和 DOC 的搜索面板使用一个按面板生命周期存在的后台 isolate；书籍只在首次查询时传入一次，后续关键词复用已规范化的段落结构，最多返回 500 条。
+- 搜索结果以章节、段落和原始 UTF-16 字符位置作为跳转锚点；摘要高亮使用 worker 返回的原文范围，不能用未规范化 query 二次查找。
 - 翻译和网页搜索目标由 Android 系统查询真实可处理 Intent 的应用，Flutter 只展示允许的 AI 应用及 Edge、Chrome、系统浏览器。
 - 记住的默认目标在启动前再次校验；启动失败时清除失效默认值并重新显示选择界面。
+- 自动检查更新默认关闭；只有用户手动检查或自行开启开关时才连接 GitHub Releases。
 
 ## Markdown 同步
 
@@ -104,7 +107,8 @@
 - 阅读页变更必须保护当前章节、当前视口正文位置、每章独立进度和跨章保存顺序。
 - 菜单、主题、字体、排版与阅读模式变化不能把正文重置到章节顶部。
 - 异步存储只允许最新状态覆盖同一数据项；已删除书籍的后台任务不得重新写回元数据或进度。
-- 当前项目包含 `test/parser_sanity_test.dart`、`test/update_service_test.dart` 和 `flutter_test` 依赖。未经用户明确要求，不新增自动化测试，也不以测试数量作为交付结论。
+- 当前项目包含 `test/parser_sanity_test.dart`、`test/update_service_test.dart`、`test/storage_service_test.dart`、`test/book_search_service_test.dart`、`test/word_count_service_test.dart` 和 `flutter_test` 依赖。未经用户明确要求，不新增自动化测试，也不以测试数量作为交付结论。
+- `.github/workflows/flutter.yml` 在 push 到 `main` 或创建拉取请求时执行依赖解析、`flutter analyze --no-pub` 和 `flutter test --no-pub`。
 - Dart、Flutter、Android、原生代码或工程结构变更后至少执行 `flutter analyze`、现有 `flutter test`，并构建 Android arm64 release APK。
 - 交付前核对公开版本、ABI、最低系统、APK 文件名、实际体积和 SHA-256，并再次盘点全部 Markdown。
 

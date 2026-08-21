@@ -78,6 +78,95 @@ void main() {
   });
 
   group('epub parser', () {
+    test('compressed input is rejected before ZIP decoding', () async {
+      final dir = Directory.systemTemp.createTempSync('readvibe_epub_limit_');
+      addTearDown(() {
+        try {
+          if (dir.existsSync()) dir.deleteSync(recursive: true);
+        } on FileSystemException {
+          // Temp cleanup is best-effort on Windows.
+        }
+      });
+      final epubFile = File('${dir.path}/oversized.epub')
+        ..writeAsBytesSync(List<int>.filled(9, 0));
+
+      await expectLater(
+        parseEpub(
+          epubFile.path,
+          'oversized.epub',
+          StorageService(documentsDirectory: dir),
+          limits: const EpubParseLimits(maxInputBytes: 8),
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.message,
+            'message',
+            contains('文件过大'),
+          ),
+        ),
+      );
+    });
+
+    test('oversized data URI image is ignored before decoding', () async {
+      final imagePayload = base64Encode(<int>[
+        0x89,
+        0x50,
+        0x4e,
+        0x47,
+        0x0d,
+        0x0a,
+        0x1a,
+        0x0a,
+      ]);
+      final archive = Archive()
+        ..addFile(
+          _f('META-INF/container.xml', '''
+<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>'''),
+        )
+        ..addFile(
+          _f('OEBPS/content.opf', '''
+<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>图片限额</dc:title></metadata>
+  <manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>'''),
+        )
+        ..addFile(
+          _f(
+            'OEBPS/c1.xhtml',
+            '''
+<html><body><p>保留正文。</p><img src="data:image/png;base64,$imagePayload"/></body></html>''',
+          ),
+        );
+      final dir = Directory.systemTemp.createTempSync('readvibe_epub_data_');
+      addTearDown(() {
+        try {
+          if (dir.existsSync()) dir.deleteSync(recursive: true);
+        } on FileSystemException {
+          // Temp cleanup is best-effort on Windows.
+        }
+      });
+      final epubFile = File('${dir.path}/data-image.epub')
+        ..writeAsBytesSync(ZipEncoder().encode(archive));
+
+      final book = await parseEpub(
+        epubFile.path,
+        'data-image.epub',
+        StorageService(documentsDirectory: dir),
+        limits: const EpubParseLimits(maxSingleImageBytes: 4),
+      );
+
+      expect(book.chapters.single.content, contains('保留正文'));
+      expect(
+        book.chapters.single.epubBlocks.where((block) => block.isImage),
+        isEmpty,
+      );
+    });
+
     test('inline-wrapped and mixed content is recovered', () async {
       final archive = Archive()
         ..addFile(_f('META-INF/container.xml', '''

@@ -80,7 +80,7 @@ extension SimulationPageTurnEffectInfo on SimulationPageTurnEffect {
 }
 
 class ReaderSettings {
-  static const schemaVersion = 5;
+  static const schemaVersion = 6;
   static const systemFontFamily = 'system';
   static const builtinSerifFamily = 'SourceHanSerifSC';
 
@@ -96,6 +96,7 @@ class ReaderSettings {
   final ReaderParagraphSpacing paragraphSpacing;
   final ReaderReadingMode readingMode;
   final SimulationPageTurnEffect simulationPageTurnEffect;
+  final bool automaticUpdateChecks;
 
   const ReaderSettings({
     this.fontSize = 20.0,
@@ -110,6 +111,7 @@ class ReaderSettings {
     this.paragraphSpacing = ReaderParagraphSpacing.none,
     this.readingMode = ReaderReadingMode.chapter,
     this.simulationPageTurnEffect = SimulationPageTurnEffect.simulation,
+    this.automaticUpdateChecks = false,
   });
 
   bool get usesSystemFont => fontFamily == systemFontFamily;
@@ -163,6 +165,7 @@ class ReaderSettings {
     ReaderParagraphSpacing? paragraphSpacing,
     ReaderReadingMode? readingMode,
     SimulationPageTurnEffect? simulationPageTurnEffect,
+    bool? automaticUpdateChecks,
     bool clearImportedFont = false,
   }) {
     return ReaderSettings(
@@ -185,6 +188,8 @@ class ReaderSettings {
       readingMode: readingMode ?? this.readingMode,
       simulationPageTurnEffect:
           simulationPageTurnEffect ?? this.simulationPageTurnEffect,
+      automaticUpdateChecks:
+          automaticUpdateChecks ?? this.automaticUpdateChecks,
     );
   }
 
@@ -202,6 +207,7 @@ class ReaderSettings {
     'paragraphSpacing': paragraphSpacing.name,
     'readingMode': readingMode.name,
     'simulationPageTurnEffect': simulationPageTurnEffect.name,
+    'automaticUpdateChecks': automaticUpdateChecks,
   };
 
   factory ReaderSettings.fromJson(Map<String, dynamic> json) {
@@ -261,6 +267,7 @@ class ReaderSettings {
             ? SimulationPageTurnEffect.smooth
             : SimulationPageTurnEffect.simulation,
       ),
+      automaticUpdateChecks: json['automaticUpdateChecks'] == true,
     );
   }
 }

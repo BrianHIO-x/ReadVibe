@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -16,7 +15,6 @@ import '../services/epub_parser.dart';
 import '../services/pdf_import_service.dart';
 import '../services/book_search_service.dart';
 import '../services/word_parser.dart';
-import '../services/word_count_service.dart';
 import '../services/update_service.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
@@ -60,9 +58,10 @@ class _LibraryScreenState extends State<LibraryScreen>
   bool _openingBook = false;
   bool _settingsOpen = false;
   int _loadSerial = 0;
-  final Queue<String> _wordCountQueue = Queue<String>();
-  final Set<String> _queuedWordCountBookIds = <String>{};
-  bool _wordCountWorkerRunning = false;
+  Timer? _automaticUpdateTimer;
+  Timer? _storageMaintenanceTimer;
+  bool _automaticUpdateAttempted = false;
+  bool _storageMaintenanceScheduled = false;
 
   late final AnimationController _gridEntranceController;
   late final AnimationController _emptyIconController;
@@ -92,19 +91,25 @@ class _LibraryScreenState extends State<LibraryScreen>
       duration: const Duration(milliseconds: 2400),
     );
     _gridScrollController.addListener(_handleGridScroll);
-    unawaited(BookSearchService.removeObsoleteData(_storage));
     _loadData();
-    _scheduleUpdateCheck();
   }
 
   /// Silent GitHub release check once the shelf has settled. A dismissed
   /// version stays quiet for three days so offline reading is never nagged.
-  void _scheduleUpdateCheck() {
-    Timer(const Duration(seconds: 2), () async {
+  void _syncAutomaticUpdateCheck() {
+    if (!_settings.automaticUpdateChecks) {
+      _automaticUpdateTimer?.cancel();
+      _automaticUpdateTimer = null;
+      return;
+    }
+    if (_automaticUpdateAttempted || _automaticUpdateTimer != null) return;
+    _automaticUpdateTimer = Timer(const Duration(seconds: 2), () async {
+      _automaticUpdateTimer = null;
+      _automaticUpdateAttempted = true;
       if (!mounted) return;
       final result = await UpdateService().checkForUpdate();
       final info = result.info;
-      if (!mounted || info == null) return;
+      if (!mounted || !_settings.automaticUpdateChecks || info == null) return;
       final prefs = await SharedPreferences.getInstance();
       final dismissedKey = 'update_dismissed_${info.version}';
       final dismissedAt = prefs.getInt(dismissedKey) ?? 0;
@@ -112,7 +117,30 @@ class _LibraryScreenState extends State<LibraryScreen>
       if (quietDays < const Duration(days: 3).inMilliseconds) return;
       if (!mounted) return;
       await _showUpdateDialog(info);
-      unawaited(prefs.setInt(dismissedKey, DateTime.now().millisecondsSinceEpoch));
+      unawaited(
+        prefs.setInt(dismissedKey, DateTime.now().millisecondsSinceEpoch),
+      );
+    });
+  }
+
+  void _scheduleStorageMaintenance() {
+    if (_storageMaintenanceScheduled) return;
+    _storageMaintenanceScheduled = true;
+    _storageMaintenanceTimer = Timer(const Duration(seconds: 30), () async {
+      _storageMaintenanceTimer = null;
+      try {
+        await BookSearchService.removeObsoleteData(_storage);
+        final result = await _storage.collectOrphanedData();
+        if (result.removedEntries > 0) {
+          debugPrint(
+            'Storage maintenance removed ${result.removedFiles} files and '
+            '${result.removedDirectories} directories.',
+          );
+        }
+      } on Object catch (error, stackTrace) {
+        debugPrint('Storage maintenance failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      }
     });
   }
 
@@ -164,6 +192,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   void dispose() {
     _loadSerial++;
+    _automaticUpdateTimer?.cancel();
+    _storageMaintenanceTimer?.cancel();
     _reorderFocusTimer?.cancel();
     _gridScrollController.removeListener(_handleGridScroll);
     _gridScrollController.dispose();
@@ -214,70 +244,14 @@ class _LibraryScreenState extends State<LibraryScreen>
             _emptyIconController.repeat(reverse: true);
           }
         }
-        _scheduleMissingWordCounts(books);
+        _syncAutomaticUpdateCheck();
+        _scheduleStorageMaintenance();
       }
     } catch (e) {
       debugPrint('Failed to load library: $e');
       if (mounted && serial == _loadSerial) {
         setState(() => _loading = false);
         _showError('书架加载失败，请重新打开应用后重试');
-      }
-    }
-  }
-
-  void _scheduleMissingWordCounts(Iterable<Book> books) {
-    for (final book in books) {
-      if (book.isPdf ||
-          book.wordCount != null ||
-          !_queuedWordCountBookIds.add(book.id)) {
-        continue;
-      }
-      _wordCountQueue.addLast(book.id);
-    }
-    if (!_wordCountWorkerRunning && _wordCountQueue.isNotEmpty) {
-      unawaited(_drainWordCountQueue());
-    }
-  }
-
-  Future<void> _drainWordCountQueue() async {
-    if (_wordCountWorkerRunning) return;
-    _wordCountWorkerRunning = true;
-    try {
-      while (_wordCountQueue.isNotEmpty) {
-        final bookId = _wordCountQueue.removeFirst();
-        try {
-          if (!mounted || !_books.any((book) => book.id == bookId)) continue;
-          final book = await _storage.getBook(bookId);
-          if (book == null) continue;
-          final wordCount = await WordCountService().count(book);
-          await _storage.saveBookWordCount(book, wordCount);
-          if (!mounted) continue;
-          final index = _books.indexWhere((item) => item.id == bookId);
-          final current = index >= 0 ? _books[index] : null;
-          final sameRevision =
-              current != null &&
-              current.fileSize == book.fileSize &&
-              current.txtParserVersion == book.txtParserVersion &&
-              current.chapterCount == book.chapterCount &&
-              current.format == book.format;
-          if (sameRevision && current.wordCount != wordCount) {
-            setState(() {
-              _books[index] = _books[index].copyWith(wordCount: wordCount);
-            });
-          }
-        } on Object catch (error, stackTrace) {
-          // Word count is supplemental shelf metadata. A damaged book must not
-          // block opening another book or interrupt normal shelf interaction.
-          debugPrint('Failed to count book text for $bookId: $error');
-          debugPrintStack(stackTrace: stackTrace);
-        } finally {
-          _queuedWordCountBookIds.remove(bookId);
-        }
-      }
-    } finally {
-      _wordCountWorkerRunning = false;
-      if (mounted && _wordCountQueue.isNotEmpty) {
-        unawaited(_drainWordCountQueue());
       }
     }
   }
@@ -554,6 +528,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                       onChange: (newSettings) {
                         setSheetState(() => sheetSettings = newSettings);
                         if (mounted) setState(() => _settings = newSettings);
+                        _syncAutomaticUpdateCheck();
                         _persistSettings(newSettings);
                       },
                       onImportFont: () async {

@@ -81,12 +81,15 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
     }
   }
 
-  /// Renders a result snippet with every occurrence of the submitted keyword
-  /// painted in the accent colour, so the match is visible at a glance.
-  Widget _buildHighlightedSnippet(String snippet) {
+  /// Uses the exact source range returned by the search worker. This remains
+  /// correct when a match only exists after newlines, full-width spaces or
+  /// repeated whitespace have been normalized.
+  Widget _buildHighlightedSnippet(BookSearchResult result) {
+    final snippet = result.snippet;
     final baseStyle = TextStyle(color: widget.colors.secondary);
-    final query = _controller.text.trim();
-    if (query.isEmpty) {
+    final matchStart = result.snippetMatchStart.clamp(0, snippet.length);
+    final matchEnd = result.snippetMatchEnd.clamp(matchStart, snippet.length);
+    if (matchStart == matchEnd) {
       return Text(
         snippet,
         maxLines: 2,
@@ -98,35 +101,15 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
       color: widget.colors.accent,
       fontWeight: FontWeight.w700,
     );
-    final lowerSnippet = snippet.toLowerCase();
-    final lowerQuery = query.toLowerCase();
-    final spans = <TextSpan>[];
-    var start = 0;
-    while (start <= snippet.length) {
-      final match = lowerSnippet.indexOf(lowerQuery, start);
-      if (match < 0) break;
-      if (match > start) {
-        spans.add(TextSpan(text: snippet.substring(start, match)));
-      }
-      spans.add(
-        TextSpan(
-          text: snippet.substring(match, match + query.length),
-          style: highlightStyle,
-        ),
-      );
-      start = match + query.length;
-    }
-    if (start < snippet.length) {
-      spans.add(TextSpan(text: snippet.substring(start)));
-    }
-    if (spans.isEmpty) {
-      return Text(
-        snippet,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: baseStyle,
-      );
-    }
+    final spans = <TextSpan>[
+      if (matchStart > 0) TextSpan(text: snippet.substring(0, matchStart)),
+      TextSpan(
+        text: snippet.substring(matchStart, matchEnd),
+        style: highlightStyle,
+      ),
+      if (matchEnd < snippet.length)
+        TextSpan(text: snippet.substring(matchEnd)),
+    ];
     return RichText(
       maxLines: 2,
       overflow: TextOverflow.ellipsis,
@@ -278,9 +261,7 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
                                 ),
                                 subtitle: Padding(
                                   padding: const EdgeInsets.only(top: 5),
-                                  child: _buildHighlightedSnippet(
-                                    result.snippet,
-                                  ),
+                                  child: _buildHighlightedSnippet(result),
                                 ),
                                 trailing: Icon(
                                   Icons.chevron_right_rounded,
