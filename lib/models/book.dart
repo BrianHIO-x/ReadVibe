@@ -25,7 +25,7 @@ bool isStandaloneChapterTitle(String title) =>
     isIntroductoryChapterTitle(title) ||
     _standaloneTailTitlePattern.hasMatch(title.trim());
 
-enum BookFormat { txt, epub, docx, doc, pdf }
+enum BookFormat { txt, epub, mobi, azw, azw3, docx, doc, pdf }
 
 enum BookAvailability {
   available,
@@ -55,6 +55,7 @@ enum EpubContentBlockKind { text, image }
 /// publisher layout without using a second WebView-based reader. Font sizes,
 /// line heights and spacing are relative to the user's reader settings.
 class EpubContentStyle {
+  final String? fontFamily;
   final double fontScale;
   final int fontWeight;
   final bool italic;
@@ -70,6 +71,7 @@ class EpubContentStyle {
   final String? backgroundImagePath;
 
   const EpubContentStyle({
+    this.fontFamily,
     this.fontScale = 1,
     this.fontWeight = 400,
     this.italic = false,
@@ -126,6 +128,8 @@ class Chapter {
   final String _content;
   final String? volumeTitle;
   final List<EpubContentBlock> _epubBlocks;
+  final int? _storedEpubBlockCount;
+  final bool? _storedHasSemanticHeading;
 
   const Chapter({
     required this.index,
@@ -133,14 +137,35 @@ class Chapter {
     required String content,
     this.volumeTitle,
     List<EpubContentBlock> epubBlocks = const <EpubContentBlock>[],
+    int? epubBlockCount,
+    bool? hasSemanticHeading,
   }) : _content = content,
-       _epubBlocks = epubBlocks;
+       _epubBlocks = epubBlocks,
+       _storedEpubBlockCount = epubBlockCount,
+       _storedHasSemanticHeading = hasSemanticHeading;
 
   String get content => _content;
 
   List<EpubContentBlock> get epubBlocks => _epubBlocks;
 
   bool get hasRichEpubContent => epubBlocks.isNotEmpty;
+
+  int get epubBlockCount => epubBlocks.isNotEmpty
+      ? epubBlocks.length
+      : (_storedEpubBlockCount ?? 0).clamp(0, 0x7fffffff);
+
+  bool get hasKnownEpubBlockCount =>
+      epubBlocks.isNotEmpty || _storedEpubBlockCount != null;
+
+  bool get hasSemanticHeading =>
+      _storedHasSemanticHeading ??
+      epubBlocks.any(
+        (block) =>
+            block.isText && block.isHeading && block.text.trim().isNotEmpty,
+      );
+
+  bool get hasKnownSemanticHeading =>
+      epubBlocks.isNotEmpty || _storedHasSemanticHeading != null;
 }
 
 class Book {
@@ -158,6 +183,7 @@ class Book {
   final String? sourcePath;
   final String? coverImagePath;
   final int? pageCount;
+  final Map<String, String> embeddedFonts;
 
   const Book({
     required this.id,
@@ -174,6 +200,7 @@ class Book {
     this.sourcePath,
     this.coverImagePath,
     this.pageCount,
+    this.embeddedFonts = const <String, String>{},
   }) : _storedChapterCount = chapterCount;
 
   bool get isPdf => format == BookFormat.pdf;
@@ -196,22 +223,25 @@ class Book {
     if (sourcePath != null) 'sourcePath': sourcePath,
     if (coverImagePath != null) 'coverImagePath': coverImagePath,
     if (pageCount != null) 'pageCount': pageCount,
+    if (embeddedFonts.isNotEmpty) 'embeddedFonts': embeddedFonts,
     // Note: chapters are stored separately to reduce JSON size
     'chapterCount': chapterCount,
   };
 
   Book copyWith({
     String? title,
+    String? author,
     int? wordCount,
     List<int>? chapterWordCounts,
     String? sourcePath,
     String? coverImagePath,
     int? pageCount,
+    Map<String, String>? embeddedFonts,
   }) {
     return Book(
       id: id,
       title: title ?? this.title,
-      author: author,
+      author: author ?? this.author,
       format: format,
       chapters: chapters,
       chapterCount: chapterCount,
@@ -223,6 +253,7 @@ class Book {
       sourcePath: sourcePath ?? this.sourcePath,
       coverImagePath: coverImagePath ?? this.coverImagePath,
       pageCount: pageCount ?? this.pageCount,
+      embeddedFonts: embeddedFonts ?? this.embeddedFonts,
     );
   }
 
@@ -286,6 +317,21 @@ class Book {
         rawCoverImagePath is String && rawCoverImagePath.trim().isNotEmpty
         ? rawCoverImagePath.trim()
         : null;
+    final embeddedFonts = <String, String>{};
+    final rawEmbeddedFonts = json['embeddedFonts'];
+    if (rawEmbeddedFonts is Map) {
+      for (final entry in rawEmbeddedFonts.entries) {
+        final family = entry.key;
+        final path = entry.value;
+        if (family is String &&
+            family.trim().isNotEmpty &&
+            family.length <= 160 &&
+            path is String &&
+            path.trim().isNotEmpty) {
+          embeddedFonts[family.trim()] = path.trim();
+        }
+      }
+    }
 
     return Book(
       id: id,
@@ -305,6 +351,7 @@ class Book {
       sourcePath: sourcePath,
       coverImagePath: coverImagePath,
       pageCount: pageCount,
+      embeddedFonts: Map<String, String>.unmodifiable(embeddedFonts),
     );
   }
 }

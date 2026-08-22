@@ -1,5 +1,5 @@
 name: readvibe
-description: "ReadVibe - a private, offline TXT, EPUB, PDF, DOCX, and DOC reader."
+description: "ReadVibe - a private, offline TXT, EPUB, MOBI/AZW, PDF, DOCX, and DOC reader."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -39,6 +39,8 @@ dependencies:
   path: ^1.9.0
   fast_gbk: ^1.0.0
   dart3_big5: ^0.1.1
+  dart_mobi: ^1.0.2
+  crypto: ^3.0.7
   html: ^0.15.6
   xml: ^7.0.1
   wakelock_plus: ^1.5.2

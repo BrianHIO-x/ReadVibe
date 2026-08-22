@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:isolate';
 
@@ -75,41 +76,34 @@ class BookSearchService {
   }
 
   static _SearchDocument _prepareDocument(Book book) {
-    final chapters = <_SearchChapter>[];
-    for (
-      var chapterIndex = 0;
-      chapterIndex < book.chapters.length;
-      chapterIndex++
-    ) {
-      final chapter = book.chapters[chapterIndex];
-      final paragraphs = <_SearchParagraph>[];
-      var paragraphIndex = 0;
-      final rawParagraphs = chapter.hasRichEpubContent
-          ? chapter.epubBlocks
-                .where((block) => block.isText && block.text.trim().isNotEmpty)
-                .map((block) => block.text)
-          : chapter.content.split(_paragraphBreakPattern);
-      for (final rawParagraph in rawParagraphs) {
-        final paragraph = _readerParagraphBody(rawParagraph);
-        if (paragraph.isEmpty) continue;
-        paragraphs.add(
-          _SearchParagraph(
-            index: paragraphIndex,
-            source: paragraph,
-            normalized: _normalizeForSearch(paragraph),
-          ),
-        );
-        paragraphIndex++;
-      }
-      chapters.add(
-        _SearchChapter(
-          index: chapterIndex,
-          title: chapter.title,
-          paragraphs: paragraphs,
+    return _SearchDocument(book);
+  }
+
+  static _SearchChapter _prepareChapter(Chapter chapter, int chapterIndex) {
+    final paragraphs = <_SearchParagraph>[];
+    var paragraphIndex = 0;
+    final rawParagraphs = chapter.hasRichEpubContent
+        ? chapter.epubBlocks
+              .where((block) => block.isText && block.text.trim().isNotEmpty)
+              .map((block) => block.text)
+        : chapter.content.split(_paragraphBreakPattern);
+    for (final rawParagraph in rawParagraphs) {
+      final paragraph = _readerParagraphBody(rawParagraph);
+      if (paragraph.isEmpty) continue;
+      paragraphs.add(
+        _SearchParagraph(
+          index: paragraphIndex,
+          source: paragraph,
+          normalized: _normalizeForSearch(paragraph),
         ),
       );
+      paragraphIndex++;
     }
-    return _SearchDocument(chapters);
+    return _SearchChapter(
+      index: chapterIndex,
+      title: chapter.title,
+      paragraphs: paragraphs,
+    );
   }
 
   static List<BookSearchResult> _scanDocument(
@@ -117,7 +111,12 @@ class BookSearchService {
     String query,
   ) {
     final results = <BookSearchResult>[];
-    for (final chapter in document.chapters) {
+    for (
+      var chapterIndex = 0;
+      chapterIndex < document.chapterCount;
+      chapterIndex++
+    ) {
+      final chapter = document.chapterAt(chapterIndex);
       for (final paragraph in chapter.paragraphs) {
         final searchable = paragraph.normalized;
         var matchOffset = searchable.indexOf(query);
@@ -396,9 +395,47 @@ class _WorkerStartupFailure {
 }
 
 class _SearchDocument {
-  final List<_SearchChapter> chapters;
+  static const _maxCachedCharacters = 12 * 1024 * 1024;
 
-  const _SearchDocument(this.chapters);
+  final Book book;
+  final LinkedHashMap<int, _SearchChapter> _cache =
+      LinkedHashMap<int, _SearchChapter>();
+  var _cachedCharacters = 0;
+
+  _SearchDocument(this.book);
+
+  int get chapterCount => book.chapters.length;
+
+  _SearchChapter chapterAt(int index) {
+    final cached = _cache.remove(index);
+    if (cached != null) {
+      _cache[index] = cached;
+      return cached;
+    }
+    final chapter = BookSearchService._prepareChapter(
+      book.chapters[index],
+      index,
+    );
+    final characters = chapter.paragraphs.fold<int>(
+      0,
+      (sum, paragraph) =>
+          sum + paragraph.source.length + paragraph.normalized.length,
+    );
+    if (characters <= _maxCachedCharacters) {
+      while (_cachedCharacters + characters > _maxCachedCharacters &&
+          _cache.isNotEmpty) {
+        final oldest = _cache.remove(_cache.keys.first)!;
+        _cachedCharacters -= oldest.paragraphs.fold<int>(
+          0,
+          (sum, paragraph) =>
+              sum + paragraph.source.length + paragraph.normalized.length,
+        );
+      }
+      _cache[index] = chapter;
+      _cachedCharacters += characters;
+    }
+    return chapter;
+  }
 }
 
 class _SearchChapter {

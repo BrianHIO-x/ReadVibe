@@ -78,6 +78,8 @@ Book buildBookFromText({
   required String fileName,
   required BookFormat format,
   required int fileSize,
+  String? title,
+  String? author,
 }) {
   final normalized = content
       .replaceAll('\u0000', '')
@@ -86,18 +88,49 @@ Book buildBookFromText({
     throw FormatException('${format.name.toUpperCase()} 文件没有可阅读的正文');
   }
   final cleanTitle = fileName
-      .replaceAll(RegExp(r'\.(?:txt|docx?|epub)$', caseSensitive: false), '')
+      .replaceAll(
+        RegExp(r'\.(?:txt|docx?|epub|mobi|azw3?)$', caseSensitive: false),
+        '',
+      )
       .trim();
+  final inferred = inferPlainTextMetadata(normalized);
+  final resolvedTitle = title?.trim();
+  final resolvedAuthor = author?.trim();
   final now = DateTime.now();
   return Book(
     id: '${format.name}_${now.microsecondsSinceEpoch}',
-    title: cleanTitle.isEmpty ? '未命名书籍' : cleanTitle,
+    title: resolvedTitle != null && resolvedTitle.isNotEmpty
+        ? resolvedTitle
+        : (cleanTitle.isEmpty ? '未命名书籍' : cleanTitle),
+    author: resolvedAuthor != null && resolvedAuthor.isNotEmpty
+        ? resolvedAuthor
+        : inferred.author,
     format: format,
     chapters: extractTxtChapters(splitTxtLines(normalized)),
     txtParserVersion: currentTxtParserVersion,
     importDate: now,
     fileSize: fileSize,
   );
+}
+
+/// Plain text containers do not define a metadata schema. ReadVibe therefore
+/// accepts only explicit, conventional labels near the beginning of a file;
+/// it never guesses an author from arbitrary prose or from a hyphenated name.
+({String author}) inferPlainTextMetadata(String content) {
+  final lines = splitTxtLines(content).take(40);
+  final authorPattern = RegExp(
+    r'^(?:作\s*者|作者名|撰写|著者|編者|编者)\s*[:：]\s*(.{1,80})$',
+    caseSensitive: false,
+  );
+  for (final rawLine in lines) {
+    final line = _trimTxtLine(rawLine);
+    final match = authorPattern.firstMatch(line);
+    final value = match?.group(1)?.trim() ?? '';
+    if (value.isNotEmpty && !RegExp(r'[。！？!?\n\r]').hasMatch(value)) {
+      return (author: value);
+    }
+  }
+  return (author: '');
 }
 
 /// Splits all common TXT line endings, including Unicode separators used by

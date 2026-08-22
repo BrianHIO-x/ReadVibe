@@ -435,6 +435,16 @@ class ReadingProgress {
 /// PDF uses physical page indexes rather than novel chapters and scroll
 /// offsets. Keeping that state separate avoids coupling fixed-layout documents
 /// to ReaderScreen's chapter migration and per-chapter offset maps.
+enum PdfDisplayTheme { original, paper, dark }
+
+extension PdfDisplayThemeInfo on PdfDisplayTheme {
+  String get label => switch (this) {
+    PdfDisplayTheme.original => '原始色彩',
+    PdfDisplayTheme.paper => '柔和纸张',
+    PdfDisplayTheme.dark => '深色反相',
+  };
+}
+
 class PdfReadingProgress {
   final String bookId;
   final int pageIndex;

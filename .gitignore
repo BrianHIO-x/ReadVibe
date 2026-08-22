@@ -48,5 +48,6 @@ app.*.map.json
 # Local Android release signing material. Back these files up securely; never
 # commit a private key or its passwords.
 /android/key.properties
+/android/ci-release.jks
 /android/app/*.jks
 /android/app/*.keystore

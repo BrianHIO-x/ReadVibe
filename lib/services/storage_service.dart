@@ -8,6 +8,7 @@ import 'dart:math' as math;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:crypto/crypto.dart';
 
 import '../models/book.dart';
 import '../models/reader_settings.dart';
@@ -20,6 +21,7 @@ const _kProgressPrefix = 'readvibe_progress_';
 const _kPdfProgressPrefix = 'readvibe_pdf_progress_';
 const _kPdfBookmarksPrefix = 'readvibe_pdf_bookmarks_';
 const _kPdfNotesPrefix = 'readvibe_pdf_notes_';
+const _kPdfDisplayThemePrefix = 'readvibe_pdf_display_theme_';
 const _kTocCollapsedPrefix = 'readvibe_toc_collapsed_';
 const _kChapterPrefix = 'readvibe_chapters_';
 // Large novels can exceed 10 MB. A two-second deadline was too aggressive on
@@ -43,12 +45,14 @@ class _LazyChapterStore {
   final String chaptersDirectoryPath;
   final List<String> fileNames;
   final List<int?> expectedBytes;
+  final List<String?> expectedDigests;
   final LinkedHashMap<int, Chapter> _cache = LinkedHashMap<int, Chapter>();
 
   _LazyChapterStore({
     required this.chaptersDirectoryPath,
     required this.fileNames,
     required this.expectedBytes,
+    required this.expectedDigests,
   });
 
   Chapter load(int index) {
@@ -66,10 +70,13 @@ class _LazyChapterStore {
         (expected != null && file.lengthSync() != expected)) {
       throw FormatException('章节 ${index + 1} 文件缺失或不完整');
     }
-    final chapter = _chapterFromValue(
-      jsonDecode(file.readAsStringSync(encoding: utf8)),
-      index,
-    );
+    final raw = file.readAsStringSync(encoding: utf8);
+    final expectedDigest = expectedDigests[index];
+    if (expectedDigest != null &&
+        sha256.convert(utf8.encode(raw)).toString() != expectedDigest) {
+      throw FormatException('章节 ${index + 1} 校验失败');
+    }
+    final chapter = _chapterFromValue(jsonDecode(raw), index);
     _cache[index] = chapter;
     while (_cache.length > 8) {
       _cache.remove(_cache.keys.first);
@@ -81,6 +88,8 @@ class _LazyChapterStore {
 class _LazyChapter extends Chapter {
   final _LazyChapterStore store;
   final bool richContent;
+  final int? richBlockCount;
+  final bool? semanticHeading;
 
   _LazyChapter({
     required super.index,
@@ -88,7 +97,13 @@ class _LazyChapter extends Chapter {
     required super.volumeTitle,
     required this.store,
     required this.richContent,
-  }) : super(content: '');
+    required this.richBlockCount,
+    required this.semanticHeading,
+  }) : super(
+         content: '',
+         epubBlockCount: richBlockCount,
+         hasSemanticHeading: semanticHeading,
+       );
 
   @override
   String get content => store.load(index).content;
@@ -98,6 +113,20 @@ class _LazyChapter extends Chapter {
 
   @override
   bool get hasRichEpubContent => richContent;
+
+  @override
+  int get epubBlockCount =>
+      richBlockCount ?? store.load(index).epubBlocks.length;
+
+  @override
+  bool get hasKnownEpubBlockCount => richBlockCount != null;
+
+  @override
+  bool get hasSemanticHeading =>
+      semanticHeading ?? store.load(index).hasSemanticHeading;
+
+  @override
+  bool get hasKnownSemanticHeading => semanticHeading != null;
 }
 
 /// Persists small preferences in SharedPreferences and book content in files.
@@ -213,7 +242,10 @@ class StorageService {
   /// Performs a bounded shelf health check without decoding the full chapter
   /// payload. It catches missing files and obvious interrupted/truncated JSON
   /// while preserving getBookSummaries()'s low-memory startup behavior.
-  Future<BookAvailability> checkBookAvailability(Book book) async {
+  Future<BookAvailability> checkBookAvailability(
+    Book book, {
+    bool deep = false,
+  }) async {
     try {
       if (book.isPdf) {
         final sourcePath = book.sourcePath;
@@ -232,7 +264,10 @@ class StorageService {
           Directory('${directory.path}.tmp'),
           Directory('${directory.path}.bak'),
         ]) {
-          if (await _chapterDirectoryLooksPlausible(candidate)) {
+          if (await _chapterDirectoryLooksPlausible(
+            candidate,
+            verifyContents: deep,
+          )) {
             hasReadablePayload = true;
             break;
           }
@@ -245,7 +280,10 @@ class StorageService {
           File('${file.path}.tmp'),
           File('${file.path}.bak'),
         ]) {
-          if (await _chapterPayloadLooksPlausible(candidate)) {
+          if (await _chapterPayloadLooksPlausible(
+            candidate,
+            verifyContents: deep,
+          )) {
             hasReadablePayload = true;
             break;
           }
@@ -253,10 +291,15 @@ class StorageService {
       }
       if (!hasReadablePayload) return BookAvailability.payloadMissing;
 
-      if (book.format == BookFormat.epub) {
+      if (book.format == BookFormat.epub || book.format == BookFormat.docx) {
         final sourcePath = book.sourcePath;
         if (sourcePath != null && !await Directory(sourcePath).exists()) {
           return BookAvailability.resourceMissing;
+        }
+        for (final fontPath in book.embeddedFonts.values) {
+          if (!await File(fontPath).exists()) {
+            return BookAvailability.resourceMissing;
+          }
         }
       }
       return BookAvailability.available;
@@ -300,12 +343,24 @@ class StorageService {
   }
 
   Future<void> renameBook(String bookId, String title) async {
+    await updateBookDetails(bookId, title: title);
+  }
+
+  Future<void> updateBookDetails(
+    String bookId, {
+    required String title,
+    String? author,
+  }) async {
     final normalizedTitle = title.trim();
+    final normalizedAuthor = author?.trim();
     if (bookId.isEmpty || normalizedTitle.isEmpty) {
       throw const FormatException('书籍名称不能为空');
     }
     if (normalizedTitle.length > 120) {
       throw const FormatException('书籍名称不能超过 120 个字符');
+    }
+    if (normalizedAuthor != null && normalizedAuthor.length > 120) {
+      throw const FormatException('作者名称不能超过 120 个字符');
     }
 
     await _enqueueLibraryMutation(() async {
@@ -314,6 +369,9 @@ class StorageService {
       final index = metadata.indexWhere((book) => book['id'] == bookId);
       if (index < 0) throw StateError('书籍不存在或已删除');
       metadata[index]['title'] = normalizedTitle;
+      if (normalizedAuthor != null) {
+        metadata[index]['author'] = normalizedAuthor;
+      }
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
     });
   }
@@ -398,11 +456,15 @@ class StorageService {
       final pdfProgressKey = '$_kPdfProgressPrefix$bookId';
       final pdfBookmarksKey = '$_kPdfBookmarksPrefix$bookId';
       final pdfNotesKey = '$_kPdfNotesPrefix$bookId';
+      final pdfDisplayThemeKey = '$_kPdfDisplayThemePrefix$bookId';
       final tocCollapsedKey = '$_kTocCollapsedPrefix$bookId';
       final progressVersion = _invalidatePreferenceWrite(progressKey);
       final pdfProgressVersion = _invalidatePreferenceWrite(pdfProgressKey);
       final pdfBookmarksVersion = _invalidatePreferenceWrite(pdfBookmarksKey);
       final pdfNotesVersion = _invalidatePreferenceWrite(pdfNotesKey);
+      final pdfDisplayThemeVersion = _invalidatePreferenceWrite(
+        pdfDisplayThemeKey,
+      );
       final tocVersion = _invalidatePreferenceWrite(tocCollapsedKey);
       await _enqueuePreferenceWrite(progressKey, () async {
         if (_preferenceWriteVersions[progressKey] != progressVersion) return;
@@ -427,6 +489,13 @@ class StorageService {
       await _enqueuePreferenceWrite(pdfNotesKey, () async {
         if (_preferenceWriteVersions[pdfNotesKey] != pdfNotesVersion) return;
         await prefs.remove(pdfNotesKey);
+      });
+      await _enqueuePreferenceWrite(pdfDisplayThemeKey, () async {
+        if (_preferenceWriteVersions[pdfDisplayThemeKey] !=
+            pdfDisplayThemeVersion) {
+          return;
+        }
+        await prefs.remove(pdfDisplayThemeKey);
       });
       await prefs.remove('$_kChapterPrefix$bookId');
 
@@ -548,8 +617,10 @@ class StorageService {
     }
 
     final epubDirectory = Directory(p.join(root.path, 'epub')).absolute;
+    final wordDirectory = Directory(p.join(root.path, 'word')).absolute;
     final pdfDirectory = Directory(p.join(root.path, 'pdf')).absolute;
     final referencedEpubPaths = <String>{};
+    final referencedWordPaths = <String>{};
     final referencedPdfPaths = <String>{};
     for (final book in metadata) {
       final sourcePath = book['sourcePath'];
@@ -558,6 +629,9 @@ class StorageService {
       if (book['format'] == BookFormat.epub.name &&
           _isManagedChild(epubDirectory.path, absolutePath)) {
         referencedEpubPaths.add(absolutePath);
+      } else if (book['format'] == BookFormat.docx.name &&
+          _isManagedChild(wordDirectory.path, absolutePath)) {
+        referencedWordPaths.add(absolutePath);
       } else if (book['format'] == BookFormat.pdf.name &&
           _isManagedChild(pdfDirectory.path, absolutePath)) {
         referencedPdfPaths.add(absolutePath);
@@ -570,6 +644,27 @@ class StorageService {
           if (entity is! Directory ||
               !_isManagedChild(epubDirectory.path, entity.absolute.path) ||
               _pathsContain(referencedEpubPaths, entity.absolute.path) ||
+              !await _isOlderThan(entity, cutoff)) {
+            continue;
+          }
+          try {
+            await entity.delete(recursive: true);
+            removedDirectories++;
+          } on FileSystemException {
+            // Best-effort cleanup; a later maintenance pass can retry.
+          }
+        }
+      } on FileSystemException {
+        // Continue with PDF cleanup.
+      }
+    }
+
+    if (await wordDirectory.exists()) {
+      try {
+        await for (final entity in wordDirectory.list(followLinks: false)) {
+          if (entity is! Directory ||
+              !_isManagedChild(wordDirectory.path, entity.absolute.path) ||
+              _pathsContain(referencedWordPaths, entity.absolute.path) ||
               !await _isOlderThan(entity, cutoff)) {
             continue;
           }
@@ -787,9 +882,12 @@ class StorageService {
     }
     final fileNames = <String>[];
     final expectedBytes = <int?>[];
+    final expectedDigests = <String?>[];
     final titles = <String>[];
     final volumeTitles = <String?>[];
     final richContent = <bool>[];
+    final richBlockCounts = <int?>[];
+    final semanticHeadings = <bool?>[];
     for (final rawEntry in entries) {
       if (rawEntry is! Map) throw const FormatException('章节清单条目格式错误');
       final entry = Map<String, dynamic>.from(rawEntry);
@@ -805,6 +903,12 @@ class StorageService {
       expectedBytes.add(
         entry['bytes'] is num ? (entry['bytes'] as num).toInt() : null,
       );
+      final digest = entry['sha256'];
+      expectedDigests.add(
+        digest is String && RegExp(r'^[0-9a-f]{64}$').hasMatch(digest)
+            ? digest
+            : null,
+      );
       titles.add(title);
       final volumeTitle = entry['volumeTitle'];
       volumeTitles.add(
@@ -813,11 +917,23 @@ class StorageService {
             : null,
       );
       richContent.add(entry['hasRichContent'] == true);
+      final blockCount = entry['richBlockCount'];
+      richBlockCounts.add(
+        blockCount is num
+            ? blockCount.toInt().clamp(0, 0x7fffffff)
+            : (entry['hasRichContent'] == true ? null : 0),
+      );
+      semanticHeadings.add(
+        entry.containsKey('hasSemanticHeading')
+            ? entry['hasSemanticHeading'] == true
+            : null,
+      );
     }
     final store = _LazyChapterStore(
       chaptersDirectoryPath: chaptersDirectory.path,
       fileNames: fileNames,
       expectedBytes: expectedBytes,
+      expectedDigests: expectedDigests,
     );
     return List<Chapter>.generate(
       entries.length,
@@ -827,6 +943,8 @@ class StorageService {
         volumeTitle: volumeTitles[index],
         store: store,
         richContent: richContent[index],
+        richBlockCount: richBlockCounts[index],
+        semanticHeading: semanticHeadings[index],
       ),
       growable: false,
     );
@@ -860,10 +978,13 @@ class StorageService {
         final chapter = chapters[index];
         manifestEntries.add(<String, dynamic>{
           'file': fileName,
-          'bytes': await chapterFile.length(),
+          'bytes': utf8.encode(payloads[offset]).length,
+          'sha256': sha256.convert(utf8.encode(payloads[offset])).toString(),
           'title': chapter.title,
           if (chapter.volumeTitle != null) 'volumeTitle': chapter.volumeTitle,
           'hasRichContent': chapter.hasRichEpubContent,
+          'richBlockCount': chapter.epubBlockCount,
+          'hasSemanticHeading': chapter.hasSemanticHeading,
         });
       }
     }
@@ -1073,6 +1194,23 @@ class StorageService {
       );
     }
     await _setLatestString('$_kPdfNotesPrefix$bookId', jsonEncode(safe));
+  }
+
+  Future<PdfDisplayTheme> getPdfDisplayTheme(String bookId) async {
+    if (bookId.isEmpty || _deletedBookIds.contains(bookId)) {
+      return PdfDisplayTheme.original;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString('$_kPdfDisplayThemePrefix$bookId');
+    return PdfDisplayTheme.values.firstWhere(
+      (theme) => theme.name == stored,
+      orElse: () => PdfDisplayTheme.original,
+    );
+  }
+
+  Future<void> savePdfDisplayTheme(String bookId, PdfDisplayTheme theme) async {
+    if (bookId.isEmpty || _deletedBookIds.contains(bookId)) return;
+    await _setLatestString('$_kPdfDisplayThemePrefix$bookId', theme.name);
   }
 
   Future<Set<String>> getCollapsedTocGroups(String bookId) async {
@@ -1335,6 +1473,7 @@ class StorageService {
       final root = await getAppDataDirectory();
       final pdfDirectory = Directory(p.join(root.path, 'pdf')).absolute.path;
       final epubDirectory = Directory(p.join(root.path, 'epub')).absolute.path;
+      final wordDirectory = Directory(p.join(root.path, 'word')).absolute.path;
       final sourcePath = rawSourcePath.trim();
       final sourceType = await FileSystemEntity.type(sourcePath);
       if (sourceType == FileSystemEntityType.file) {
@@ -1350,7 +1489,9 @@ class StorageService {
         await source.delete();
       } else if (sourceType == FileSystemEntityType.directory) {
         final source = Directory(sourcePath).absolute;
-        if (p.isWithin(epubDirectory, source.path) && await source.exists()) {
+        if ((p.isWithin(epubDirectory, source.path) ||
+                p.isWithin(wordDirectory, source.path)) &&
+            await source.exists()) {
           await source.delete(recursive: true);
         }
       }
@@ -1393,12 +1534,15 @@ Future<bool> _isOlderThan(FileSystemEntity entity, DateTime cutoff) async {
   try {
     final stat = await entity.stat();
     return !stat.modified.isAfter(cutoff);
-  } on FileSystemException {
+  } on Object {
     return false;
   }
 }
 
-Future<bool> _chapterPayloadLooksPlausible(File file) async {
+Future<bool> _chapterPayloadLooksPlausible(
+  File file, {
+  bool verifyContents = false,
+}) async {
   RandomAccessFile? input;
   try {
     final stat = await file.stat();
@@ -1407,8 +1551,13 @@ Future<bool> _chapterPayloadLooksPlausible(File file) async {
     final first = await input.readByte();
     await input.setPosition(stat.size - 1);
     final last = await input.readByte();
-    return first == 0x5b && last == 0x5d;
-  } on FileSystemException {
+    if (first != 0x5b || last != 0x5d) return false;
+    if (verifyContents) {
+      final raw = await file.readAsString(encoding: utf8);
+      await Isolate.run(() => _chaptersFromJson(raw));
+    }
+    return true;
+  } on Object {
     return false;
   } finally {
     await input?.close();
@@ -1425,7 +1574,10 @@ List<Chapter> _chaptersFromJson(String raw) {
       .toList();
 }
 
-Future<bool> _chapterDirectoryLooksPlausible(Directory directory) async {
+Future<bool> _chapterDirectoryLooksPlausible(
+  Directory directory, {
+  bool verifyContents = false,
+}) async {
   try {
     if (!await directory.exists()) return false;
     final chapters = Directory(p.join(directory.path, 'chapters'));
@@ -1442,11 +1594,53 @@ Future<bool> _chapterDirectoryLooksPlausible(Directory directory) async {
       final first = await input.readByte();
       await input.setPosition(stat.size - 1);
       final last = await input.readByte();
-      return first == 0x7b && last == 0x7d;
+      if (first != 0x7b || last != 0x7d) return false;
     } finally {
       await input.close();
     }
-  } on FileSystemException {
+    final rawManifest = await manifest.readAsString(encoding: utf8);
+    final parsed = _chapterManifestFromJson(rawManifest);
+    final entries = parsed['chapters'];
+    final chapterCount = parsed['chapterCount'];
+    if (parsed['version'] != 2 ||
+        entries is! List ||
+        entries.isEmpty ||
+        chapterCount is! num ||
+        chapterCount.toInt() != entries.length) {
+      return false;
+    }
+    for (var index = 0; index < entries.length; index++) {
+      final rawEntry = entries[index];
+      if (rawEntry is! Map) return false;
+      final entry = Map<String, dynamic>.from(rawEntry);
+      final fileName = entry['file'];
+      final expectedBytes = entry['bytes'];
+      if (fileName is! String ||
+          !RegExp(r'^\d{6,}\.json$').hasMatch(fileName) ||
+          expectedBytes is! num ||
+          expectedBytes.toInt() < 2) {
+        return false;
+      }
+      final chapterFile = File(p.join(chapters.path, fileName));
+      final chapterStat = await chapterFile.stat();
+      if (chapterStat.type != FileSystemEntityType.file ||
+          chapterStat.size != expectedBytes.toInt()) {
+        return false;
+      }
+      if (!verifyContents) continue;
+      final raw = await chapterFile.readAsString(encoding: utf8);
+      final expectedDigest = entry['sha256'];
+      if (expectedDigest is String &&
+          RegExp(r'^[0-9a-f]{64}$').hasMatch(expectedDigest)) {
+        if (sha256.convert(utf8.encode(raw)).toString() != expectedDigest) {
+          return false;
+        }
+      } else {
+        await Isolate.run(() => _chapterFromValue(jsonDecode(raw), index));
+      }
+    }
+    return true;
+  } on Object {
     return false;
   }
 }
@@ -1586,6 +1780,11 @@ EpubContentStyle _epubStyleFromJson(Object? raw) {
   if (raw is! Map) return const EpubContentStyle();
   final map = Map<String, dynamic>.from(raw);
   return EpubContentStyle(
+    fontFamily:
+        map['fontFamily'] is String &&
+            (map['fontFamily'] as String).trim().isNotEmpty
+        ? (map['fontFamily'] as String).trim()
+        : null,
     fontScale: _jsonDouble(map['fontScale']) ?? 1,
     fontWeight: map['fontWeight'] is num
         ? (map['fontWeight'] as num).toInt().clamp(100, 900)
@@ -1613,6 +1812,8 @@ EpubContentStyle _epubStyleFromJson(Object? raw) {
 }
 
 Map<String, dynamic> _epubStyleToJson(EpubContentStyle style) => {
+  if (style.fontFamily != null && style.fontFamily!.isNotEmpty)
+    'fontFamily': style.fontFamily,
   if (style.fontScale != 1) 'fontScale': style.fontScale,
   if (style.fontWeight != 400) 'fontWeight': style.fontWeight,
   if (style.italic) 'italic': true,

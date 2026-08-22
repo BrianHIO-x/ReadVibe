@@ -83,6 +83,44 @@ void main() {
     expect(() => loaded!.chapters.single.content, throwsFormatException);
   });
 
+  test('rich chapter counts and heading flags remain lazy', () async {
+    final book = Book(
+      id: 'lazy_rich_chapter',
+      title: '富内容懒加载',
+      format: BookFormat.epub,
+      chapters: const <Chapter>[
+        Chapter(
+          index: 0,
+          title: '第一章',
+          content: '正文',
+          epubBlocks: <EpubContentBlock>[
+            EpubContentBlock(
+              kind: EpubContentBlockKind.text,
+              text: '第一章',
+              isHeading: true,
+            ),
+            EpubContentBlock(kind: EpubContentBlockKind.text, text: '正文'),
+          ],
+        ),
+      ],
+      importDate: DateTime(2026, 1, 1),
+    );
+    await storage.saveBook(book);
+    final loaded = await storage.getBook(book.id);
+    final chapterFile = File(
+      p.join(
+        _chapterDirectory(documents, book.id).path,
+        'chapters',
+        '000000.json',
+      ),
+    );
+    await chapterFile.delete();
+
+    expect(loaded!.chapters.single.epubBlockCount, 2);
+    expect(loaded.chapters.single.hasSemanticHeading, isTrue);
+    expect(() => loaded.chapters.single.epubBlocks, throwsFormatException);
+  });
+
   test(
     'lazy chapters remain searchable and countable in worker isolates',
     () async {
@@ -142,6 +180,31 @@ void main() {
       );
     },
   );
+
+  test('deep shelf health detects same-length chapter corruption', () async {
+    final book = _textBook('availability_digest');
+    await storage.saveBook(book);
+    final chapter = File(
+      p.join(
+        _chapterDirectory(documents, book.id).path,
+        'chapters',
+        '000000.json',
+      ),
+    );
+    final original = await chapter.readAsString();
+    final corrupted = original.replaceFirst('正文', '坏文');
+    expect(utf8.encode(corrupted), hasLength(utf8.encode(original).length));
+    await chapter.writeAsString(corrupted, flush: true);
+
+    expect(
+      await storage.checkBookAvailability(book),
+      BookAvailability.available,
+    );
+    expect(
+      await storage.checkBookAvailability(book, deep: true),
+      BookAvailability.payloadMissing,
+    );
+  });
 
   test('deletion wins against an in-flight progress save', () async {
     final book = _textBook('delete_progress_race');
@@ -242,6 +305,31 @@ void main() {
     expect(await storage.getPdfBookmarks(book.id, 8), isEmpty);
     expect(await storage.getPdfNotes(book.id, 8), isEmpty);
   });
+
+  test(
+    'PDF display theme persists per book and is removed on delete',
+    () async {
+      final book = Book(
+        id: 'pdf_theme',
+        title: 'PDF 主题',
+        format: BookFormat.pdf,
+        chapters: const <Chapter>[],
+        pageCount: 3,
+        sourcePath: p.join(documents.path, 'theme.pdf'),
+        importDate: DateTime(2026, 1, 1),
+      );
+      await File(book.sourcePath!).writeAsBytes(<int>[1]);
+      await storage.saveBook(book);
+      await storage.savePdfDisplayTheme(book.id, PdfDisplayTheme.dark);
+
+      expect(await storage.getPdfDisplayTheme(book.id), PdfDisplayTheme.dark);
+      await storage.deleteBook(book.id);
+      expect(
+        await storage.getPdfDisplayTheme(book.id),
+        PdfDisplayTheme.original,
+      );
+    },
+  );
 
   test('automatic update checks default off and round-trip explicitly', () {
     expect(const ReaderSettings().automaticUpdateChecks, isFalse);

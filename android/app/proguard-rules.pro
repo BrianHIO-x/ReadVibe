@@ -27,3 +27,4 @@
 # JP2Android. ReadVibe does not bundle that JCenter-only optional decoder;
 # PDFBox deliberately ignores JPX images when it is absent.
 -dontwarn com.gemalto.jp2.JP2Decoder
+-dontwarn com.gemalto.jp2.JP2Encoder

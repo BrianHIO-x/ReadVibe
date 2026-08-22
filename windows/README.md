@@ -8,7 +8,7 @@ Android 小说阅读器的仿真模式使用固定整屏页距；章节末页仅
 
 Android 的 EPUB 导入按 OPF spine 与 NAV/NCX 建立章节，普通段落采用 TXT 排版规则，正文语义标题保留 EPUB 样式且不重复显示。
 
-Android 书架支持本地搜索、阅读状态/格式筛选和文件管理器“用 ReadVibe 打开”；PDF 阅读页支持防熄屏、跳页、页码进度、文字搜索、大纲、本地书签和页码笔记。这些能力均未提供 Windows 实现。
+Android 书架支持本地搜索、阅读状态/格式筛选、MOBI/AZW 导入和文件管理器“用 ReadVibe 打开”；DOCX 可保留常见富内容，旧 DOC 仍依赖 Android POI。PDF 阅读页支持防熄屏、缩放、显示主题、跳页、页码进度、文字搜索、大纲、书签、内嵌文字批注、密码导入和中文离线 OCR。这些 Android 原生能力均未提供 Windows 实现。
 
 当前 Android 正式产物为：
 

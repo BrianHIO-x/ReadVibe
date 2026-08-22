@@ -28,3 +28,9 @@ jobs:
         run: flutter test --no-pub
       - name: Build Android debug APK
         run: flutter build apk --debug --no-pub
+      - name: Create ephemeral CI release key
+        run: |
+          keytool -genkeypair -v -keystore android/ci-release.jks -storepass readvibe-ci -keypass readvibe-ci -alias readvibe-ci -keyalg RSA -keysize 2048 -validity 2 -dname "CN=ReadVibe CI"
+          printf '%s\n' 'storeFile=ci-release.jks' 'storePassword=readvibe-ci' 'keyAlias=readvibe-ci' 'keyPassword=readvibe-ci' > android/key.properties
+      - name: Build Android arm64 release smoke APK
+        run: flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.7 --build-number 53 --no-pub

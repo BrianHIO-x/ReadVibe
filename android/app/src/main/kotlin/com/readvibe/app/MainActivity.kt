@@ -13,8 +13,15 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
+import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
+import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
+import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotationText
 import com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem
 import com.tom_roush.pdfbox.text.PDFTextStripper
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import org.apache.poi.hwpf.HWPFDocument
 import org.apache.poi.hwpf.extractor.WordExtractor
 import java.io.File
@@ -59,6 +66,9 @@ class MainActivity : FlutterActivity() {
     private val incomingFileIntents = ArrayDeque<Intent>()
     private var incomingFileChannel: MethodChannel? = null
     private val pdfTextLock = Any()
+    private val pdfOcrRecognizer by lazy {
+        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+    }
 
     private class PdfSession(
         val sourcePath: String,
@@ -204,8 +214,8 @@ class MainActivity : FlutterActivity() {
 
             documentExecutor.execute {
                 try {
-                    val content = extractLegacyDoc(filePath)
-                    runOnUiThread { result.success(content) }
+                    val document = extractLegacyDoc(filePath)
+                    runOnUiThread { result.success(document) }
                 } catch (error: Throwable) {
                     runOnUiThread {
                         result.error(
@@ -228,6 +238,11 @@ class MainActivity : FlutterActivity() {
                     "clearFileCache",
                     "searchText",
                     "getOutline",
+                    "getTextAnnotations",
+                    "isPasswordProtected",
+                    "unlockPdf",
+                    "syncTextNote",
+                    "recognizePageText",
                 )
             ) {
                 result.notImplemented()
@@ -267,18 +282,55 @@ class MainActivity : FlutterActivity() {
                         "getOutline" -> {
                             runOnUiThread { result.success(getPdfOutline(filePath)) }
                         }
+
+                        "getTextAnnotations" -> {
+                            runOnUiThread { result.success(getPdfTextAnnotations(filePath)) }
+                        }
+
+                        "isPasswordProtected" -> {
+                            runOnUiThread { result.success(isPdfPasswordProtected(filePath)) }
+                        }
+
+                        "unlockPdf" -> {
+                            val password = call.argument<String>("password").orEmpty()
+                            runOnUiThread { result.success(unlockPdf(filePath, password)) }
+                        }
+
+                        "syncTextNote" -> {
+                            val pageIndex = call.argument<Int>("pageIndex") ?: -1
+                            val noteId = call.argument<String>("noteId").orEmpty()
+                            val contents = call.argument<String>("contents").orEmpty()
+                            syncPdfTextNote(filePath, pageIndex, noteId, contents)
+                            runOnUiThread { result.success(null) }
+                        }
+
+                        "recognizePageText" -> {
+                            val pageIndex = call.argument<Int>("pageIndex") ?: -1
+                            runOnUiThread {
+                                result.success(recognizePdfPageText(filePath, pageIndex))
+                            }
+                        }
                     }
                 } catch (error: Throwable) {
                     runOnUiThread {
                         result.error(
-                            "PDF_RENDER_FAILED",
+                            if (error is InvalidPasswordException) {
+                                "PDF_PASSWORD_REQUIRED"
+                            } else {
+                                "PDF_RENDER_FAILED"
+                            },
                             error.message ?: "PDF 已损坏、加密或不受支持",
                             null,
                         )
                     }
                 }
             }
-            if (call.method == "searchText" || call.method == "getOutline") {
+            if (call.method == "searchText" ||
+                call.method == "getOutline" ||
+                call.method == "getTextAnnotations" ||
+                call.method == "isPasswordProtected" ||
+                call.method == "recognizePageText"
+            ) {
                 pdfAnalysisExecutor.execute(task)
             } else {
                 pdfExecutor.execute(task)
@@ -315,13 +367,18 @@ class MainActivity : FlutterActivity() {
 
     }
 
-    private fun extractLegacyDoc(filePath: String): String {
+    private fun extractLegacyDoc(filePath: String): Map<String, String> {
         val source = File(filePath)
         require(source.isFile && source.length() > 0) { "DOC 文件为空或无法读取" }
         FileInputStream(source).use { input ->
             HWPFDocument(input).use { document ->
                 WordExtractor(document).use { extractor ->
-                    return extractor.text.orEmpty()
+                    val summary = document.summaryInformation
+                    return mapOf(
+                        "content" to extractor.text.orEmpty(),
+                        "title" to summary?.title.orEmpty().trim(),
+                        "author" to summary?.author.orEmpty().trim(),
+                    )
                 }
             }
         }
@@ -500,6 +557,152 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun getPdfTextAnnotations(filePath: String): List<Map<String, Any>> {
+        return synchronized(pdfTextLock) {
+            val session = getPdfTextSession(File(filePath))
+            val results = mutableListOf<Map<String, Any>>()
+            for (pageIndex in 0 until session.document.numberOfPages) {
+                val page = session.document.getPage(pageIndex)
+                for (annotation in page.annotations) {
+                    val contents = annotation.contents?.trim().orEmpty()
+                    if (contents.isEmpty()) continue
+                    results.add(
+                        mapOf(
+                            "pageIndex" to pageIndex,
+                            "annotationId" to annotation.annotationName.orEmpty(),
+                            "contents" to contents.take(4000),
+                        ),
+                    )
+                    if (results.size >= 2000) return@synchronized results
+                }
+            }
+            results
+        }
+    }
+
+    private fun isPdfPasswordProtected(filePath: String): Boolean {
+        val source = File(filePath)
+        require(source.isFile && source.length() > 0) { "PDF 文件为空或无法读取" }
+        return try {
+            PDDocument.load(source).use { document -> document.isEncrypted }
+        } catch (_: InvalidPasswordException) {
+            true
+        }
+    }
+
+    private fun unlockPdf(filePath: String, password: String): Int {
+        val source = File(filePath)
+        require(source.isFile && source.length() > 0) { "PDF 文件为空或无法读取" }
+        clearPdfCache(filePath)
+        val temporary = File(source.parentFile, "${source.name}.unlocking")
+        if (temporary.exists()) temporary.delete()
+        synchronized(pdfTextLock) {
+            closePdfTextSession(filePath)
+            PDDocument.load(source, password).use { document ->
+                require(document.numberOfPages > 0) { "PDF 不包含可显示页面" }
+                document.setAllSecurityToBeRemoved(true)
+                document.save(temporary)
+            }
+        }
+        require(temporary.isFile && temporary.length() > 0) { "PDF 解锁副本写入失败" }
+        try {
+            temporary.copyTo(source, overwrite = true)
+        } finally {
+            temporary.delete()
+        }
+        return getPdfPageCount(filePath)
+    }
+
+    private fun syncPdfTextNote(
+        filePath: String,
+        pageIndex: Int,
+        noteId: String,
+        rawContents: String,
+    ) {
+        require(noteId.isNotBlank() && noteId.length <= 240) { "PDF 笔记标识无效" }
+        val source = File(filePath)
+        require(source.isFile && source.length() > 0) { "PDF 文件为空或无法读取" }
+        clearPdfCache(filePath)
+        val temporary = File(source.parentFile, "${source.name}.annotating")
+        if (temporary.exists()) temporary.delete()
+        synchronized(pdfTextLock) {
+            closePdfTextSession(filePath)
+            PDDocument.load(source).use { document ->
+                require(pageIndex in 0 until document.numberOfPages) { "PDF 页码超出范围" }
+                val page = document.getPage(pageIndex)
+                page.annotations.removeAll { annotation ->
+                    annotation.annotationName == noteId
+                }
+                val contents = rawContents.trim().take(4000)
+                if (contents.isNotEmpty()) {
+                    val pageBox = page.cropBox ?: page.mediaBox
+                    val markerSize = 22f
+                    val annotation = PDAnnotationText().apply {
+                        annotationName = noteId
+                        this.contents = contents
+                        setOpen(false)
+                        rectangle = PDRectangle(
+                            (pageBox.lowerLeftX + 12f).coerceAtMost(pageBox.upperRightX - markerSize),
+                            (pageBox.upperRightY - markerSize - 12f).coerceAtLeast(pageBox.lowerLeftY),
+                            markerSize,
+                            markerSize,
+                        )
+                    }
+                    page.annotations.add(annotation)
+                }
+                document.save(temporary)
+            }
+        }
+        require(temporary.isFile && temporary.length() > 0) { "PDF 批注写入失败" }
+        try {
+            temporary.copyTo(source, overwrite = true)
+        } finally {
+            temporary.delete()
+        }
+    }
+
+    private fun recognizePdfPageText(filePath: String, pageIndex: Int): String {
+        val source = File(filePath)
+        require(source.isFile && source.length() > 0) { "PDF 文件为空或无法读取" }
+        val cacheDirectory = File(cacheDir, "readvibe_pdf_ocr/${pdfCacheKey(source)}")
+        if (!cacheDirectory.exists()) cacheDirectory.mkdirs()
+        val cached = File(cacheDirectory, "$pageIndex.txt")
+        if (cached.isFile && cached.length() > 0 && cached.length() <= 8 * 1024 * 1024) {
+            return cached.readText(Charsets.UTF_8)
+        }
+
+        val descriptor = ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY)
+        val bitmap = try {
+            PdfRenderer(descriptor).use { renderer ->
+                require(pageIndex in 0 until renderer.pageCount) { "PDF 页码超出范围" }
+                renderer.openPage(pageIndex).use { page ->
+                    val targetWidth = 1800
+                    val scale = targetWidth.toFloat() / page.width.toFloat()
+                    val targetHeight = (page.height * scale).toInt().coerceIn(1, 4096)
+                    Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888).also {
+                        it.eraseColor(Color.WHITE)
+                        page.render(it, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    }
+                }
+            }
+        } finally {
+            descriptor.close()
+        }
+        val text = try {
+            val image = InputImage.fromBitmap(bitmap, 0)
+            Tasks.await(pdfOcrRecognizer.process(image)).text.orEmpty().trim()
+        } finally {
+            bitmap.recycle()
+        }
+        if (text.isNotEmpty() && text.length <= 4 * 1024 * 1024) {
+            val temporary = File(cacheDirectory, "$pageIndex.tmp")
+            temporary.writeText(text, Charsets.UTF_8)
+            temporary.copyTo(cached, overwrite = true)
+            temporary.delete()
+        }
+        return text
+    }
+
     private fun clearPdfCache(filePath: String) {
         val source = File(filePath)
         val cacheRoot = File(cacheDir, "readvibe_pdf_pages")
@@ -514,6 +717,8 @@ class MainActivity : FlutterActivity() {
         for (key in keys) {
             val cacheDirectory = File(cacheRoot, key)
             if (cacheDirectory.isDirectory) cacheDirectory.deleteRecursively()
+            val ocrDirectory = File(cacheDir, "readvibe_pdf_ocr/$key")
+            if (ocrDirectory.isDirectory) ocrDirectory.deleteRecursively()
         }
     }
 
@@ -560,6 +765,8 @@ class MainActivity : FlutterActivity() {
         val inferredExtension = when (mimeType.lowercase()) {
             "text/plain" -> ".txt"
             "application/epub+zip" -> ".epub"
+            "application/x-mobipocket-ebook" -> ".mobi"
+            "application/vnd.amazon.ebook" -> ".azw3"
             "application/pdf" -> ".pdf"
             "application/msword" -> ".doc"
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> ".docx"
@@ -815,6 +1022,7 @@ class MainActivity : FlutterActivity() {
         pdfExecutor.shutdown()
         pdfAnalysisExecutor.execute { closePdfTextSession() }
         pdfAnalysisExecutor.shutdown()
+        runCatching { pdfOcrRecognizer.close() }
         incomingFileExecutor.shutdownNow()
         incomingFileChannel = null
         super.onDestroy()

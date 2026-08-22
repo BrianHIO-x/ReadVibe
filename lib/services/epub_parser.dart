@@ -167,6 +167,11 @@ Book _parseEpubSync(
     outputDirectory: resourceDirectory,
     maxSingleImageBytes: limits.maxSingleImageBytes,
   );
+  final fontStore = _EpubFontStore(
+    archiveFiles: archiveFiles,
+    outputDirectory: resourceDirectory,
+    bookId: bookId,
+  );
   final coverArchivePath = _epubCoverArchivePath(opf, manifest);
   final coverImagePath = coverArchivePath == null
       ? null
@@ -191,11 +196,13 @@ Book _parseEpubSync(
       archiveFiles,
       cssDocumentCache,
     );
+    fontStore.registerCss(cssText);
     final resolver = _EpubStyleResolver(
       cssText,
       rulesCache: cssRulesCache,
       resolveImage: (rawUrl) =>
           imageStore.extract(rawUrl, relativeTo: manifestItem.path)?.path,
+      resolveFontFamily: fontStore.resolveFamily,
     );
     final blocks = _documentToBlocks(
       document,
@@ -265,6 +272,7 @@ Book _parseEpubSync(
     fileSize: inputLength,
     sourcePath: resourceDirectory.path,
     coverImagePath: coverImagePath,
+    embeddedFonts: fontStore.embeddedFonts,
   );
 }
 
@@ -468,7 +476,7 @@ String _chapterCssText(
     appendCssPath(link.attributes['href']!, contentPath);
   }
   for (final style in document.querySelectorAll('style')) {
-    output.writeln(style.text);
+    output.writeln(_rewriteCssUrls(style.text, contentPath));
   }
   return output.toString();
 }
@@ -711,6 +719,7 @@ bool _promoteMatchingLeadingTitle(
             (run) => EpubTextRun(
               text: run.text,
               style: EpubContentStyle(
+                fontFamily: run.style.fontFamily,
                 fontScale: math.max(1.2, run.style.fontScale),
                 fontWeight: math.max(600, run.style.fontWeight),
                 italic: run.style.italic,
@@ -729,6 +738,7 @@ bool _promoteMatchingLeadingTitle(
       imageWidth: block.imageWidth,
       imageHeight: block.imageHeight,
       style: EpubContentStyle(
+        fontFamily: style.fontFamily,
         fontScale: math.max(1.2, style.fontScale),
         fontWeight: math.max(600, style.fontWeight),
         italic: style.italic,
@@ -753,6 +763,7 @@ EpubContentStyle _normalizeBlockStyle(
 }) {
   if (isHeading) {
     return EpubContentStyle(
+      fontFamily: style.fontFamily,
       fontScale: style.fontScale,
       fontWeight: math.max(600, style.fontWeight),
       italic: style.italic,
@@ -769,6 +780,7 @@ EpubContentStyle _normalizeBlockStyle(
   final withoutIndent =
       tag == 'blockquote' || tag == 'figcaption' || tag == 'li' || tag == 'pre';
   return EpubContentStyle(
+    fontFamily: style.fontFamily,
     fontWeight: 400,
     italic: style.italic,
     underline: style.underline,
@@ -785,6 +797,7 @@ EpubContentStyle _normalizeInlineStyle(
   required EpubContentStyle inherited,
 }) {
   return EpubContentStyle(
+    fontFamily: style.fontFamily ?? inherited.fontFamily,
     fontScale: inherited.fontScale,
     fontWeight: style.fontWeight,
     italic: style.italic,
@@ -830,6 +843,7 @@ List<EpubTextRun> _compactRuns(
 }
 
 bool _sameEpubStyle(EpubContentStyle first, EpubContentStyle second) =>
+    first.fontFamily == second.fontFamily &&
     first.fontScale == second.fontScale &&
     first.fontWeight == second.fontWeight &&
     first.italic == second.italic &&
@@ -902,6 +916,7 @@ class _CssRule {
 class _EpubStyleResolver {
   final List<_CssRule> _rules;
   final String? Function(String rawUrl) resolveImage;
+  final String? Function(String rawFamily) resolveFontFamily;
   final Expando<Map<String, String>> _declarationCache =
       Expando<Map<String, String>>('epub-css-declarations');
 
@@ -909,6 +924,7 @@ class _EpubStyleResolver {
     String cssText, {
     required Map<String, List<_CssRule>> rulesCache,
     required this.resolveImage,
+    required this.resolveFontFamily,
   }) : _rules = rulesCache.putIfAbsent(
          cssText,
          () => List<_CssRule>.unmodifiable(_parseCssRules(cssText)),
@@ -931,6 +947,7 @@ class _EpubStyleResolver {
   }) {
     final tag = element.localName;
     var fontScale = inherited.fontScale;
+    var fontFamily = inherited.fontFamily;
     var fontWeight = inherited.fontWeight;
     var italic = inherited.italic;
     var underline = inherited.underline;
@@ -983,6 +1000,10 @@ class _EpubStyleResolver {
     }
 
     final declarations = _declarationsFor(element);
+    final declaredFamily = declarations['font-family'];
+    if (declaredFamily != null) {
+      fontFamily = resolveFontFamily(declaredFamily) ?? fontFamily;
+    }
     fontScale = _fontScale(declarations['font-size'], fontScale);
     fontWeight = _fontWeight(declarations['font-weight'], fontWeight);
     final fontStyle = declarations['font-style']?.toLowerCase();
@@ -1032,6 +1053,7 @@ class _EpubStyleResolver {
     }
 
     return EpubContentStyle(
+      fontFamily: fontFamily,
       fontScale: fontScale.clamp(0.6, 2.5),
       fontWeight: fontWeight.clamp(100, 900),
       italic: italic,
@@ -1372,6 +1394,82 @@ String? _cssUrl(String? value) {
     caseSensitive: false,
   ).firstMatch(value)?.group(1)?.trim();
 }
+
+class _EpubFontStore {
+  final Map<String, ArchiveFile> archiveFiles;
+  final Directory outputDirectory;
+  final String bookId;
+  final Map<String, String> _declaredFamilies = <String, String>{};
+  final Map<String, String> _embeddedFonts = <String, String>{};
+
+  _EpubFontStore({
+    required this.archiveFiles,
+    required this.outputDirectory,
+    required this.bookId,
+  });
+
+  Map<String, String> get embeddedFonts =>
+      Map<String, String>.unmodifiable(_embeddedFonts);
+
+  void registerCss(String cssText) {
+    for (final match in RegExp(
+      r'@font-face\s*\{([^{}]*)\}',
+      caseSensitive: false,
+      dotAll: true,
+    ).allMatches(cssText)) {
+      final declarations = _parseDeclarations(match.group(1) ?? '');
+      final rawFamily = declarations['font-family'];
+      final rawSource = _cssUrl(declarations['src']);
+      if (rawFamily == null || rawSource == null) continue;
+      final normalizedFamily = _normalizeFontFamilyName(rawFamily);
+      if (normalizedFamily.isEmpty ||
+          _declaredFamilies.containsKey(normalizedFamily)) {
+        continue;
+      }
+      final archivePath = _normalizeArchivePath(
+        rawSource.startsWith('/') ? rawSource.substring(1) : rawSource,
+      );
+      final extension = p.posix.extension(archivePath).toLowerCase();
+      if (extension != '.ttf' && extension != '.otf') continue;
+      final source = _findArchiveFile(archiveFiles, archivePath);
+      if (source == null ||
+          source.size <= 0 ||
+          source.size > 64 * 1024 * 1024) {
+        continue;
+      }
+      final safeToken = base64Url
+          .encode(utf8.encode('$bookId:$normalizedFamily'))
+          .replaceAll('=', '')
+          .replaceAll('-', '_');
+      final family =
+          'ReadVibeEpub_${safeToken.substring(0, math.min(48, safeToken.length))}';
+      final target = File(
+        p.join(outputDirectory.path, 'font_${_embeddedFonts.length}$extension'),
+      );
+      try {
+        target.writeAsBytesSync(_bytesOf(source), flush: true);
+        _declaredFamilies[normalizedFamily] = family;
+        _embeddedFonts[family] = target.path;
+      } on FileSystemException {
+        // A broken optional publisher font must not make the book unreadable.
+      }
+    }
+  }
+
+  String? resolveFamily(String rawFamily) {
+    for (final candidate in rawFamily.split(',')) {
+      final family = _declaredFamilies[_normalizeFontFamilyName(candidate)];
+      if (family != null) return family;
+    }
+    return null;
+  }
+}
+
+String _normalizeFontFamilyName(String value) => value
+    .trim()
+    .replaceAll(RegExp(r'''^["']|["']$'''), '')
+    .trim()
+    .toLowerCase();
 
 class _ExtractedImage {
   final String path;

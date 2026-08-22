@@ -10,8 +10,9 @@ import 'storage_service.dart';
 Future<Book> importPdf(
   String sourcePath,
   String fileName,
-  StorageService storage,
-) async {
+  StorageService storage, {
+  String? password,
+}) async {
   final source = File(sourcePath);
   final stat = await source.stat();
   if (stat.type != FileSystemEntityType.file || stat.size <= 0) {
@@ -21,7 +22,24 @@ Future<Book> importPdf(
   final id = 'pdf_${now.microsecondsSinceEpoch}';
   final managedFile = await storage.saveImportedPdf(sourcePath, id);
   try {
-    final pageCount = await PdfRendererService.getPageCount(managedFile.path);
+    late final int pageCount;
+    if (password != null) {
+      pageCount = await PdfRendererService.unlockPdf(
+        filePath: managedFile.path,
+        password: password,
+      );
+    } else {
+      try {
+        pageCount = await PdfRendererService.getPageCount(managedFile.path);
+      } on PdfPasswordRequiredException {
+        // Permission-only encryption often has an empty user password. Remove
+        // that protection locally without bothering the user for a password.
+        pageCount = await PdfRendererService.unlockPdf(
+          filePath: managedFile.path,
+          password: '',
+        );
+      }
+    }
     final title = p.basenameWithoutExtension(fileName).trim();
     return Book(
       id: id,

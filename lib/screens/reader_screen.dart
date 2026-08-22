@@ -32,6 +32,13 @@ import '../widgets/book_search_sheet.dart';
 import '../widgets/reader_settings_sheet.dart';
 import '../widgets/pressable_scale.dart';
 import '../widgets/reading_progress_bar.dart';
+import '../controllers/reader_pagination_controller.dart';
+import '../controllers/reader_progress_controller.dart';
+import '../controllers/reader_search_controller.dart';
+import '../controllers/reader_selection_controller.dart';
+
+part 'reader/reader_pagination_support.dart';
+part 'reader/reader_selection_support.dart';
 
 const double _simulationPageExtentTolerance = 0.01;
 
@@ -87,8 +94,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   Offset? _simulationTurnLastPosition;
   VelocityTracker? _simulationTurnVelocityTracker;
   bool _simulationTurnActive = false;
-  final ValueNotifier<bool> _selectionBlockedNotifier = ValueNotifier(false);
-  final ValueNotifier<bool> _textSelectionActiveNotifier = ValueNotifier(false);
+  final ReaderSelectionController _selectionController =
+      ReaderSelectionController();
+  final ReaderProgressController _progressController =
+      ReaderProgressController();
+  final ReaderSearchController _searchController = ReaderSearchController();
   bool _readingModeReloading = false;
   // A modal with a text field (currently full-text search) can cause Android
   // to report a transient keyboard inset.  Simulation pagination is based on
@@ -142,9 +152,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     offset: 0,
     progress: 0,
   );
-  Future<void> _progressSaveQueue = Future<void>.value();
   final LinkedHashMap<Chapter, List<String>> _paragraphCache =
       LinkedHashMap<Chapter, List<String>>();
+  int _paragraphCacheCharacters = 0;
   final LinkedHashMap<Chapter, double> _simulationContentExtentCache =
       LinkedHashMap<Chapter, double>();
   _SimulationLayoutSignature? _simulationContentExtentSignature;
@@ -182,7 +192,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     _visibleProgressNotifier = ValueNotifier<double>(0);
     _scrollController = _createScrollController();
-    _textSelectionActiveNotifier.addListener(
+    _selectionController.active.addListener(
       _handleTextSelectionActivityChanged,
     );
     WidgetsBinding.instance.addObserver(this);
@@ -229,7 +239,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     bool? simulationPagination,
   ]) {
     final controller = _SelectionAwareScrollController(
-      selectionActive: _textSelectionActiveNotifier,
+      selectionActive: _selectionController.active,
       freezeSelectionViewport: () =>
           _settings.readingMode == ReaderReadingMode.simulation,
       paginateToFullViewports:
@@ -472,6 +482,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       loadedSettings = savedSettings.copyWith(
         fontFamily: ReaderSettings.systemFontFamily,
       );
+    }
+    for (final entry in _book.embeddedFonts.entries) {
+      try {
+        await _fontService.loadFont(family: entry.key, path: entry.value);
+      } on Object catch (error, stackTrace) {
+        debugPrint('Failed to load embedded book font ${entry.key}: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      }
     }
     if (!mounted) return;
 
@@ -908,11 +926,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     _visibleProgressNotifier.dispose();
     _pageTurnController.dispose();
     _pageDragOffsetNotifier.dispose();
-    _selectionBlockedNotifier.dispose();
-    _textSelectionActiveNotifier.removeListener(
+    _selectionController.active.removeListener(
       _handleTextSelectionActivityChanged,
     );
-    _textSelectionActiveNotifier.dispose();
+    _selectionController.dispose();
+    _searchController.dispose();
     _scrollController.removeListener(_scheduleProgressSave);
     _scrollController.dispose();
     final adjacentControllers = _adjacentScrollControllers.values.toSet();
@@ -946,7 +964,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _scheduleProgressSave() {
     if (!_settingsLoaded || _closingReader) return;
     if (_settings.readingMode == ReaderReadingMode.simulation &&
-        _textSelectionActiveNotifier.value) {
+        _selectionController.active.value) {
       return;
     }
     if (_settings.readingMode == ReaderReadingMode.continuous) {
@@ -964,7 +982,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _saveProgress() {
     if (_currentProgress == null || _book.chapters.isEmpty) {
-      return _progressSaveQueue;
+      return _progressController.pending;
     }
     final snapshot = _currentScrollSnapshot();
     final updated = _recordCurrentChapterPosition(snapshot);
@@ -1035,13 +1053,13 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _enqueueProgressSave(ReadingProgress progress) {
-    _progressSaveQueue = _progressSaveQueue
-        .then((_) => _storage.saveProgress(progress))
-        .catchError((Object error, StackTrace stack) {
-          debugPrint('Failed to save reading progress: $error');
-          debugPrintStack(stackTrace: stack);
-        });
-    return _progressSaveQueue;
+    return _progressController.enqueue(
+      () => _storage.saveProgress(progress),
+      onError: (error, stack) {
+        debugPrint('Failed to save reading progress: $error');
+        debugPrintStack(stackTrace: stack);
+      },
+    );
   }
 
   void _persistSettings(ReaderSettings settings) {
@@ -1075,10 +1093,27 @@ class _ReaderScreenState extends State<ReaderScreen>
               .map(_formatParagraph)
               .where((p) => p.isNotEmpty)
               .toList(growable: false);
-    _paragraphCache[chapter] = paragraphs;
-    while (_paragraphCache.length > 5) {
-      _paragraphCache.remove(_paragraphCache.keys.first);
+    final characters = paragraphs.fold<int>(
+      0,
+      (sum, paragraph) => sum + paragraph.length,
+    );
+    const maxCachedCharacters = 12 * 1024 * 1024;
+    if (characters > maxCachedCharacters) {
+      _paragraphCache.clear();
+      _paragraphCacheCharacters = 0;
+    } else {
+      while ((_paragraphCache.length >= 5 ||
+              _paragraphCacheCharacters + characters > maxCachedCharacters) &&
+          _paragraphCache.isNotEmpty) {
+        final removed = _paragraphCache.remove(_paragraphCache.keys.first)!;
+        _paragraphCacheCharacters -= removed.fold<int>(
+          0,
+          (sum, paragraph) => sum + paragraph.length,
+        );
+      }
     }
+    _paragraphCache[chapter] = paragraphs;
+    _paragraphCacheCharacters += characters;
     return paragraphs;
   }
 
@@ -1111,8 +1146,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     return title.replaceFirst(RegExp(r'^[\s　]+'), '').trimRight();
   }
 
-  bool _hasEmbeddedEpubHeading(Chapter chapter) {
+  bool _hasEmbeddedEpubHeading(Chapter chapter, {bool avoidLazyLoad = false}) {
     if (!chapter.hasRichEpubContent) return false;
+    if (avoidLazyLoad && !chapter.hasKnownSemanticHeading) return false;
+    if (chapter.hasSemanticHeading) return true;
     for (final block in chapter.epubBlocks) {
       if (!block.isText || block.text.trim().isEmpty) continue;
       if (block.isHeading) return true;
@@ -1163,34 +1200,45 @@ class _ReaderScreenState extends State<ReaderScreen>
         width: width,
       );
     }
-    final bodyText = _joinedBodyText(paragraphs, settings);
-    final painter = _layoutBodyText(
-      bodyText,
-      settings: settings,
-      mode: settings.readingMode,
-      width: width,
-    );
-    try {
-      final bodyY = snapshot.offset - bodyStart;
-      final position = bodyY <= 0 || painter.height <= 0
-          ? 0
-          : painter
-                .getPositionForOffset(
-                  Offset(
-                    0,
-                    bodyY.clamp(0.0, math.max(0.0, painter.height - 0.01)),
-                  ),
-                )
-                .offset;
-      return _anchorFromJoinedPosition(
-        chapterIndex: _chapterIndex,
-        paragraphs: paragraphs,
+    final bodyY = math.max(0.0, snapshot.offset - bodyStart);
+    final paragraphGap =
+        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
+        ? _resolvedSimulationOrNaturalLineExtent(settings, settings.readingMode)
+        : 0.0;
+    var cursor = 0.0;
+    for (var index = 0; index < paragraphs.length; index++) {
+      final paragraph = paragraphs[index];
+      final painter = _layoutBodyText(
+        paragraph,
         settings: settings,
-        position: position,
+        mode: settings.readingMode,
+        width: width,
       );
-    } finally {
-      painter.dispose();
+      try {
+        if (bodyY <= cursor + painter.height ||
+            index == paragraphs.length - 1) {
+          final localY = (bodyY - cursor)
+              .clamp(0.0, math.max(0.0, painter.height - 0.01))
+              .toDouble();
+          final position = painter.height <= 0
+              ? 0
+              : painter.getPositionForOffset(Offset(0, localY)).offset;
+          return _ReadingTextAnchor(
+            chapterIndex: _chapterIndex,
+            paragraphIndex: index,
+            characterOffset: position.clamp(0, paragraph.length),
+          );
+        }
+        cursor += painter.height + paragraphGap;
+      } finally {
+        painter.dispose();
+      }
     }
+    return _ReadingTextAnchor(
+      chapterIndex: _chapterIndex,
+      paragraphIndex: paragraphs.length - 1,
+      characterOffset: paragraphs.last.length,
+    );
   }
 
   double? _scrollOffsetForTextAnchor(
@@ -1240,109 +1288,62 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
       return rawOffset.clamp(0.0, maxExtent).toDouble();
     }
-    final bodyText = _joinedBodyText(paragraphs, settings);
-    final joinedPosition = _joinedPositionForAnchor(
-      anchor,
-      paragraphs: paragraphs,
-      settings: settings,
-    );
-    final painter = _layoutBodyText(
-      bodyText,
-      settings: settings,
-      mode: mode,
-      width: width,
-    );
-    try {
-      final caretOffset = painter.getOffsetForCaret(
-        TextPosition(offset: joinedPosition.clamp(0, bodyText.length)),
-        Rect.zero,
-      );
-      final rawOffset =
-          _bodyStartOffset(
-            chapter,
-            settings: settings,
-            mode: mode,
-            width: width,
-          ) +
-          caretOffset.dy;
-      if (mode == ReaderReadingMode.simulation && viewportDimension > 0) {
-        final pageOffset =
-            ((rawOffset + 0.01) / viewportDimension).floor() *
-            viewportDimension;
-        return _alignSimulationOffset(
-          pageOffset,
-          pageExtent: viewportDimension,
-          maxExtent: maxExtent,
-        );
-      }
-      return rawOffset.clamp(0.0, maxExtent).toDouble();
-    } finally {
-      painter.dispose();
-    }
-  }
-
-  String _joinedBodyText(List<String> paragraphs, ReaderSettings settings) {
-    final separator =
+    final targetIndex = anchor.paragraphIndex.clamp(0, paragraphs.length - 1);
+    final paragraphGap =
         settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
-        ? '\n\n'
-        : '\n';
-    return paragraphs.join(separator);
+        ? _resolvedSimulationOrNaturalLineExtent(settings, mode)
+        : 0.0;
+    var bodyOffset = 0.0;
+    for (var index = 0; index <= targetIndex; index++) {
+      final paragraph = paragraphs[index];
+      final painter = _layoutBodyText(
+        paragraph,
+        settings: settings,
+        mode: mode,
+        width: width,
+      );
+      try {
+        if (index == targetIndex) {
+          final caretOffset = painter.getOffsetForCaret(
+            TextPosition(
+              offset: anchor.characterOffset.clamp(0, paragraph.length),
+            ),
+            Rect.zero,
+          );
+          bodyOffset += caretOffset.dy;
+        } else {
+          bodyOffset += painter.height + paragraphGap;
+        }
+      } finally {
+        painter.dispose();
+      }
+    }
+    final rawOffset =
+        _bodyStartOffset(
+          chapter,
+          settings: settings,
+          mode: mode,
+          width: width,
+        ) +
+        bodyOffset;
+    if (mode == ReaderReadingMode.simulation && viewportDimension > 0) {
+      final pageOffset =
+          ((rawOffset + 0.01) / viewportDimension).floor() * viewportDimension;
+      return _alignSimulationOffset(
+        pageOffset,
+        pageExtent: viewportDimension,
+        maxExtent: maxExtent,
+      );
+    }
+    return rawOffset.clamp(0.0, maxExtent).toDouble();
   }
 
-  _ReadingTextAnchor _anchorFromJoinedPosition({
-    required int chapterIndex,
-    required List<String> paragraphs,
-    required ReaderSettings settings,
-    required int position,
-  }) {
-    final separatorLength =
-        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine ? 2 : 1;
-    var cursor = 0;
-    for (var index = 0; index < paragraphs.length; index++) {
-      final paragraphLength = paragraphs[index].length;
-      final paragraphEnd = cursor + paragraphLength;
-      if (position <= paragraphEnd || index == paragraphs.length - 1) {
-        return _ReadingTextAnchor(
-          chapterIndex: chapterIndex,
-          paragraphIndex: index,
-          characterOffset: (position - cursor).clamp(0, paragraphLength),
-        );
-      }
-      final nextParagraphStart = paragraphEnd + separatorLength;
-      if (position < nextParagraphStart) {
-        return _ReadingTextAnchor(
-          chapterIndex: chapterIndex,
-          paragraphIndex: math.min(index + 1, paragraphs.length - 1),
-          characterOffset: 0,
-        );
-      }
-      cursor = nextParagraphStart;
-    }
-    return _ReadingTextAnchor(
-      chapterIndex: chapterIndex,
-      paragraphIndex: paragraphs.length - 1,
-      characterOffset: paragraphs.last.length,
-    );
-  }
-
-  int _joinedPositionForAnchor(
-    _ReadingTextAnchor anchor, {
-    required List<String> paragraphs,
-    required ReaderSettings settings,
-  }) {
-    final separatorLength =
-        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine ? 2 : 1;
-    final paragraphIndex = anchor.paragraphIndex.clamp(
-      0,
-      paragraphs.length - 1,
-    );
-    var position = 0;
-    for (var index = 0; index < paragraphIndex; index++) {
-      position += paragraphs[index].length + separatorLength;
-    }
-    return position +
-        anchor.characterOffset.clamp(0, paragraphs[paragraphIndex].length);
-  }
+  double _resolvedSimulationOrNaturalLineExtent(
+    ReaderSettings settings,
+    ReaderReadingMode mode,
+  ) => mode == ReaderReadingMode.simulation
+      ? _resolvedSimulationLineExtent(settings)
+      : settings.fontSize * settings.lineHeight;
 
   double _resolvedSimulationLineExtent(ReaderSettings settings) {
     final signature = _SimulationLayoutSignature(
@@ -1742,7 +1743,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         ? math.max(baseLine, (naturalLineExtent / baseLine).ceil() * baseLine)
         : naturalLineExtent;
     return StrutStyle(
-      fontFamily: settings.effectiveFontFamily,
+      fontFamily: block.style.fontFamily ?? settings.effectiveFontFamily,
       fontSize: settings.fontSize,
       height: lineExtent / settings.fontSize,
       fontWeight: weight >= 600
@@ -1814,7 +1815,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         ? (style.fontWeight >= 800 ? FontWeight.w900 : FontWeight.w700)
         : settings.effectiveFontWeight;
     return TextStyle(
-      fontFamily: settings.effectiveFontFamily,
+      fontFamily: style.fontFamily ?? settings.effectiveFontFamily,
       fontSize: settings.fontSize * style.fontScale,
       fontWeight: weight,
       fontStyle: style.italic ? FontStyle.italic : FontStyle.normal,
@@ -2033,7 +2034,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<bool> _capturePageTurnSnapshot() {
     if (!mounted ||
         _readerModalOpen ||
-        _textSelectionActiveNotifier.value ||
+        _selectionController.active.value ||
         _settings.readingMode != ReaderReadingMode.simulation ||
         _settings.simulationPageTurnEffect !=
             SimulationPageTurnEffect.simulation) {
@@ -2068,7 +2069,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       for (var attempt = 0; attempt < 8; attempt++) {
         if (!mounted ||
             _readerModalOpen ||
-            _textSelectionActiveNotifier.value ||
+            _selectionController.active.value ||
             serial != _pageTurnSnapshotSerial ||
             chapterIndex != _chapterIndex ||
             _settings.readingMode != ReaderReadingMode.simulation ||
@@ -2091,7 +2092,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       final image = await boundary.toImage(pixelRatio: pixelRatio);
       if (!mounted ||
           _readerModalOpen ||
-          _textSelectionActiveNotifier.value ||
+          _selectionController.active.value ||
           serial != _pageTurnSnapshotSerial ||
           chapterIndex != _chapterIndex ||
           _settings.readingMode != ReaderReadingMode.simulation ||
@@ -2125,7 +2126,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _scheduleReversePageTurnSnapshotCapture(_SimulationPageTarget target) {
     if (_readerModalOpen ||
-        _textSelectionActiveNotifier.value ||
+        _selectionController.active.value ||
         target.goingNext ||
         _settings.readingMode != ReaderReadingMode.simulation ||
         _settings.simulationPageTurnEffect !=
@@ -2147,7 +2148,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<bool> _captureReversePageTurnSnapshot(_SimulationPageTarget target) {
     if (!mounted ||
         _readerModalOpen ||
-        _textSelectionActiveNotifier.value ||
+        _selectionController.active.value ||
         target.goingNext) {
       return Future<bool>.value(false);
     }
@@ -2182,7 +2183,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         final currentTarget = _simulationPageTarget;
         if (!mounted ||
             _readerModalOpen ||
-            _textSelectionActiveNotifier.value ||
+            _selectionController.active.value ||
             serial != _reversePageTurnSnapshotSerial ||
             currentTarget == null ||
             currentTarget.goingNext ||
@@ -2205,7 +2206,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       final currentTarget = _simulationPageTarget;
       if (!mounted ||
           _readerModalOpen ||
-          _textSelectionActiveNotifier.value ||
+          _selectionController.active.value ||
           serial != _reversePageTurnSnapshotSerial ||
           currentTarget == null ||
           currentTarget.goingNext ||
@@ -2237,7 +2238,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _scheduleSimulationSnapshotWarmup() {
     if (_readerModalOpen ||
-        _textSelectionActiveNotifier.value ||
+        _selectionController.active.value ||
         !_settingsLoaded ||
         _settings.readingMode != ReaderReadingMode.simulation ||
         _settings.simulationPageTurnEffect !=
@@ -2249,7 +2250,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
           _readerModalOpen ||
-          _textSelectionActiveNotifier.value ||
+          _selectionController.active.value ||
           _settings.readingMode != ReaderReadingMode.simulation ||
           _settings.simulationPageTurnEffect !=
               SimulationPageTurnEffect.simulation ||
@@ -2683,7 +2684,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleReadingPointerMove(PointerMoveEvent event, double width) {
-    if (_textSelectionActiveNotifier.value) {
+    if (_selectionController.active.value) {
       if (event.pointer == _readingTapPointer) _readingTapMoved = true;
       if (event.pointer == _simulationTurnPointer) {
         _clearSimulationTurnPointer();
@@ -2784,7 +2785,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleHorizontalDragStart(DragStartDetails _) {
-    if (_textSelectionActiveNotifier.value) return;
+    if (_selectionController.active.value) return;
     _beginHorizontalPageTurn();
   }
 
@@ -2836,7 +2837,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleHorizontalDragUpdate(DragUpdateDetails details, double width) {
-    if (_textSelectionActiveNotifier.value) return;
+    if (_selectionController.active.value) return;
     _updateHorizontalPageTurn(deltaX: details.delta.dx, width: width);
   }
 
@@ -3063,7 +3064,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleHorizontalDragEnd(DragEndDetails details, double width) {
-    if (_textSelectionActiveNotifier.value) return;
+    if (_selectionController.active.value) return;
     _endHorizontalPageTurn(details.primaryVelocity ?? 0, width);
   }
 
@@ -3184,12 +3185,12 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _setTextSelectionBlocked(bool blocked) {
     if (blocked) ContextMenuController.removeAny();
-    if (_selectionBlockedNotifier.value == blocked) return;
-    _selectionBlockedNotifier.value = blocked;
+    if (_selectionController.blocked.value == blocked) return;
+    _selectionController.setBlocked(blocked);
   }
 
   void _handleTextSelectionActivityChanged() {
-    if (!_textSelectionActiveNotifier.value) return;
+    if (!_selectionController.active.value) return;
     _readingTapMoved = true;
     _clearSimulationTurnPointer();
     if (_pageDragOffset != 0 || _simulationPageTarget != null) {
@@ -3316,7 +3317,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _presentSearch() async {
     if (!mounted || _readerModalOpen) return;
-    final searchSession = BookSearchService.openSession(_book);
+    final searchSession = _searchController.begin(_book);
     final themeColors = AppTheme.getReaderTheme(
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
@@ -3346,7 +3347,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         ),
       );
     } finally {
-      searchSession.dispose();
+      _searchController.end(searchSession);
       _endReaderModal();
     }
 
@@ -3878,7 +3879,10 @@ class _ReaderScreenState extends State<ReaderScreen>
       chapterIndex++
     ) {
       final chapter = _book.chapters[chapterIndex];
-      final hasEmbeddedHeading = _hasEmbeddedEpubHeading(chapter);
+      final hasEmbeddedHeading = _hasEmbeddedEpubHeading(
+        chapter,
+        avoidLazyLoad: true,
+      );
       final chapterTop = chapterIndex == _continuousAnchorChapterIndex
           ? viewPadding.top + AppSpacing.lg
           : AppSpacing.xxl;
@@ -3916,7 +3920,9 @@ class _ReaderScreenState extends State<ReaderScreen>
               ),
               sliver: SliverList.builder(
                 itemCount: chapter.hasRichEpubContent
-                    ? chapter.epubBlocks.length
+                    ? (chapter.hasKnownEpubBlockCount
+                          ? chapter.epubBlockCount
+                          : 1)
                     : 1,
                 itemBuilder: (context, itemIndex) {
                   if (chapter.hasRichEpubContent) {
@@ -3924,6 +3930,20 @@ class _ReaderScreenState extends State<ReaderScreen>
                       1.0,
                       _readerViewportWidth - horizontalPadding * 2,
                     );
+                    if (!chapter.hasKnownEpubBlockCount) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (final block in chapter.epubBlocks)
+                            _buildEpubBlockWidget(
+                              block: block,
+                              themeColors: themeColors,
+                              width: contentWidth,
+                              simulationPage: false,
+                            ),
+                        ],
+                      );
+                    }
                     return _buildEpubBlockWidget(
                       block: chapter.epubBlocks[itemIndex],
                       themeColors: themeColors,
@@ -3968,8 +3988,8 @@ class _ReaderScreenState extends State<ReaderScreen>
         color: themeColors.background,
         child: _DoubleTapFilteredSelectionArea(
           colors: themeColors,
-          selectionBlocked: _selectionBlockedNotifier,
-          selectionActive: _textSelectionActiveNotifier,
+          selectionBlocked: _selectionController.blocked,
+          selectionActive: _selectionController.active,
           onReaderModalOpened: _beginReaderModal,
           onReaderModalClosed: _endReaderModal,
           child: CustomScrollView(
@@ -4340,22 +4360,29 @@ class _ReaderScreenState extends State<ReaderScreen>
       return extent;
     }
 
-    final bodyPainter = _layoutBodyText(
-      _joinedBodyText(paragraphs, _settings),
-      settings: _settings,
-      mode: ReaderReadingMode.simulation,
-      width: contentWidth,
-    );
-    try {
-      final bodyLineCount = bodyPainter.computeLineMetrics().length;
-      final extent =
-          titleExtent +
-          bodyLineCount * _resolvedSimulationLineExtent(_settings);
-      _cacheSimulationContentExtent(chapter, extent);
-      return extent;
-    } finally {
-      bodyPainter.dispose();
+    final lineExtent = _resolvedSimulationLineExtent(_settings);
+    final paragraphGap =
+        _settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
+        ? lineExtent
+        : 0.0;
+    var bodyExtent = 0.0;
+    for (var index = 0; index < paragraphs.length; index++) {
+      final painter = _layoutBodyText(
+        paragraphs[index],
+        settings: _settings,
+        mode: ReaderReadingMode.simulation,
+        width: contentWidth,
+      );
+      try {
+        bodyExtent += painter.computeLineMetrics().length * lineExtent;
+      } finally {
+        painter.dispose();
+      }
+      if (index < paragraphs.length - 1) bodyExtent += paragraphGap;
     }
+    final extent = titleExtent + bodyExtent;
+    _cacheSimulationContentExtent(chapter, extent);
+    return extent;
   }
 
   void _cacheSimulationContentExtent(Chapter chapter, double extent) {
@@ -4547,8 +4574,8 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     Widget readingContent = _DoubleTapFilteredSelectionArea(
       colors: themeColors,
-      selectionBlocked: _selectionBlockedNotifier,
-      selectionActive: _textSelectionActiveNotifier,
+      selectionBlocked: _selectionController.blocked,
+      selectionActive: _selectionController.active,
       onReaderModalOpened: _beginReaderModal,
       onReaderModalClosed: _endReaderModal,
       child: scrollView,
@@ -4677,1256 +4704,6 @@ class _ReaderScreenState extends State<ReaderScreen>
           ),
         ),
       ),
-    );
-  }
-}
-
-class _DoubleTapFilteredSelectionArea extends StatefulWidget {
-  final Widget child;
-  final ReaderThemeColors colors;
-  final ValueListenable<bool> selectionBlocked;
-  final ValueNotifier<bool> selectionActive;
-  final VoidCallback onReaderModalOpened;
-  final VoidCallback onReaderModalClosed;
-
-  const _DoubleTapFilteredSelectionArea({
-    required this.child,
-    required this.colors,
-    required this.selectionBlocked,
-    required this.selectionActive,
-    required this.onReaderModalOpened,
-    required this.onReaderModalClosed,
-  });
-
-  @override
-  State<_DoubleTapFilteredSelectionArea> createState() =>
-      _DoubleTapFilteredSelectionAreaState();
-}
-
-class _TextActionChoice {
-  final SystemTextActionTarget target;
-  final bool remember;
-
-  const _TextActionChoice({required this.target, required this.remember});
-}
-
-class _DoubleTapFilteredSelectionAreaState
-    extends State<_DoubleTapFilteredSelectionArea> {
-  static const _tapSlop = 18.0;
-  static const _doubleTapSlop = 100.0;
-  static const _doubleTapTimeout = Duration(milliseconds: 300);
-  static const _aiIconAssets = <String, String>{
-    'deepseek': 'assets/images/ai/deepseek.webp',
-    'chatgpt': 'assets/images/ai/chatgpt.webp',
-    'gemini': 'assets/images/ai/gemini.webp',
-    'claude': 'assets/images/ai/claude.webp',
-    'copilot': 'assets/images/ai/copilot.webp',
-    'perplexity': 'assets/images/ai/perplexity.webp',
-  };
-
-  final _selectionAreaKey = GlobalKey<SelectionAreaState>();
-  int? _pointer;
-  Offset? _downPosition;
-  Duration? _downTime;
-  bool _moved = false;
-  bool _secondTapCandidate = false;
-  Duration? _lastTapUpTime;
-  Offset? _lastTapUpPosition;
-  bool _suppressSelection = false;
-  bool _clearScheduled = false;
-  SelectedContent? _selectedContent;
-  Timer? _suppressionTimer;
-  bool _externallyBlocked = false;
-  bool _ownsActiveSelection = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _externallyBlocked = widget.selectionBlocked.value;
-    widget.selectionBlocked.addListener(_handleSelectionBlockChanged);
-  }
-
-  @override
-  void didUpdateWidget(covariant _DoubleTapFilteredSelectionArea oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (identical(oldWidget.selectionBlocked, widget.selectionBlocked)) return;
-    oldWidget.selectionBlocked.removeListener(_handleSelectionBlockChanged);
-    _externallyBlocked = widget.selectionBlocked.value;
-    widget.selectionBlocked.addListener(_handleSelectionBlockChanged);
-    _handleSelectionBlockChanged();
-  }
-
-  void _handleSelectionBlockChanged() {
-    _externallyBlocked = widget.selectionBlocked.value;
-    if (!_externallyBlocked) return;
-    _setSelectionActive(false);
-    _selectedContent = null;
-    ContextMenuController.removeAny();
-    _selectionAreaKey.currentState?.selectableRegion.clearSelection();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_externallyBlocked) return;
-      ContextMenuController.removeAny();
-      _selectionAreaKey.currentState?.selectableRegion.clearSelection();
-    });
-  }
-
-  void _handlePointerDown(PointerDownEvent event) {
-    if (_pointer != null) return;
-    _pointer = event.pointer;
-    _downPosition = event.position;
-    _downTime = event.timeStamp;
-    _moved = false;
-    final lastTime = _lastTapUpTime;
-    final lastPosition = _lastTapUpPosition;
-    final gap = lastTime == null ? null : event.timeStamp - lastTime;
-    _secondTapCandidate =
-        gap != null &&
-        !gap.isNegative &&
-        gap <= _doubleTapTimeout &&
-        lastPosition != null &&
-        (event.position - lastPosition).distance <= _doubleTapSlop;
-    if (_secondTapCandidate) {
-      _lastTapUpTime = null;
-      _lastTapUpPosition = null;
-      _suppressSelection = true;
-      _suppressionTimer?.cancel();
-      // A long press selects after this window has elapsed, so long-press copy
-      // remains available even when it begins shortly after a normal tap.
-      _suppressionTimer = Timer(
-        _doubleTapTimeout,
-        () => _suppressSelection = false,
-      );
-    }
-  }
-
-  void _handlePointerMove(PointerMoveEvent event) {
-    if (event.pointer != _pointer || _moved) return;
-    final downPosition = _downPosition;
-    if (downPosition != null &&
-        (event.position - downPosition).distance > _tapSlop) {
-      _moved = true;
-    }
-  }
-
-  void _handlePointerUp(PointerUpEvent event) {
-    if (event.pointer != _pointer) return;
-    final downTime = _downTime;
-    final shortTap =
-        !_moved &&
-        downTime != null &&
-        event.timeStamp - downTime <= const Duration(milliseconds: 600);
-    if (shortTap && !_secondTapCandidate) {
-      _lastTapUpTime = event.timeStamp;
-      _lastTapUpPosition = event.position;
-    } else if (!shortTap) {
-      _lastTapUpTime = null;
-      _lastTapUpPosition = null;
-    }
-    _clearPointerState();
-  }
-
-  void _handlePointerCancel(PointerCancelEvent event) {
-    if (event.pointer == _pointer) _clearPointerState();
-  }
-
-  void _clearPointerState() {
-    _pointer = null;
-    _downPosition = null;
-    _downTime = null;
-    _moved = false;
-    _secondTapCandidate = false;
-  }
-
-  void _handleSelectionChanged(SelectedContent? content) {
-    _selectedContent = content;
-    final selectedText = content?.plainText.trim();
-    if (selectedText == null || selectedText.isEmpty) {
-      _setSelectionActive(false);
-      ContextMenuController.removeAny();
-      if (content != null) _scheduleInvalidSelectionClear();
-      return;
-    }
-    if (!_suppressSelection && !_externallyBlocked) {
-      _setSelectionActive(true);
-      return;
-    }
-    _setSelectionActive(false);
-    if (_clearScheduled) return;
-    _scheduleSelectionClear();
-  }
-
-  void _scheduleInvalidSelectionClear() {
-    if (_clearScheduled) return;
-    _clearScheduled = true;
-    scheduleMicrotask(() {
-      _clearScheduled = false;
-      if (!mounted) return;
-      final selectedText = _selectedContent?.plainText.trim();
-      if (selectedText != null && selectedText.isNotEmpty) return;
-      ContextMenuController.removeAny();
-      _selectedContent = null;
-      _setSelectionActive(false);
-      _selectionAreaKey.currentState?.selectableRegion.clearSelection();
-    });
-  }
-
-  void _scheduleSelectionClear() {
-    if (_clearScheduled) return;
-    _clearScheduled = true;
-    scheduleMicrotask(() {
-      _clearScheduled = false;
-      if (!mounted || (!_suppressSelection && !_externallyBlocked)) return;
-      ContextMenuController.removeAny();
-      _selectedContent = null;
-      _setSelectionActive(false);
-      _selectionAreaKey.currentState?.selectableRegion.clearSelection();
-    });
-  }
-
-  ContextMenuButtonItem? _buttonOfType(
-    List<ContextMenuButtonItem> buttons,
-    ContextMenuButtonType type,
-  ) {
-    for (final button in buttons) {
-      if (button.type == type) return button;
-    }
-    return null;
-  }
-
-  Future<void> _runSystemTextAction({required bool translate}) async {
-    final selectedText = _selectedContent?.plainText.trim();
-    ContextMenuController.removeAny();
-    if (selectedText == null || selectedText.isEmpty) return;
-    final action = translate
-        ? SystemTextActionType.translate
-        : SystemTextActionType.search;
-    try {
-      final targets = await SystemTextActionService.getTargets(action);
-      if (!mounted) return;
-      final defaultTargetId = await SystemTextActionService.getDefaultTargetId(
-        action,
-      );
-      if (!mounted) return;
-
-      SystemTextActionTarget? defaultTarget;
-      for (final target in targets) {
-        if (target.id == defaultTargetId && target.available) {
-          defaultTarget = target;
-          break;
-        }
-      }
-      if (defaultTarget != null) {
-        bool launched;
-        try {
-          launched = await SystemTextActionService.launch(
-            action: action,
-            target: defaultTarget,
-            text: selectedText,
-          );
-        } on Object {
-          await SystemTextActionService.setDefaultTargetId(action, null);
-          rethrow;
-        }
-        if (launched) return;
-        await SystemTextActionService.setDefaultTargetId(action, null);
-      }
-      if (!mounted) return;
-
-      final choice = await _showTextActionPicker(
-        context,
-        action: action,
-        targets: targets,
-      );
-      if (choice == null || !mounted) return;
-      final launched = await SystemTextActionService.launch(
-        action: action,
-        target: choice.target,
-        text: selectedText,
-      );
-      if (launched && choice.remember) {
-        await SystemTextActionService.setDefaultTargetId(
-          action,
-          choice.target.id,
-        );
-      }
-      if (!launched && mounted) {
-        AppToast.error(context, translate ? '所选 AI 应用无法接收翻译内容' : '所选浏览器无法打开搜索');
-      }
-    } on Object catch (error, stackTrace) {
-      debugPrint('Failed to launch a system text action: $error');
-      debugPrintStack(stackTrace: stackTrace);
-      if (mounted) {
-        AppToast.error(context, '无法打开所选外部应用');
-      }
-    }
-  }
-
-  Future<_TextActionChoice?> _showTextActionPicker(
-    BuildContext context, {
-    required SystemTextActionType action,
-    required List<SystemTextActionTarget> targets,
-  }) async {
-    final availableTargets = targets.where((target) => target.available);
-    if (availableTargets.isEmpty) {
-      AppToast.info(
-        context,
-        action == SystemTextActionType.translate
-            ? '没有检测到可接收文字的 AI 应用'
-            : '没有可用的浏览器',
-      );
-      return null;
-    }
-
-    var selectedId = availableTargets.first.id;
-    var remember = false;
-    widget.onReaderModalOpened();
-    try {
-      return await showModalBottomSheet<_TextActionChoice>(
-        context: context,
-        backgroundColor: Colors.transparent,
-        barrierColor: Colors.black.withValues(alpha: 0.32),
-        builder: (sheetContext) => StatefulBuilder(
-          builder: (context, setSheetState) {
-            final selected = targets.firstWhere(
-              (target) => target.id == selectedId,
-            );
-            return SafeArea(
-              child: Container(
-                margin: const EdgeInsets.all(AppSpacing.md),
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.lg,
-                  AppSpacing.lg,
-                  AppSpacing.lg,
-                  AppSpacing.md,
-                ),
-                decoration: BoxDecoration(
-                  color: widget.colors.headerBg,
-                  borderRadius: BorderRadius.circular(AppRadius.pill),
-                  border: Border.all(color: widget.colors.border),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.18),
-                      blurRadius: 24,
-                      offset: const Offset(0, 10),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      action == SystemTextActionType.translate
-                          ? '选择 AI 翻译应用'
-                          : '选择搜索浏览器',
-                      style: TextStyle(
-                        color: widget.colors.text,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: AppSpacing.xs),
-                    Text(
-                      action == SystemTextActionType.translate
-                          ? '左右滑动选择已安装且可以接收文字的 AI 应用'
-                          : '左右滑动选择 edge、chrome 或系统浏览器',
-                      style: TextStyle(
-                        color: widget.colors.secondary,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: AppSpacing.md),
-                    SizedBox(
-                      height: 120,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        physics: const BouncingScrollPhysics(
-                          parent: AlwaysScrollableScrollPhysics(),
-                        ),
-                        padding: const EdgeInsets.symmetric(horizontal: 2),
-                        itemCount: targets.length,
-                        separatorBuilder: (_, _) =>
-                            const SizedBox(width: AppSpacing.sm),
-                        itemBuilder: (context, index) {
-                          final target = targets[index];
-                          return _buildTextActionTargetCard(
-                            target: target,
-                            selected: target.id == selectedId,
-                            action: action,
-                            onTap: target.available
-                                ? () => setSheetState(
-                                    () => selectedId = target.id,
-                                  )
-                                : null,
-                          );
-                        },
-                      ),
-                    ),
-                    const SizedBox(height: AppSpacing.xs),
-                    CheckboxListTile(
-                      value: remember,
-                      onChanged: (value) =>
-                          setSheetState(() => remember = value ?? false),
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      activeColor: widget.colors.accent,
-                      checkColor: Colors.white,
-                      title: Text(
-                        '记住并默认打开',
-                        style: TextStyle(
-                          color: widget.colors.text,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      subtitle: Text(
-                        '下次点击${action == SystemTextActionType.translate ? '翻译' : '搜索'}时直接跳转',
-                        style: TextStyle(
-                          color: widget.colors.secondary,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: AppSpacing.sm),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton(
-                        onPressed: () => Navigator.pop(
-                          sheetContext,
-                          _TextActionChoice(
-                            target: selected,
-                            remember: remember,
-                          ),
-                        ),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: widget.colors.accent,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(
-                            vertical: AppSpacing.md,
-                          ),
-                        ),
-                        child: Text(
-                          action == SystemTextActionType.translate
-                              ? '发送给 ${selected.label}'
-                              : '使用 ${selected.label} 搜索',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        ),
-      );
-    } finally {
-      widget.onReaderModalClosed();
-    }
-  }
-
-  Widget _buildTextActionTargetCard({
-    required SystemTextActionTarget target,
-    required bool selected,
-    required SystemTextActionType action,
-    required VoidCallback? onTap,
-  }) {
-    final translating = action == SystemTextActionType.translate;
-    final foreground = target.available
-        ? widget.colors.text
-        : widget.colors.secondary.withValues(alpha: 0.52);
-    final accent = selected ? widget.colors.accent : widget.colors.border;
-    final cardWidth = translating ? 104.0 : 112.0;
-    final iconAsset = _aiIconAssets[target.id];
-
-    return Semantics(
-      button: true,
-      selected: selected,
-      enabled: target.available,
-      label: '${target.label}${target.available ? '' : '，未安装'}',
-      onTap: onTap,
-      child: AnimatedScale(
-        scale: selected ? 1 : 0.965,
-        duration: const Duration(milliseconds: 160),
-        curve: Curves.easeOutCubic,
-        child: SizedBox(
-          width: cardWidth,
-          child: Material(
-            color: Colors.transparent,
-            borderRadius: BorderRadius.circular(AppRadius.lg),
-            child: InkWell(
-              onTap: onTap,
-              borderRadius: BorderRadius.circular(AppRadius.lg),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 160),
-                curve: Curves.easeOutCubic,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AppSpacing.sm,
-                  vertical: AppSpacing.sm,
-                ),
-                decoration: BoxDecoration(
-                  color: selected
-                      ? widget.colors.accent.withValues(alpha: 0.11)
-                      : widget.colors.background.withValues(alpha: 0.58),
-                  borderRadius: BorderRadius.circular(AppRadius.lg),
-                  border: Border.all(
-                    color: accent,
-                    width: selected ? 1.6 : 0.8,
-                  ),
-                  boxShadow: selected
-                      ? [
-                          BoxShadow(
-                            color: widget.colors.accent.withValues(alpha: 0.14),
-                            blurRadius: 12,
-                            offset: const Offset(0, 4),
-                          ),
-                        ]
-                      : null,
-                ),
-                child: Opacity(
-                  opacity: target.available ? 1 : 0.42,
-                  child: translating
-                      ? _buildAiTargetCardContent(
-                          target: target,
-                          selected: selected,
-                          foreground: foreground,
-                          iconAsset: iconAsset,
-                        )
-                      : _buildSearchTargetCardContent(
-                          target: target,
-                          selected: selected,
-                          foreground: foreground,
-                        ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAiTargetCardContent({
-    required SystemTextActionTarget target,
-    required bool selected,
-    required Color foreground,
-    required String? iconAsset,
-  }) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        if (iconAsset != null)
-          ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: Image.asset(
-              iconAsset,
-              width: 44,
-              height: 44,
-              fit: BoxFit.cover,
-              filterQuality: FilterQuality.medium,
-            ),
-          ),
-        const SizedBox(height: AppSpacing.sm),
-        Text(
-          target.label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: foreground,
-            fontSize: 13,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          selected ? '已选择' : '点按选择',
-          style: TextStyle(
-            color: selected ? widget.colors.accent : widget.colors.secondary,
-            fontSize: 10,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildSearchTargetCardContent({
-    required SystemTextActionTarget target,
-    required bool selected,
-    required Color foreground,
-  }) {
-    final displayName = target.id == 'system' ? '系统' : target.label;
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Text(
-          'SEARCH WITH',
-          style: TextStyle(
-            color: widget.colors.secondary,
-            fontSize: 8,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.15,
-          ),
-        ),
-        const SizedBox(height: AppSpacing.sm),
-        Text(
-          displayName,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: foreground,
-            fontSize: target.id == 'system' ? 19 : 20,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.4,
-          ),
-        ),
-        const SizedBox(height: AppSpacing.sm),
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
-          width: selected ? 44 : 24,
-          height: 3,
-          decoration: BoxDecoration(
-            color: selected
-                ? widget.colors.accent
-                : widget.colors.secondary.withValues(alpha: 0.35),
-            borderRadius: BorderRadius.circular(AppRadius.pill),
-          ),
-        ),
-        const SizedBox(height: AppSpacing.xs),
-        Text(
-          target.available ? (selected ? '已选择' : '浏览器') : '未安装',
-          style: TextStyle(
-            color: selected ? widget.colors.accent : widget.colors.secondary,
-            fontSize: 10,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildContextMenu(BuildContext context, SelectableRegionState state) {
-    if (_externallyBlocked) return const SizedBox.shrink();
-    final selectedText = _selectedContent?.plainText.trim();
-    if (selectedText == null || selectedText.isEmpty) {
-      _scheduleInvalidSelectionClear();
-      return const SizedBox.shrink();
-    }
-    final defaults = state.contextMenuButtonItems;
-    final copy = _buttonOfType(defaults, ContextMenuButtonType.copy);
-    final share = _buttonOfType(defaults, ContextMenuButtonType.share);
-    final selectAll = _buttonOfType(defaults, ContextMenuButtonType.selectAll);
-    if (copy == null) {
-      _scheduleInvalidSelectionClear();
-      return const SizedBox.shrink();
-    }
-    final buttons = <ContextMenuButtonItem>[
-      copy.copyWith(label: '复制'),
-      if (share != null) share.copyWith(label: '分享'),
-      if (selectAll != null) selectAll.copyWith(label: '全选'),
-      ContextMenuButtonItem(
-        label: '翻译',
-        onPressed: () => unawaited(_runSystemTextAction(translate: true)),
-      ),
-      ContextMenuButtonItem(
-        label: '搜索',
-        onPressed: () => unawaited(_runSystemTextAction(translate: false)),
-      ),
-    ];
-    final baseTheme = Theme.of(context);
-    return Theme(
-      data: baseTheme.copyWith(
-        colorScheme: baseTheme.colorScheme.copyWith(
-          primary: widget.colors.accent,
-          surface: widget.colors.headerBg,
-          onSurface: widget.colors.text,
-        ),
-        textButtonTheme: TextButtonThemeData(
-          style: TextButton.styleFrom(
-            foregroundColor: widget.colors.text,
-            textStyle: const TextStyle(fontWeight: FontWeight.w500),
-          ),
-        ),
-      ),
-      child: AdaptiveTextSelectionToolbar.buttonItems(
-        anchors: state.contextMenuAnchors,
-        buttonItems: buttons,
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    widget.selectionBlocked.removeListener(_handleSelectionBlockChanged);
-    if (_ownsActiveSelection && widget.selectionActive.value) {
-      widget.selectionActive.value = false;
-    }
-    _suppressionTimer?.cancel();
-    super.dispose();
-  }
-
-  void _setSelectionActive(bool active) {
-    if (active) {
-      _ownsActiveSelection = true;
-      if (!widget.selectionActive.value) widget.selectionActive.value = true;
-      return;
-    }
-    if (!_ownsActiveSelection) return;
-    _ownsActiveSelection = false;
-    if (widget.selectionActive.value) widget.selectionActive.value = false;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Listener(
-      behavior: HitTestBehavior.translucent,
-      onPointerDown: _handlePointerDown,
-      onPointerMove: _handlePointerMove,
-      onPointerUp: _handlePointerUp,
-      onPointerCancel: _handlePointerCancel,
-      child: SelectionArea(
-        key: _selectionAreaKey,
-        onSelectionChanged: _handleSelectionChanged,
-        contextMenuBuilder: _buildContextMenu,
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          // Winning this arena prevents the usual double-tap word selection.
-          // The selection callback above is a second guard for platform gesture
-          // implementations that resolve the selectable region first.
-          onDoubleTap: () {},
-          child: widget.child,
-        ),
-      ),
-    );
-  }
-}
-
-class _SimulationLayoutSignature {
-  final double contentWidth;
-  final double fontSize;
-  final double lineHeight;
-  final String fontFamily;
-  final String? importedFontFamily;
-  final String? importedFontPath;
-  final FontWeight fontWeight;
-  final ReaderParagraphSpacing paragraphSpacing;
-
-  _SimulationLayoutSignature({
-    required this.contentWidth,
-    required ReaderSettings settings,
-  }) : fontSize = settings.fontSize,
-       lineHeight = settings.lineHeight,
-       fontFamily = settings.fontFamily,
-       importedFontFamily = settings.importedFontFamily,
-       importedFontPath = settings.importedFontPath,
-       fontWeight = settings.effectiveFontWeight,
-       paragraphSpacing = settings.paragraphSpacing;
-
-  bool matches(_SimulationLayoutSignature other) {
-    return contentWidth == other.contentWidth &&
-        fontSize == other.fontSize &&
-        lineHeight == other.lineHeight &&
-        fontFamily == other.fontFamily &&
-        importedFontFamily == other.importedFontFamily &&
-        importedFontPath == other.importedFontPath &&
-        fontWeight == other.fontWeight &&
-        paragraphSpacing == other.paragraphSpacing;
-  }
-}
-
-/// Keeps a lazily built simulation chapter's scroll metrics exact before its
-/// final paragraph is materialized. Flutter's default variable-height sliver
-/// extrapolates unseen children from the currently visible average; a one-page
-/// overestimate at the chapter tail makes a forward turn target a phantom page
-/// and then clamp back to the same visible page when the real tail is laid out.
-class _ExactScrollExtentSliverChildBuilderDelegate
-    extends SliverChildBuilderDelegate {
-  final double exactScrollExtent;
-
-  _ExactScrollExtentSliverChildBuilderDelegate(
-    super.builder, {
-    required int childCount,
-    required double exactScrollExtent,
-  }) : exactScrollExtent = exactScrollExtent.isFinite
-           ? math.max(0.0, exactScrollExtent)
-           : 0,
-       super(childCount: childCount);
-
-  @override
-  double estimateMaxScrollOffset(
-    int firstIndex,
-    int lastIndex,
-    double leadingScrollOffset,
-    double trailingScrollOffset,
-  ) => exactScrollExtent;
-}
-
-class _SimulationPageTarget {
-  final int chapterIndex;
-  final double offset;
-  final double progress;
-  final bool goingNext;
-
-  const _SimulationPageTarget({
-    required this.chapterIndex,
-    required this.offset,
-    required this.progress,
-    required this.goingNext,
-  });
-
-  bool matches(_SimulationPageTarget other) {
-    return chapterIndex == other.chapterIndex &&
-        goingNext == other.goingNext &&
-        (offset - other.offset).abs() < 0.5;
-  }
-}
-
-double _fullViewportMaxScrollExtent(
-  double rawMaxScrollExtent,
-  double viewportDimension,
-) {
-  if (!rawMaxScrollExtent.isFinite || rawMaxScrollExtent <= 0) return 0;
-  if (!viewportDimension.isFinite || viewportDimension <= 0) {
-    return rawMaxScrollExtent;
-  }
-  final rawPageCount = rawMaxScrollExtent / viewportDimension;
-  final nearestPageCount = rawPageCount.round();
-  final nearestExtent = nearestPageCount * viewportDimension;
-  final pageCount =
-      (rawMaxScrollExtent - nearestExtent).abs() <=
-          _simulationPageExtentTolerance
-      ? nearestPageCount
-      : rawPageCount.ceil();
-  return math.max(0.0, pageCount * viewportDimension);
-}
-
-/// Extends a simulation chapter's logical scroll range to a whole number of
-/// pages. The added range is blank paper after the real chapter content, so
-/// the final page starts at the next exact viewport boundary instead of
-/// overlapping the preceding page to bottom-align a short remainder.
-class _FullViewportPagingScrollController extends ScrollController {
-  _FullViewportPagingScrollController({super.initialScrollOffset})
-    : super(keepScrollOffset: false);
-
-  @override
-  ScrollPosition createScrollPosition(
-    ScrollPhysics physics,
-    ScrollContext context,
-    ScrollPosition? oldPosition,
-  ) {
-    return _FullViewportPagingScrollPosition(
-      physics: physics,
-      context: context,
-      oldPosition: oldPosition,
-      initialPixels: initialScrollOffset,
-      keepScrollOffset: keepScrollOffset,
-      debugLabel: debugLabel,
-    );
-  }
-}
-
-class _FullViewportPagingScrollPosition extends ScrollPositionWithSingleContext
-    with _PageGridRealignMixin {
-  _FullViewportPagingScrollPosition({
-    required super.physics,
-    required super.context,
-    super.oldPosition,
-    super.initialPixels,
-    super.keepScrollOffset,
-    super.debugLabel,
-  });
-
-  @override
-  bool get pageGridRealignEnabled => true;
-
-  @override
-  bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
-    final applied = super.applyContentDimensions(
-      minScrollExtent,
-      _fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension),
-    );
-    _schedulePageGridRealign();
-    return applied;
-  }
-}
-
-/// Self-healing page-grid guard for simulation pages.
-///
-/// Flutter silently re-interprets a ScrollPosition's pixels whenever content
-/// dimensions change — a new font size, different device metrics, system
-/// inset changes — and any drift from the page grid shows up as half-clipped
-/// first/last glyph rows, or as the chapter tail bouncing between two
-/// candidate offsets. After every layout, drift beyond half a pixel is
-/// snapped back to the nearest page boundary on the next frame.
-mixin _PageGridRealignMixin on ScrollPositionWithSingleContext {
-  bool get pageGridRealignEnabled;
-
-  bool _pageGridRealignScheduled = false;
-
-  void _schedulePageGridRealign() {
-    if (!pageGridRealignEnabled ||
-        _pageGridRealignScheduled ||
-        !hasPixels ||
-        !hasContentDimensions) {
-      return;
-    }
-    final snapped = _nearestPageGridOffset();
-    if (snapped == null || (pixels - snapped).abs() <= 0.5) return;
-    _pageGridRealignScheduled = true;
-    SchedulerBinding.instance.addPostFrameCallback((_) {
-      _pageGridRealignScheduled = false;
-      if (!hasPixels || !hasContentDimensions) return;
-      final target = _nearestPageGridOffset();
-      if (target == null || (pixels - target).abs() <= 0.5) return;
-      jumpTo(target);
-    });
-  }
-
-  double? _nearestPageGridOffset() {
-    final extent = viewportDimension;
-    if (!extent.isFinite || extent <= 0) return null;
-    final minExtent = minScrollExtent;
-    final maxExtent = maxScrollExtent;
-    if (!minExtent.isFinite || !maxExtent.isFinite) return null;
-    return ((pixels / extent).round() * extent)
-        .clamp(minExtent, maxExtent)
-        .toDouble();
-  }
-}
-
-/// Separates direct reader scrolling from Flutter's selection edge scroller.
-///
-/// Once a non-empty selection exists, a finger dragging the underlying
-/// Scrollable must not compete with the selection handle for the same pointer.
-/// Chapter and continuous modes still allow programmatic [animateTo] calls so
-/// Flutter can extend the selection at the viewport edge. Simulation mode adds
-/// the stricter finite-page lock and rejects every pixel mutation.
-class _SelectionAwareScrollController extends ScrollController {
-  final ValueListenable<bool> selectionActive;
-  final bool Function() freezeSelectionViewport;
-  final bool paginateToFullViewports;
-
-  _SelectionAwareScrollController({
-    required this.selectionActive,
-    required this.freezeSelectionViewport,
-    required this.paginateToFullViewports,
-    super.initialScrollOffset,
-  });
-
-  @override
-  ScrollPosition createScrollPosition(
-    ScrollPhysics physics,
-    ScrollContext context,
-    ScrollPosition? oldPosition,
-  ) {
-    return _SelectionAwareScrollPosition(
-      physics: physics,
-      context: context,
-      oldPosition: oldPosition,
-      initialPixels: initialScrollOffset,
-      keepScrollOffset: keepScrollOffset,
-      debugLabel: debugLabel,
-      selectionActive: selectionActive,
-      viewportIsFrozen: () =>
-          selectionActive.value && freezeSelectionViewport(),
-      paginateToFullViewports: paginateToFullViewports,
-    );
-  }
-}
-
-class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext
-    with _PageGridRealignMixin {
-  final ValueListenable<bool> selectionActive;
-  final bool Function() viewportIsFrozen;
-  final bool paginateToFullViewports;
-  Completer<void>? _frozenAnimationCompleter;
-
-  _SelectionAwareScrollPosition({
-    required super.physics,
-    required super.context,
-    required this.selectionActive,
-    required this.viewportIsFrozen,
-    required this.paginateToFullViewports,
-    super.oldPosition,
-    super.initialPixels,
-    super.keepScrollOffset,
-    super.debugLabel,
-  }) {
-    selectionActive.addListener(_handleSelectionActivityChanged);
-  }
-
-  @override
-  bool get pageGridRealignEnabled => paginateToFullViewports;
-
-  @override
-  bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
-    final applied = super.applyContentDimensions(
-      minScrollExtent,
-      paginateToFullViewports
-          ? _fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension)
-          : maxScrollExtent,
-    );
-    _schedulePageGridRealign();
-    return applied;
-  }
-
-  void _handleSelectionActivityChanged() {
-    if (!viewportIsFrozen()) _releaseFrozenAnimation();
-  }
-
-  void _releaseFrozenAnimation() {
-    final completer = _frozenAnimationCompleter;
-    _frozenAnimationCompleter = null;
-    if (completer != null && !completer.isCompleted) completer.complete();
-  }
-
-  // Flutter's selection edge scroller first checks these extents before it
-  // starts an animateTo loop. Collapsing both extents to the visible page
-  // position makes a simulation page a true, finite selection surface while
-  // the selection gesture is active. This stops the auto-scroller at its
-  // source instead of completing a blocked animation and letting it retry in
-  // a tight asynchronous loop.
-  @override
-  double get minScrollExtent =>
-      viewportIsFrozen() ? pixels : super.minScrollExtent;
-
-  @override
-  double get maxScrollExtent =>
-      viewportIsFrozen() ? pixels : super.maxScrollExtent;
-
-  @override
-  double setPixels(double newPixels) {
-    if (viewportIsFrozen()) return newPixels - pixels;
-    return super.setPixels(newPixels);
-  }
-
-  @override
-  void forcePixels(double value) {
-    if (viewportIsFrozen()) return;
-    super.forcePixels(value);
-  }
-
-  @override
-  void applyUserOffset(double delta) {
-    // A selection-handle drag and a Scrollable drag can both remain in the
-    // Android pointer stream. Let the selection own that stream. Flutter's
-    // edge auto-scroller uses animateTo instead, so chapter and continuous
-    // selections can still advance vertically without racing this path.
-    if (selectionActive.value) return;
-    super.applyUserOffset(delta);
-  }
-
-  @override
-  void pointerScroll(double delta) {
-    if (selectionActive.value) return;
-    super.pointerScroll(delta);
-  }
-
-  @override
-  void jumpTo(double value) {
-    if (viewportIsFrozen()) return;
-    super.jumpTo(value);
-  }
-
-  @override
-  Future<void> animateTo(
-    double to, {
-    required Duration duration,
-    required Curve curve,
-  }) {
-    // Keep a rejected edge-scroll request pending for the lifetime of the
-    // fixed-page selection. Completing immediately makes Flutter's selection
-    // auto-scroller retry in a tight loop at the page edge.
-    if (viewportIsFrozen()) {
-      return (_frozenAnimationCompleter ??= Completer<void>()).future;
-    }
-    _releaseFrozenAnimation();
-    return super.animateTo(to, duration: duration, curve: curve);
-  }
-
-  @override
-  void dispose() {
-    selectionActive.removeListener(_handleSelectionActivityChanged);
-    _releaseFrozenAnimation();
-    super.dispose();
-  }
-}
-
-class _ReadingTextAnchor {
-  final int chapterIndex;
-  final int paragraphIndex;
-  final int characterOffset;
-
-  const _ReadingTextAnchor({
-    required this.chapterIndex,
-    required this.paragraphIndex,
-    required this.characterOffset,
-  });
-}
-
-class _ScrollSnapshot {
-  final double offset;
-  final double progress;
-
-  const _ScrollSnapshot({required this.offset, required this.progress});
-}
-
-enum _StraightPaperPaintLayer { base, lighting }
-
-class _StraightLeafFrontClipper extends CustomClipper<Path> {
-  final double progress;
-
-  const _StraightLeafFrontClipper({required this.progress});
-
-  @override
-  Path getClip(Size size) =>
-      _StraightLeafGeometry.calculate(size: size, progress: progress).frontPath;
-
-  @override
-  bool shouldReclip(covariant _StraightLeafFrontClipper oldClipper) {
-    return oldClipper.progress != progress;
-  }
-}
-
-class _StraightLeafBackClipper extends CustomClipper<Path> {
-  final double progress;
-
-  const _StraightLeafBackClipper({required this.progress});
-
-  @override
-  Path getClip(Size size) =>
-      _StraightLeafGeometry.calculate(size: size, progress: progress).backPath;
-
-  @override
-  bool shouldReclip(covariant _StraightLeafBackClipper oldClipper) {
-    return oldClipper.progress != progress;
-  }
-}
-
-class _StraightPaperPainter extends CustomPainter {
-  final double progress;
-  final Color pageColor;
-  final _StraightPaperPaintLayer layer;
-
-  const _StraightPaperPainter({
-    required this.progress,
-    required this.pageColor,
-    required this.layer,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (size.isEmpty) return;
-    final p = progress.clamp(0.0, 1.0).toDouble();
-    if (p <= 0 || p >= 1) return;
-    final geometry = _StraightLeafGeometry.calculate(size: size, progress: p);
-    final strength = geometry.foldStrength;
-    final visibleBounds = geometry.backPath.getBounds().intersect(
-      Offset.zero & size,
-    );
-    if (visibleBounds.width <= 0.1) return;
-
-    final isDarkPage = pageColor.computeLuminance() < 0.25;
-    if (layer == _StraightPaperPaintLayer.base) {
-      canvas.drawShadow(
-        geometry.backPath,
-        Colors.black.withValues(alpha: 0.30 * strength),
-        12 + 8 * strength,
-        false,
-      );
-      final paper = Color.lerp(
-        pageColor,
-        Colors.white,
-        isDarkPage ? 0.02 : 0.045,
-      )!;
-      canvas.drawPath(geometry.backPath, Paint()..color = paper);
-      return;
-    }
-
-    final lighting = LinearGradient(
-      colors: [
-        Colors.black.withValues(alpha: 0.10 * strength),
-        Colors.white.withValues(alpha: 0.11 * strength),
-        Colors.transparent,
-        Colors.black.withValues(alpha: 0.14 * strength),
-      ],
-      stops: const [0, 0.22, 0.70, 1],
-    ).createShader(visibleBounds);
-    canvas
-      ..save()
-      ..clipPath(geometry.backPath)
-      ..drawRect(visibleBounds, Paint()..shader = lighting)
-      ..restore();
-
-    canvas.drawLine(
-      Offset(geometry.outerEdgeX, 0),
-      Offset(geometry.outerEdgeX, size.height),
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.20 * strength)
-        ..strokeWidth = 1.25,
-    );
-    canvas.drawLine(
-      Offset(geometry.creaseX, 0),
-      Offset(geometry.creaseX, size.height),
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.18 * strength)
-        ..strokeWidth = 2
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.8),
-    );
-    canvas.drawLine(
-      Offset(geometry.creaseX - 0.75, 0),
-      Offset(geometry.creaseX - 0.75, size.height),
-      Paint()
-        ..color = Colors.white.withValues(alpha: 0.32 * strength)
-        ..strokeWidth = 1,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _StraightPaperPainter oldDelegate) {
-    return oldDelegate.progress != progress ||
-        oldDelegate.pageColor != pageColor ||
-        oldDelegate.layer != layer;
-  }
-}
-
-class _StraightLeafGeometry {
-  final Path frontPath;
-  final Path backPath;
-  final double creaseX;
-  final double outerEdgeX;
-  final double foldStrength;
-
-  const _StraightLeafGeometry({
-    required this.frontPath,
-    required this.backPath,
-    required this.creaseX,
-    required this.outerEdgeX,
-    required this.foldStrength,
-  });
-
-  static _StraightLeafGeometry calculate({
-    required Size size,
-    required double progress,
-  }) {
-    final p = progress.clamp(0.0, 1.0).toDouble();
-    final creaseX = size.width * (1 - p);
-    final outerEdgeX = creaseX * 2 - size.width;
-    final front = Path()..addRect(Rect.fromLTRB(0, 0, creaseX, size.height));
-    final back = Path()
-      ..addRect(
-        Rect.fromLTRB(
-          math.min(outerEdgeX, creaseX),
-          0,
-          math.max(outerEdgeX, creaseX),
-          size.height,
-        ),
-      );
-    return _StraightLeafGeometry(
-      frontPath: front,
-      backPath: back,
-      creaseX: creaseX,
-      outerEdgeX: outerEdgeX,
-      foldStrength: math.sin(math.pi * p).clamp(0.0, 1.0).toDouble(),
     );
   }
 }

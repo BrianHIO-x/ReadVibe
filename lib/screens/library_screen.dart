@@ -14,10 +14,12 @@ import '../services/storage_service.dart';
 import '../services/txt_parser.dart';
 import '../services/epub_parser.dart';
 import '../services/pdf_import_service.dart';
+import '../services/pdf_renderer_service.dart';
 import '../services/book_search_service.dart';
 import '../services/word_parser.dart';
 import '../services/update_service.dart';
 import '../services/incoming_file_service.dart';
+import '../services/mobi_parser.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../widgets/app_toast.dart';
@@ -39,7 +41,7 @@ class LibraryScreen extends StatefulWidget {
 
 enum _BookAction { rename, move, delete }
 
-enum _ShelfFilter { all, recent, unread, txt, epub, word, pdf }
+enum _ShelfFilter { all, recent, unread, txt, epub, kindle, word, pdf }
 
 extension _ShelfFilterInfo on _ShelfFilter {
   String get label => switch (this) {
@@ -48,6 +50,7 @@ extension _ShelfFilterInfo on _ShelfFilter {
     _ShelfFilter.unread => '未读',
     _ShelfFilter.txt => 'TXT',
     _ShelfFilter.epub => 'EPUB',
+    _ShelfFilter.kindle => 'MOBI/AZW',
     _ShelfFilter.word => 'Word',
     _ShelfFilter.pdf => 'PDF',
   };
@@ -160,6 +163,25 @@ class _LibraryScreenState extends State<LibraryScreen>
             '${result.removedDirectories} directories.',
           );
         }
+        final snapshot = List<Book>.from(_books);
+        final deepAvailability = <String, BookAvailability>{};
+        for (final book in snapshot) {
+          if (!mounted) return;
+          deepAvailability[book.id] = await _storage.checkBookAvailability(
+            book,
+            deep: true,
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+        }
+        if (mounted) {
+          setState(() {
+            for (final entry in deepAvailability.entries) {
+              if (_books.any((book) => book.id == entry.key)) {
+                _availabilityMap[entry.key] = entry.value;
+              }
+            }
+          });
+        }
       } on Object catch (error, stackTrace) {
         debugPrint('Storage maintenance failed: $error');
         debugPrintStack(stackTrace: stackTrace);
@@ -244,6 +266,10 @@ class _LibraryScreenState extends State<LibraryScreen>
             _ShelfFilter.unread => !_progressMap.containsKey(book.id),
             _ShelfFilter.txt => book.format == BookFormat.txt,
             _ShelfFilter.epub => book.format == BookFormat.epub,
+            _ShelfFilter.kindle =>
+              book.format == BookFormat.mobi ||
+                  book.format == BookFormat.azw ||
+                  book.format == BookFormat.azw3,
             _ShelfFilter.word =>
               book.format == BookFormat.doc || book.format == BookFormat.docx,
             _ShelfFilter.pdf => book.format == BookFormat.pdf,
@@ -352,7 +378,16 @@ class _LibraryScreenState extends State<LibraryScreen>
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['txt', 'epub', 'docx', 'doc', 'pdf'],
+        allowedExtensions: [
+          'txt',
+          'epub',
+          'mobi',
+          'azw',
+          'azw3',
+          'docx',
+          'doc',
+          'pdf',
+        ],
       );
 
       if (result == null || result.files.isEmpty || !mounted) return;
@@ -397,13 +432,34 @@ class _LibraryScreenState extends State<LibraryScreen>
       if (ext.endsWith('.epub')) {
         importedBook = await parseEpub(path, fileName, _storage);
       } else if (ext.endsWith('.pdf')) {
-        importedBook = await importPdf(path, fileName, _storage);
+        try {
+          importedBook = await importPdf(path, fileName, _storage);
+        } on PdfPasswordRequiredException {
+          final password = await _requestPdfPassword(fileName);
+          if (password == null) return;
+          try {
+            importedBook = await importPdf(
+              path,
+              fileName,
+              _storage,
+              password: password,
+            );
+          } on PdfPasswordRequiredException {
+            throw const FormatException('PDF 密码不正确');
+          }
+        }
       } else if (ext.endsWith('.txt')) {
         importedBook = await parseTxt(path, fileName);
+      } else if (ext.endsWith('.mobi') ||
+          ext.endsWith('.azw') ||
+          ext.endsWith('.azw3')) {
+        importedBook = await parseKindleBook(path, fileName);
       } else if (ext.endsWith('.docx') || ext.endsWith('.doc')) {
-        importedBook = await parseWordDocument(path, fileName);
+        importedBook = await parseWordDocument(path, fileName, _storage);
       } else {
-        throw const FormatException('不支持的文件格式，请选择 TXT、EPUB、PDF、DOCX 或 DOC');
+        throw const FormatException(
+          '不支持的文件格式，请选择 TXT、EPUB、MOBI、AZW、AZW3、PDF、DOCX 或 DOC',
+        );
       }
       await _storage.saveBook(importedBook);
       metadataSaved = true;
@@ -424,6 +480,70 @@ class _LibraryScreenState extends State<LibraryScreen>
             : '导入失败，请确认文件未损坏后重试',
       );
     }
+  }
+
+  Future<String?> _requestPdfPassword(String fileName) async {
+    if (!mounted) return null;
+    final controller = TextEditingController();
+    var obscure = true;
+    final password = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('PDF 需要密码'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(fileName, maxLines: 2, overflow: TextOverflow.ellipsis),
+              const SizedBox(height: AppSpacing.md),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                obscureText: obscure,
+                textInputAction: TextInputAction.done,
+                onChanged: (_) => setDialogState(() {}),
+                decoration: InputDecoration(
+                  labelText: '打开密码',
+                  suffixIcon: IconButton(
+                    tooltip: obscure ? '显示密码' : '隐藏密码',
+                    onPressed: () => setDialogState(() => obscure = !obscure),
+                    icon: Icon(
+                      obscure
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                    ),
+                  ),
+                ),
+                onSubmitted: (value) {
+                  if (value.isNotEmpty) Navigator.pop(dialogContext, value);
+                },
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              const Text(
+                '密码只在本次导入时使用。应用会在本地保存一个已解锁副本，不会保存或上传密码。',
+                style: TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: controller.text.isEmpty
+                  ? null
+                  : () => Navigator.pop(dialogContext, controller.text),
+              child: const Text('解锁并导入'),
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    return password;
   }
 
   void _showError(String message) {
@@ -831,48 +951,79 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _renameBook(Book book) async {
-    final controller = TextEditingController(text: book.title);
+    final titleController = TextEditingController(text: book.title);
+    final authorController = TextEditingController(text: book.author);
     final formKey = GlobalKey<FormState>();
     final colors = AppTheme.getReaderTheme(
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
-    final renamed = await showDialog<String>(
+    final edited = await showDialog<({String title, String author})>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         backgroundColor: colors.headerBg,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.lg),
         ),
-        title: Text('修改书籍名称', style: TextStyle(color: colors.text)),
+        title: Text('修改书籍信息', style: TextStyle(color: colors.text)),
         content: Form(
           key: formKey,
-          child: TextFormField(
-            controller: controller,
-            autofocus: true,
-            maxLength: 120,
-            maxLines: 2,
-            textInputAction: TextInputAction.done,
-            style: TextStyle(color: colors.text),
-            decoration: InputDecoration(
-              hintText: '请输入新的书籍名称',
-              hintStyle: TextStyle(color: colors.secondary),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(AppRadius.md),
-                borderSide: BorderSide(color: colors.border),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: titleController,
+                autofocus: true,
+                maxLength: 120,
+                maxLines: 2,
+                textInputAction: TextInputAction.next,
+                style: TextStyle(color: colors.text),
+                decoration: InputDecoration(
+                  labelText: '书名',
+                  hintText: '请输入书籍名称',
+                  hintStyle: TextStyle(color: colors.secondary),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    borderSide: BorderSide(color: colors.border),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    borderSide: BorderSide(color: colors.accent, width: 1.5),
+                  ),
+                ),
+                validator: (value) =>
+                    value == null || value.trim().isEmpty ? '书籍名称不能为空' : null,
               ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(AppRadius.md),
-                borderSide: BorderSide(color: colors.accent, width: 1.5),
+              const SizedBox(height: AppSpacing.sm),
+              TextFormField(
+                controller: authorController,
+                maxLength: 120,
+                maxLines: 1,
+                textInputAction: TextInputAction.done,
+                style: TextStyle(color: colors.text),
+                decoration: InputDecoration(
+                  labelText: '作者（可留空）',
+                  hintText: 'TXT 无元数据时可在这里补充',
+                  hintStyle: TextStyle(color: colors.secondary),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    borderSide: BorderSide(color: colors.border),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    borderSide: BorderSide(color: colors.accent, width: 1.5),
+                  ),
+                ),
+                onFieldSubmitted: (_) {
+                  if (formKey.currentState?.validate() == true) {
+                    Navigator.pop(dialogContext, (
+                      title: titleController.text.trim(),
+                      author: authorController.text.trim(),
+                    ));
+                  }
+                },
               ),
-            ),
-            validator: (value) =>
-                value == null || value.trim().isEmpty ? '书籍名称不能为空' : null,
-            onFieldSubmitted: (_) {
-              if (formKey.currentState?.validate() == true) {
-                Navigator.pop(dialogContext, controller.text.trim());
-              }
-            },
+            ],
           ),
         ),
         actions: [
@@ -884,7 +1035,10 @@ class _LibraryScreenState extends State<LibraryScreen>
             style: FilledButton.styleFrom(backgroundColor: colors.accent),
             onPressed: () {
               if (formKey.currentState?.validate() == true) {
-                Navigator.pop(dialogContext, controller.text.trim());
+                Navigator.pop(dialogContext, (
+                  title: titleController.text.trim(),
+                  author: authorController.text.trim(),
+                ));
               }
             },
             child: const Text('保存'),
@@ -892,16 +1046,27 @@ class _LibraryScreenState extends State<LibraryScreen>
         ],
       ),
     );
-    controller.dispose();
-    if (!mounted || renamed == null || renamed == book.title) return;
+    titleController.dispose();
+    authorController.dispose();
+    if (!mounted || edited == null) return;
+    if (edited.title == book.title && edited.author == book.author) return;
     try {
-      await _storage.renameBook(book.id, renamed);
+      await _storage.updateBookDetails(
+        book.id,
+        title: edited.title,
+        author: edited.author,
+      );
       if (!mounted) return;
       final index = _books.indexWhere((item) => item.id == book.id);
       if (index >= 0) {
-        setState(() => _books[index] = _books[index].copyWith(title: renamed));
+        setState(
+          () => _books[index] = _books[index].copyWith(
+            title: edited.title,
+            author: edited.author,
+          ),
+        );
       }
-      _showMessage('书籍名称已修改');
+      _showMessage('书籍信息已修改');
     } on Object catch (error) {
       _showError(error is FormatException ? error.message : '修改名称失败，请稍后重试');
     }
@@ -1493,7 +1658,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
             child: Text(
-              '点击下方按钮，导入 TXT、EPUB、PDF、DOCX 或 DOC',
+              '点击下方按钮，导入 TXT、EPUB、MOBI/AZW、PDF 或 Word 文档',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 14, color: colors.secondary),
             ),

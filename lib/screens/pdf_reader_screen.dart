@@ -38,6 +38,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   bool _deleting = false;
   Set<int> _bookmarks = <int>{};
   Map<int, String> _notes = <int, String>{};
+  PdfDisplayTheme _displayTheme = PdfDisplayTheme.original;
   int? _sliderPage;
   String? _fatalError;
   Timer? _autoHideTimer;
@@ -67,15 +68,34 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     PdfReadingProgress? progress;
     Set<int> bookmarks = <int>{};
     Map<int, String> notes = <int, String>{};
+    var displayTheme = PdfDisplayTheme.original;
     try {
       final values = await Future.wait<Object?>([
         _storage.getPdfProgress(widget.book.id, pageCount: _pageCount),
         _storage.getPdfBookmarks(widget.book.id, _pageCount),
         _storage.getPdfNotes(widget.book.id, _pageCount),
+        _storage.getPdfDisplayTheme(widget.book.id),
+        PdfRendererService.getTextAnnotations(
+          sourcePath,
+        ).catchError((Object _, StackTrace _) => const <PdfTextAnnotation>[]),
       ]);
       progress = values[0] as PdfReadingProgress?;
       bookmarks = values[1] as Set<int>;
       notes = values[2] as Map<int, String>;
+      displayTheme = values[3] as PdfDisplayTheme;
+      final embeddedAnnotations = values[4] as List<PdfTextAnnotation>;
+      for (final annotation in embeddedAnnotations) {
+        if (annotation.pageIndex < 0 || annotation.pageIndex >= _pageCount) {
+          continue;
+        }
+        final existing = notes[annotation.pageIndex];
+        if (existing == null || existing.isEmpty) {
+          notes[annotation.pageIndex] = annotation.contents;
+        } else if (!existing.contains(annotation.contents) &&
+            !annotation.annotationId.startsWith('ReadVibe:')) {
+          notes[annotation.pageIndex] = '$existing\n${annotation.contents}';
+        }
+      }
     } on Object catch (error, stackTrace) {
       debugPrint('Failed to load PDF state: $error');
       debugPrintStack(stackTrace: stackTrace);
@@ -88,6 +108,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
       _currentPage = page;
       _bookmarks = bookmarks;
       _notes = notes;
+      _displayTheme = displayTheme;
       _pageController = PageController(initialPage: page);
       _ready = true;
     });
@@ -353,6 +374,27 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
       }
     });
     await _storage.savePdfNotes(widget.book.id, _notes, _pageCount);
+    final sourcePath = _sourcePath;
+    if (sourcePath != null) {
+      try {
+        await PdfRendererService.syncTextNote(
+          filePath: sourcePath,
+          pageIndex: _currentPage,
+          noteId: 'ReadVibe:${widget.book.id}:$_currentPage',
+          contents: note.trim(),
+        );
+        _renderTasks.clear();
+        if (mounted) setState(() {});
+      } on Object catch (error, stackTrace) {
+        debugPrint('Failed to embed PDF text annotation: $error');
+        debugPrintStack(stackTrace: stackTrace);
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('本地笔记已保存，但写入 PDF 批注失败')));
+        }
+      }
+    }
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
 
@@ -379,7 +421,59 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
         .toList(growable: false);
   }
 
-  Future<void> _showPdfSearch() async {
+  Future<List<BookSearchResult>> _searchPdfWithOcr(String rawQuery) async {
+    final sourcePath = _sourcePath;
+    final query = _normalizeOcrText(rawQuery).toLowerCase();
+    if (sourcePath == null || query.isEmpty) {
+      return const <BookSearchResult>[];
+    }
+    final results = <BookSearchResult>[];
+    for (var pageIndex = 0; pageIndex < _pageCount; pageIndex++) {
+      final source = await PdfRendererService.recognizePageText(
+        filePath: sourcePath,
+        pageIndex: pageIndex,
+      );
+      final normalized = _normalizeOcrText(source);
+      final searchable = normalized.toLowerCase();
+      var offset = searchable.indexOf(query);
+      while (offset >= 0 && results.length < BookSearchService.maxResults) {
+        final end = offset + query.length;
+        final snippetStart = math.max(0, offset - 30);
+        final snippetEnd = math.min(normalized.length, end + 48);
+        final leading = snippetStart > 0;
+        final trailing = snippetEnd < normalized.length;
+        final snippet =
+            '${leading ? '…' : ''}${normalized.substring(snippetStart, snippetEnd)}${trailing ? '…' : ''}';
+        final matchStart = (leading ? 1 : 0) + offset - snippetStart;
+        results.add(
+          BookSearchResult(
+            chapterIndex: pageIndex,
+            paragraphIndex: 0,
+            characterOffset: 0,
+            chapterTitle: '第 ${pageIndex + 1} 页 · OCR',
+            snippet: snippet,
+            matchedText: normalized.substring(offset, end),
+            snippetMatchStart: matchStart,
+            snippetMatchEnd: matchStart + end - offset,
+          ),
+        );
+        offset = searchable.indexOf(query, end);
+      }
+      if (results.length >= BookSearchService.maxResults) break;
+    }
+    return results;
+  }
+
+  String _normalizeOcrText(String value) => value
+      .replaceAll(
+        RegExp(
+          r'[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+',
+        ),
+        ' ',
+      )
+      .trim();
+
+  Future<void> _showPdfSearch({bool useOcr = false}) async {
     _autoHideTimer?.cancel();
     final colors = AppTheme.getReaderTheme(ReaderThemeMode.dark);
     final selected = await showModalBottomSheet<BookSearchResult>(
@@ -395,7 +489,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
           heightFactor: 0.88,
           child: BookSearchSheet(
             colors: colors,
-            onSearch: _searchPdf,
+            onSearch: useOcr ? _searchPdfWithOcr : _searchPdf,
             onSelect: (result) =>
                 Navigator.of(sheetContext).pop<BookSearchResult>(result),
           ),
@@ -403,6 +497,101 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
       ),
     );
     if (selected != null && mounted) await _goToPage(selected.chapterIndex);
+    if (mounted && _chromeVisible) _scheduleChromeAutoHide();
+  }
+
+  Future<void> _recognizeCurrentPage() async {
+    final sourcePath = _sourcePath;
+    if (sourcePath == null) return;
+    _autoHideTimer?.cancel();
+    var text = '';
+    try {
+      text = await PdfRendererService.recognizePageText(
+        filePath: sourcePath,
+        pageIndex: _currentPage,
+      );
+    } on Object catch (error, stackTrace) {
+      debugPrint('Failed to OCR PDF page: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF242424),
+        title: Text(
+          '第 ${_currentPage + 1} 页识别文字',
+          style: const TextStyle(color: Colors.white),
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: text.isEmpty
+              ? const Text(
+                  '这一页没有识别到文字。',
+                  style: TextStyle(color: Colors.white60),
+                )
+              : SingleChildScrollView(
+                  child: SelectableText(
+                    text,
+                    style: const TextStyle(color: Colors.white70, height: 1.6),
+                  ),
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+    if (mounted && _chromeVisible) _scheduleChromeAutoHide();
+  }
+
+  Future<void> _showDisplayThemeSheet() async {
+    _autoHideTimer?.cancel();
+    final selected = await showModalBottomSheet<PdfDisplayTheme>(
+      context: context,
+      backgroundColor: const Color(0xFF242424),
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const ListTile(
+              title: Text(
+                'PDF 显示主题',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              subtitle: Text(
+                'PDF 是固定版式；字号由原文件决定，可用双指缩放阅读。',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ),
+            for (final theme in PdfDisplayTheme.values)
+              ListTile(
+                leading: Icon(
+                  theme == _displayTheme
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  color: theme == _displayTheme ? Colors.white : Colors.white38,
+                ),
+                title: Text(
+                  theme.label,
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                onTap: () => Navigator.pop(sheetContext, theme),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null && selected != _displayTheme && mounted) {
+      setState(() => _displayTheme = selected);
+      await _storage.savePdfDisplayTheme(widget.book.id, selected);
+    }
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
 
@@ -596,6 +785,65 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     super.dispose();
   }
 
+  Color get _pdfPageBackground => switch (_displayTheme) {
+    PdfDisplayTheme.original => const Color(0xFF111111),
+    PdfDisplayTheme.paper => const Color(0xFFB8AD94),
+    PdfDisplayTheme.dark => const Color(0xFF080808),
+  };
+
+  Widget _applyPdfDisplayTheme(Widget child) {
+    final matrix = switch (_displayTheme) {
+      PdfDisplayTheme.original => null,
+      PdfDisplayTheme.paper => const <double>[
+        0.86,
+        0.10,
+        0.02,
+        0,
+        12,
+        0.05,
+        0.82,
+        0.05,
+        0,
+        8,
+        0.02,
+        0.08,
+        0.72,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+      ],
+      PdfDisplayTheme.dark => const <double>[
+        -0.86,
+        0,
+        0,
+        0,
+        232,
+        0,
+        -0.86,
+        0,
+        0,
+        232,
+        0,
+        0,
+        -0.86,
+        0,
+        232,
+        0,
+        0,
+        0,
+        1,
+        0,
+      ],
+    };
+    return matrix == null
+        ? child
+        : ColorFiltered(colorFilter: ColorFilter.matrix(matrix), child: child);
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = _pageController;
@@ -648,22 +896,26 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                               child: CircularProgressIndicator(),
                             );
                           }
-                          return Padding(
-                            padding: const EdgeInsets.all(AppSpacing.sm),
-                            child: InteractiveViewer(
-                              transformationController: _transformControllerFor(
-                                pageIndex,
-                              ),
-                              minScale: 1,
-                              maxScale: 5,
-                              boundaryMargin: const EdgeInsets.all(80),
-                              child: Center(
-                                child: Image.file(
-                                  File(path),
-                                  fit: BoxFit.contain,
-                                  filterQuality: FilterQuality.high,
-                                  errorBuilder: (_, _, _) =>
-                                      _buildError('页面图像读取失败'),
+                          return ColoredBox(
+                            color: _pdfPageBackground,
+                            child: Padding(
+                              padding: const EdgeInsets.all(AppSpacing.sm),
+                              child: InteractiveViewer(
+                                transformationController:
+                                    _transformControllerFor(pageIndex),
+                                minScale: 1,
+                                maxScale: 5,
+                                boundaryMargin: const EdgeInsets.all(80),
+                                child: Center(
+                                  child: _applyPdfDisplayTheme(
+                                    Image.file(
+                                      File(path),
+                                      fit: BoxFit.contain,
+                                      filterQuality: FilterQuality.high,
+                                      errorBuilder: (_, _, _) =>
+                                          _buildError('页面图像读取失败'),
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
@@ -773,6 +1025,63 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                         Icons.search_rounded,
                         color: Colors.white,
                       ),
+                    ),
+                    PopupMenuButton<String>(
+                      tooltip: 'PDF 工具',
+                      enabled: _fatalError == null && _pageCount > 0,
+                      color: const Color(0xFF2B2B2B),
+                      icon: const Icon(Icons.more_vert, color: Colors.white),
+                      onSelected: (value) {
+                        switch (value) {
+                          case 'theme':
+                            unawaited(_showDisplayThemeSheet());
+                          case 'ocr-page':
+                            unawaited(_recognizeCurrentPage());
+                          case 'ocr-search':
+                            unawaited(_showPdfSearch(useOcr: true));
+                        }
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(
+                          value: 'theme',
+                          child: ListTile(
+                            leading: Icon(
+                              Icons.brightness_6_outlined,
+                              color: Colors.white70,
+                            ),
+                            title: Text(
+                              '显示主题',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                          ),
+                        ),
+                        PopupMenuItem(
+                          value: 'ocr-page',
+                          child: ListTile(
+                            leading: Icon(
+                              Icons.document_scanner_outlined,
+                              color: Colors.white70,
+                            ),
+                            title: Text(
+                              '识别当前页',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                          ),
+                        ),
+                        PopupMenuItem(
+                          value: 'ocr-search',
+                          child: ListTile(
+                            leading: Icon(
+                              Icons.manage_search_rounded,
+                              color: Colors.white70,
+                            ),
+                            title: Text(
+                              '扫描件全文搜索',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),

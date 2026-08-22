@@ -163,6 +163,30 @@ class GlobalSettingsSheet extends StatelessWidget {
                         side: BorderSide(color: colors.border),
                       ),
                     ),
+                    const SizedBox(height: AppSpacing.xl),
+                    Text(
+                      '关于',
+                      style: TextStyle(
+                        color: colors.text,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    OutlinedButton.icon(
+                      onPressed: () => showLicensePage(
+                        context: context,
+                        applicationName: 'ReadVibe',
+                        applicationVersion: '0.6.7',
+                        applicationLegalese: '本地离线阅读器',
+                      ),
+                      icon: const Icon(Icons.balance_outlined, size: 18),
+                      label: const Text('开源许可'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: colors.accent,
+                        side: BorderSide(color: colors.border),
+                      ),
+                    ),
                   ],
                 ),
               ),
