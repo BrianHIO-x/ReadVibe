@@ -12,21 +12,23 @@
 
 ## 当前发布配置
 
-- 公开版本：`v0.6.6`。
+- 公开版本：`v0.6.7`。
 - Android 应用 ID：`com.readvibe.app`。
 - 正式 ABI：`arm64-v8a`。
 - 最低系统：Android 8.0（API 26）。
 - Dart SDK 约束：`^3.12.2`。
 - Java 与 Kotlin JVM 目标：17。
-- 正式 APK：`dist/ReadVibe-Android-v0.6.6-arm64-v8a.apk`。
-- `pubspec.yaml` 只写公开三段式版本；Android `versionCode` 独立递增，不进入公开版本号、APK 文件名或发布标题。Flutter 的 arm64 分包在基础构建号上增加 `2000`，当前构建传入 `52`，APK 清单中的实际 `versionCode` 为 `2052`。
+- 正式 APK：`dist/ReadVibe-Android-v0.6.7-arm64-v8a.apk`。
+- `v0.6.7` 起 release 强制读取本机 `android/key.properties` 和忽略提交的 `android/app/readvibe-release.jks`；缺少密钥时 release 构建必须失败，不能回退 debug。发布密钥与密码文件必须由用户单独安全备份。
+- 正式签名别名为 `readvibe`，证书有效期至 2076-08-21，SHA-256 指纹为 `BB3BDE2FE3978FBB033A3A0B440EC1B504A7FE30B47A6345CEFC0B4844F3EA86`。
+- `pubspec.yaml` 只写公开三段式版本；Android `versionCode` 独立递增，不进入公开版本号、APK 文件名或发布标题。Flutter 的 arm64 分包在基础构建号上增加 `2000`，当前构建传入 `53`，APK 清单中的实际 `versionCode` 为 `2053`。
 - `windows/` 只有平台状态说明，不是可构建的 Windows 工程。
 
 ## 代码范围
 
 - `lib/screens/library_screen.dart`：书架、导入、书卡操作、整理顺序、延迟存储维护和可选更新检查。
 - `lib/screens/reader_screen.dart`：TXT、EPUB、DOCX、DOC 共用的小说阅读器。
-- `lib/screens/pdf_reader_screen.dart`：PDF 固定版式逐页阅读器。
+- `lib/screens/pdf_reader_screen.dart`：PDF 固定版式逐页阅读器、页码进度、跳页和书签。
 - `lib/services/`：文件解析、搜索、字数、字体、存储、PDF 渲染和系统外部应用桥接。
 - `lib/widgets/`：书卡、目录、搜索面板和阅读页面组件。
 - `android/app/src/main/kotlin/com/readvibe/app/MainActivity.kt`：DOC、PDF 与 Android Intent 原生能力。
@@ -43,6 +45,11 @@
 - 书籍元数据与章节正文载荷分开存储；书架启动不为缺失字数逐本加载正文。打开未统计书籍时只扫描一次各章正文，全文字数由分章结果求和，并且只在源文件大小、解析版本、章节数和格式均匹配时原子写回两项统计。
 - 书架首屏完成后延迟扫描 `books/`、`epub/` 和 `pdf/`；只清理失去 metadata 引用且超过 24 小时的私有载荷。
 - 删除 EPUB 同步清理应用私有图片目录；删除 PDF 同步清理受管理源文件和原生页面缓存。
+- 书架对章节文件只做定长首尾与存在性检查，不在启动时解码全书；缺失或明显截断的载荷显示状态并提供删除入口。
+- PDF 页码进度与小说 `ReadingProgress` 分开存储；旧 PDF 章节式进度只在打开 PDF 时迁移，书架摘要读取不触发迁移写入。PDF 书签按书串行保存并随删除清理。
+- 小说正文使用版本 2 分章目录：`books/<safeId>/manifest.json` 与 `chapters/<index>.json`。写入以 `.tmp/.bak` 目录交换提交，每次最多批量编解码 16 章；旧单体 JSON 保持恢复与后台迁移能力。
+- 版本 2 目录加载后以共享 LRU 的懒章节代理暴露正文，UI isolate 最多缓存 8 个已访问章节；搜索和字数在各自 worker isolate 内读取章节。目录标题、卷信息和富内容标记来自 manifest，不得为了展示目录加载正文。
+- PDF 书签与页码笔记按书串行保存并随删除清理。
 
 ### 小说阅读器
 
@@ -52,6 +59,7 @@
 - 分章模式只滚动当前章；滚动模式用一个连续纵向流承载全书；仿真模式按完整正文行分页。
 - 进入或离开仿真模式，以及在仿真模式内修改字体或排版时，重新创建阅读控制器，通过当前视口顶部正文字符确定目标页或目标滚动位置，不复用另一排版的像素偏移。
 - 搜索跳转、相邻章预览和阅读恢复在页面可见前完成目标定位，不先显示章节开头再二次跳转。
+- EPUB 搜索段落顺序必须与阅读器的全部非空文本块一致，包括正文标题块。
 
 ### 仿真翻页
 
@@ -63,6 +71,9 @@
 - 纸背显示运动纸页的水平镜像反向字迹。快照未完成时使用绑定同一章节和位置的镜像页面层，不能变成纯色纸带或平移翻页。
 - 快照只属于当前页面和手势；正文位置、设置、章节、菜单或手势状态变化时失效。
 - 平滑翻页不捕获纸背快照，但继续使用仿真模式的分页、页眉和进度模型。
+- 跨章向前回翻固定落在上一章实际最后一页，不能混用历史 offset 与 `progress = 1`。
+- 目录、设置、搜索和选区外部操作统一进入 reader modal 视口锁，关闭后才释放仿真高度。
+- EPUB 仿真文本块使用按正文基线整数倍扩展的强制 strut；块起点、内部行盒和块总高都不能让纸页边界切过半行字。
 
 ### 文本选择
 
@@ -73,13 +84,17 @@
 
 ### EPUB 与 PDF
 
+- TXT 先严格尝试 UTF-8，并识别 UTF-16 BOM；失败后对 GBK 与 Big5 候选做替换字符、控制字符、常用中文与章节形态评分，不能固定把传统中文 Big5 当作 GBK。
 - EPUB 按 OPF spine 本地解析 XHTML，目录标题优先来自 EPUB3 NAV 或 EPUB2 NCX；没有导航标题时回退到正文语义标题或文档标题。
 - EPUB 普通段落使用与 TXT 一致的用户排版设置；正文语义标题保留层级、颜色和强调样式，并替代阅读器额外生成的章节标题，不能在同章重复显示。
 - 外部 CSS 文本、解析规则和元素声明在一次导入内缓存；相邻同样式文本合并，结构化块落盘时不重复保存完整纯文本副本。
 - EPUB 输出结构化正文块并在加载时恢复搜索、字数和字符定位所需的纯文本；它与 TXT 共用阅读页面和手势。
+- EPUB 封面优先读取 EPUB3 `cover-image`，其次读取 EPUB2 `meta name="cover"`，提取到该书私有资源目录并保存为书架 metadata。
 - EPUB 只解析包内相对资源和 base64 图片，不加载网络资源。
 - EPUB 在读取压缩包前限制输入为 256 MB，展开后总量限制为 512 MB；单张图片限制为 64 MB，data URI 在 Base64 解码前先校验编码长度对应的最大体积。
-- PDF 使用独立固定版式页面阅读器，原生渲染任务按文件、页码和目标宽度缓存；缓存数量有上限，失败任务可重试，页面位图始终释放。
+- EPUB `encryption.xml` 中指向 OPF 或 spine 的加密条目必须作为 DRM/加密正文明确拒绝；不能尝试移除 DRM。
+- PDF 使用独立固定版式页面阅读器，原生渲染任务按文件、页码和目标宽度缓存；PDFBox-Android `2.0.27.0` 只在本地提供文字搜索与大纲，扫描件不做 OCR。缓存数量有上限，失败任务可重试，页面位图始终释放。
+- DOC 解析与 PDF 渲染使用不同的原生单线程执行器；同一 PDF 生命周期内复用一个 `PdfRenderer`，缓存键包含规范路径、大小、修改时间和首尾内容指纹。
 
 ### 搜索与外部应用
 
@@ -87,7 +102,8 @@
 - 搜索结果以章节、段落和原始 UTF-16 字符位置作为跳转锚点；摘要高亮使用 worker 返回的原文范围，不能用未规范化 query 二次查找。
 - 翻译和网页搜索目标由 Android 系统查询真实可处理 Intent 的应用，Flutter 只展示允许的 AI 应用及 Edge、Chrome、系统浏览器。
 - 记住的默认目标在启动前再次校验；启动失败时清除失效默认值并重新显示选择界面。
-- 自动检查更新默认关闭；只有用户手动检查或自行开启开关时才连接 GitHub Releases。
+- 自动检查更新默认关闭；只有用户手动检查或自行开启开关时才连接 GitHub Releases。发现版本后只打开 HTTPS 发布页，不申请 `REQUEST_INSTALL_PACKAGES`，不在应用内下载或安装 APK。
+- Android `ACTION_VIEW` 只声明 TXT、EPUB、PDF、DOCX 和 DOC MIME；外部 `content://` 先限量复制到私有缓存，再串行调用现有导入器，临时副本在完成后删除。
 
 ## Markdown 同步
 
@@ -107,8 +123,8 @@
 - 阅读页变更必须保护当前章节、当前视口正文位置、每章独立进度和跨章保存顺序。
 - 菜单、主题、字体、排版与阅读模式变化不能把正文重置到章节顶部。
 - 异步存储只允许最新状态覆盖同一数据项；已删除书籍的后台任务不得重新写回元数据或进度。
-- 当前项目包含 `test/parser_sanity_test.dart`、`test/update_service_test.dart`、`test/storage_service_test.dart`、`test/book_search_service_test.dart`、`test/word_count_service_test.dart` 和 `flutter_test` 依赖。未经用户明确要求，不新增自动化测试，也不以测试数量作为交付结论。
-- `.github/workflows/flutter.yml` 在 push 到 `main` 或创建拉取请求时执行依赖解析、`flutter analyze --no-pub` 和 `flutter test --no-pub`。
+- 当前项目包含 `test/parser_sanity_test.dart`、`test/update_service_test.dart`、`test/storage_service_test.dart`、`test/book_search_service_test.dart`、`test/word_count_service_test.dart`、`test/incoming_file_service_test.dart`、`test/pdf_reader_screen_test.dart`、`test/pdf_renderer_service_test.dart` 和 `flutter_test` 依赖。未经用户明确要求，不新增自动化测试，也不以测试数量作为交付结论。
+- `.github/workflows/flutter.yml` 在 push 到 `main` 或创建拉取请求时执行依赖解析、`flutter analyze --no-pub`、`flutter test --no-pub` 和 Android debug APK 构建，以覆盖 Kotlin、POI 与 PdfRenderer 编译链。
 - Dart、Flutter、Android、原生代码或工程结构变更后至少执行 `flutter analyze`、现有 `flutter test`，并构建 Android arm64 release APK。
 - 交付前核对公开版本、ABI、最低系统、APK 文件名、实际体积和 SHA-256，并再次盘点全部 Markdown。
 
@@ -117,7 +133,7 @@
 ```powershell
 flutter analyze
 flutter test
-flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.6 --build-number 52
+flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.7 --build-number 53
 ```
 
-构建完成后把 `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk` 复制为 `dist/ReadVibe-Android-v0.6.6-arm64-v8a.apk`，并核对版本名、内部版本码、最低 SDK、ABI、签名、体积和 SHA-256。
+构建完成后把 `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk` 复制为 `dist/ReadVibe-Android-v0.6.7-arm64-v8a.apk`，并核对版本名、内部版本码、最低 SDK、ABI、签名、体积和 SHA-256。

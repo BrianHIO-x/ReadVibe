@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../theme/app_spacing.dart';
@@ -10,6 +12,7 @@ import 'pressable_scale.dart';
 class BookCard extends StatelessWidget {
   final Book book;
   final ReadingProgress? progress;
+  final BookAvailability availability;
   final ReaderThemeColors? colors;
   final Key? coverKey;
   final VoidCallback onTap;
@@ -19,6 +22,7 @@ class BookCard extends StatelessWidget {
     super.key,
     required this.book,
     this.progress,
+    this.availability = BookAvailability.available,
     this.colors,
     this.coverKey,
     required this.onTap,
@@ -44,6 +48,8 @@ class BookCard extends StatelessWidget {
     final scrimColor = isDark
         ? Colors.black.withValues(alpha: 0.22)
         : palette.text.withValues(alpha: 0.18);
+    final coverPath = book.coverImagePath;
+    final hasCoverImage = coverPath != null && File(coverPath).existsSync();
     final totalChapters = book.chapterCount;
     final totalUnits = book.isPdf ? (book.pageCount ?? 0) : totalChapters;
     final currentChapter = totalUnits > 0
@@ -72,11 +78,15 @@ class BookCard extends StatelessWidget {
     final wordCountLine = book.isPdf
         ? 'PDF 原版页面'
         : formatBookWordCount(book.wordCount);
+    final availabilityLabel = availability.label;
+    final availabilityColor = availability.blocksOpening
+        ? const Color(0xFFC84B46)
+        : const Color(0xFFC17A24);
 
     return Semantics(
       button: true,
       label:
-          '$metaLine。$wordCountLine。${book.title}${book.author.isNotEmpty ? '，作者 ${book.author}' : ''}',
+          '$metaLine。${availabilityLabel.isEmpty ? wordCountLine : availabilityLabel}。${book.title}${book.author.isNotEmpty ? '，作者 ${book.author}' : ''}',
       child: Material(
         color: Colors.transparent,
         borderRadius: BorderRadius.circular(AppRadius.md),
@@ -141,6 +151,49 @@ class BookCard extends StatelessWidget {
                               ),
                             ),
                           ),
+                          if (hasCoverImage)
+                            Positioned.fill(
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(
+                                  AppRadius.md,
+                                ),
+                                child: Image.file(
+                                  File(coverPath),
+                                  fit: BoxFit.cover,
+                                  filterQuality: FilterQuality.medium,
+                                  errorBuilder: (_, _, _) =>
+                                      const SizedBox.shrink(),
+                                ),
+                              ),
+                            ),
+                          if (availabilityLabel.isNotEmpty)
+                            Positioned(
+                              left: AppSpacing.xs,
+                              top: AppSpacing.xs,
+                              child: Container(
+                                constraints: const BoxConstraints(maxWidth: 82),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 5,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: availabilityColor,
+                                  borderRadius: BorderRadius.circular(
+                                    AppRadius.sm,
+                                  ),
+                                ),
+                                child: Text(
+                                  availabilityLabel,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 8,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ),
                           // 3. Bottom gradient scrim — lifts contrast for the
                           //    title/author text sitting above it. Wrapped in
                           //    Positioned.fill + Align so FractionallySizedBox
@@ -164,7 +217,14 @@ class BookCard extends StatelessWidget {
                                     gradient: LinearGradient(
                                       begin: Alignment.topCenter,
                                       end: Alignment.bottomCenter,
-                                      colors: [Colors.transparent, scrimColor],
+                                      colors: [
+                                        Colors.transparent,
+                                        hasCoverImage
+                                            ? Colors.black.withValues(
+                                                alpha: 0.72,
+                                              )
+                                            : scrimColor,
+                                      ],
                                     ),
                                   ),
                                 ),
@@ -190,7 +250,9 @@ class BookCard extends StatelessWidget {
                                       fontFamily: 'Georgia',
                                       fontSize: 14,
                                       fontWeight: FontWeight.w600,
-                                      color: palette.text,
+                                      color: hasCoverImage
+                                          ? Colors.white
+                                          : palette.text,
                                       height: 1.25,
                                     ),
                                     maxLines: 3,
@@ -202,7 +264,9 @@ class BookCard extends StatelessWidget {
                                       book.author,
                                       style: TextStyle(
                                         fontSize: 11,
-                                        color: palette.secondary,
+                                        color: hasCoverImage
+                                            ? Colors.white70
+                                            : palette.secondary,
                                       ),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
@@ -253,17 +317,25 @@ class BookCard extends StatelessWidget {
                   Row(
                     children: [
                       Icon(
-                        Icons.text_snippet_outlined,
+                        availabilityLabel.isEmpty
+                            ? Icons.text_snippet_outlined
+                            : Icons.warning_amber_rounded,
                         size: 12,
-                        color: palette.secondary,
+                        color: availabilityLabel.isEmpty
+                            ? palette.secondary
+                            : availabilityColor,
                       ),
                       const SizedBox(width: 4),
                       Expanded(
                         child: Text(
-                          wordCountLine,
+                          availabilityLabel.isEmpty
+                              ? wordCountLine
+                              : availabilityLabel,
                           style: TextStyle(
                             fontSize: 11,
-                            color: palette.secondary,
+                            color: availabilityLabel.isEmpty
+                                ? palette.secondary
+                                : availabilityColor,
                           ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,

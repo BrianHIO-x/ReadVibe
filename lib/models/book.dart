@@ -1,4 +1,7 @@
 // Book and chapter data models.
+// Backing fields keep the public constructor names stable while allowing the
+// storage layer to override content getters with bounded lazy chapter proxies.
+// ignore_for_file: prefer_initializing_formals
 
 const currentTxtParserVersion = 3;
 
@@ -23,6 +26,26 @@ bool isStandaloneChapterTitle(String title) =>
     _standaloneTailTitlePattern.hasMatch(title.trim());
 
 enum BookFormat { txt, epub, docx, doc, pdf }
+
+enum BookAvailability {
+  available,
+  sourceMissing,
+  payloadMissing,
+  resourceMissing,
+}
+
+extension BookAvailabilityInfo on BookAvailability {
+  bool get blocksOpening =>
+      this == BookAvailability.sourceMissing ||
+      this == BookAvailability.payloadMissing;
+
+  String get label => switch (this) {
+    BookAvailability.available => '',
+    BookAvailability.sourceMissing => '源文件丢失',
+    BookAvailability.payloadMissing => '正文载荷损坏',
+    BookAvailability.resourceMissing => '图片资源丢失',
+  };
+}
 
 enum EpubContentBlockKind { text, image }
 
@@ -100,17 +123,22 @@ class EpubContentBlock {
 class Chapter {
   final int index;
   final String title;
-  final String content;
+  final String _content;
   final String? volumeTitle;
-  final List<EpubContentBlock> epubBlocks;
+  final List<EpubContentBlock> _epubBlocks;
 
   const Chapter({
     required this.index,
     required this.title,
-    required this.content,
+    required String content,
     this.volumeTitle,
-    this.epubBlocks = const <EpubContentBlock>[],
-  });
+    List<EpubContentBlock> epubBlocks = const <EpubContentBlock>[],
+  }) : _content = content,
+       _epubBlocks = epubBlocks;
+
+  String get content => _content;
+
+  List<EpubContentBlock> get epubBlocks => _epubBlocks;
 
   bool get hasRichEpubContent => epubBlocks.isNotEmpty;
 }
@@ -128,6 +156,7 @@ class Book {
   final int? wordCount;
   final List<int>? chapterWordCounts;
   final String? sourcePath;
+  final String? coverImagePath;
   final int? pageCount;
 
   const Book({
@@ -143,6 +172,7 @@ class Book {
     this.wordCount,
     this.chapterWordCounts,
     this.sourcePath,
+    this.coverImagePath,
     this.pageCount,
   }) : _storedChapterCount = chapterCount;
 
@@ -164,6 +194,7 @@ class Book {
     if (chapterWordCounts != null && chapterWordCounts!.length == chapterCount)
       'chapterWordCounts': chapterWordCounts,
     if (sourcePath != null) 'sourcePath': sourcePath,
+    if (coverImagePath != null) 'coverImagePath': coverImagePath,
     if (pageCount != null) 'pageCount': pageCount,
     // Note: chapters are stored separately to reduce JSON size
     'chapterCount': chapterCount,
@@ -174,6 +205,7 @@ class Book {
     int? wordCount,
     List<int>? chapterWordCounts,
     String? sourcePath,
+    String? coverImagePath,
     int? pageCount,
   }) {
     return Book(
@@ -189,6 +221,7 @@ class Book {
       wordCount: wordCount ?? this.wordCount,
       chapterWordCounts: chapterWordCounts ?? this.chapterWordCounts,
       sourcePath: sourcePath ?? this.sourcePath,
+      coverImagePath: coverImagePath ?? this.coverImagePath,
       pageCount: pageCount ?? this.pageCount,
     );
   }
@@ -248,6 +281,11 @@ class Book {
     final pageCount = rawPageCount is num
         ? rawPageCount.toInt().clamp(1, 0x7fffffff)
         : null;
+    final rawCoverImagePath = json['coverImagePath'];
+    final coverImagePath =
+        rawCoverImagePath is String && rawCoverImagePath.trim().isNotEmpty
+        ? rawCoverImagePath.trim()
+        : null;
 
     return Book(
       id: id,
@@ -265,6 +303,7 @@ class Book {
       wordCount: wordCount,
       chapterWordCounts: chapterWordCounts,
       sourcePath: sourcePath,
+      coverImagePath: coverImagePath,
       pageCount: pageCount,
     );
   }

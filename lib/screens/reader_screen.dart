@@ -65,6 +65,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _showOverlay = false;
   late ScrollController _scrollController;
   bool _settingsLoaded = false;
+  String? _readerLoadError;
   Timer? _saveTimer;
   final _pageDragOffsetNotifier = ValueNotifier<double>(0);
   late final AnimationController _pageTurnController;
@@ -438,6 +439,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     Navigator.of(context).pop();
   }
 
+  Future<void> _deleteDamagedBook() async {
+    await _storage.deleteBook(_book.id);
+    if (mounted) Navigator.of(context).pop();
+  }
+
   Future<void> _loadInitialState() async {
     var savedSettings = const ReaderSettings();
     ReadingProgress? savedProgress;
@@ -479,6 +485,17 @@ class _ReaderScreenState extends State<ReaderScreen>
         0,
         _book.chapters.length - 1,
       );
+    }
+    if (_book.chapters.isNotEmpty) {
+      try {
+        final chapter = _book.chapters[_chapterIndex];
+        chapter.content;
+        if (chapter.hasRichEpubContent) chapter.epubBlocks;
+      } on Object catch (error, stackTrace) {
+        _readerLoadError = '第 ${_chapterIndex + 1} 章正文文件缺失或损坏';
+        debugPrint('Failed to load initial chapter: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      }
     }
     final restoredOffset = savedProgress == null
         ? 0.0
@@ -1606,7 +1623,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     final baseLine = mode == ReaderReadingMode.simulation
         ? _resolvedSimulationLineExtent(settings)
         : settings.fontSize * settings.lineHeight;
-    final leading = block.style.marginTopEm * settings.fontSize;
+    final rawLeading = block.style.marginTopEm * settings.fontSize;
+    final leading = mode == ReaderReadingMode.simulation && baseLine > 0
+        ? (rawLeading / baseLine).ceil() * baseLine
+        : rawLeading;
     final paragraphGap =
         settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
         ? baseLine
@@ -1691,7 +1711,45 @@ class _ReaderScreenState extends State<ReaderScreen>
       textDirection: TextDirection.ltr,
       textAlign: _epubTextAlign(block.style.textAlign),
       textScaler: _readerTextScaler,
+      strutStyle: mode == ReaderReadingMode.simulation
+          ? _epubSimulationStrutStyle(block, settings)
+          : null,
     )..layout(maxWidth: width);
+  }
+
+  StrutStyle _epubSimulationStrutStyle(
+    EpubContentBlock block,
+    ReaderSettings settings,
+  ) {
+    final baseLine = _resolvedSimulationLineExtent(settings);
+    var naturalLineExtent =
+        settings.fontSize *
+        block.style.fontScale *
+        settings.lineHeight *
+        block.style.lineHeightScale;
+    var weight = block.style.fontWeight;
+    for (final run in block.runs) {
+      naturalLineExtent = math.max(
+        naturalLineExtent,
+        settings.fontSize *
+            run.style.fontScale *
+            settings.lineHeight *
+            run.style.lineHeightScale,
+      );
+      weight = math.max(weight, run.style.fontWeight);
+    }
+    final lineExtent = baseLine > 0
+        ? math.max(baseLine, (naturalLineExtent / baseLine).ceil() * baseLine)
+        : naturalLineExtent;
+    return StrutStyle(
+      fontFamily: settings.effectiveFontFamily,
+      fontSize: settings.fontSize,
+      height: lineExtent / settings.fontSize,
+      fontWeight: weight >= 600
+          ? (weight >= 800 ? FontWeight.w900 : FontWeight.w700)
+          : settings.effectiveFontWeight,
+      forceStrutHeight: true,
+    );
   }
 
   TextSpan _epubTextSpan(
@@ -1888,6 +1946,9 @@ class _ReaderScreenState extends State<ReaderScreen>
           ),
           textAlign: _epubTextAlign(block.style.textAlign),
           textScaler: _readerTextScaler,
+          strutStyle: simulationPage
+              ? _epubSimulationStrutStyle(block, _settings)
+              : null,
         ),
       );
     }
@@ -2901,13 +2962,45 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_chapterIndex <= 0) return null;
     final targetIndex = _chapterIndex - 1;
     final preview = _adjacentScrollSnapshot(targetIndex);
+    final lastPage = _simulationLastPageSnapshot(
+      targetIndex,
+      pageExtent: pageExtent,
+    );
     return _SimulationPageTarget(
       chapterIndex: targetIndex,
-      offset:
-          preview?.offset ?? _currentProgress?.chapterOffsets[targetIndex] ?? 0,
-      progress: preview?.progress ?? 1,
+      offset: preview?.offset ?? lastPage.offset,
+      progress: preview?.progress ?? lastPage.progress,
       goingNext: false,
     );
+  }
+
+  _ScrollSnapshot _simulationLastPageSnapshot(
+    int chapterIndex, {
+    required double pageExtent,
+  }) {
+    if (chapterIndex < 0 ||
+        chapterIndex >= _book.chapters.length ||
+        !pageExtent.isFinite ||
+        pageExtent <= 0) {
+      return const _ScrollSnapshot(offset: 0, progress: 0);
+    }
+    final chapter = _book.chapters[chapterIndex];
+    final horizontalPadding = _settings.pageMargin.horizontalPadding;
+    final contentWidth = math.max(
+      1.0,
+      _readerViewportWidth - horizontalPadding * 2,
+    );
+    final contentExtent = _simulationChapterContentExtent(
+      chapter: chapter,
+      paragraphs: _paragraphsFor(chapter),
+      richBlocks: chapter.hasRichEpubContent
+          ? chapter.epubBlocks
+          : const <EpubContentBlock>[],
+      contentWidth: contentWidth,
+    );
+    final rawMaxExtent = math.max(0.0, contentExtent - pageExtent);
+    final offset = _fullViewportMaxScrollExtent(rawMaxExtent, pageExtent);
+    return _ScrollSnapshot(offset: offset, progress: offset > 0 ? 1 : 0);
   }
 
   void _replaceSimulationPageTarget(
@@ -3104,38 +3197,44 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  void _showChapterList() {
+  void _showChapterList() => unawaited(_presentChapterList());
+
+  Future<void> _presentChapterList() async {
+    if (!mounted || _readerModalOpen) return;
     final themeColors = AppTheme.getReaderTheme(
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      sheetAnimationStyle: AnimationStyle(
-        duration: AppMotion.sheet,
-        reverseDuration: AppMotion.normal,
-      ),
-      builder: (_) => DraggableScrollableSheet(
-        initialChildSize: 0.75,
-        maxChildSize: 0.95,
-        minChildSize: 0.3,
-        builder: (_, scrollController) => ChapterListSheet(
-          chapters: _book.chapters,
-          currentChapter: _chapterIndex,
-          scrollController: scrollController,
-          colors: themeColors,
-          wordCountListenable: _wordCountNotifier,
-          chapterWordCountsListenable: _chapterWordCountsNotifier,
-          collapsedGroupIds: _collapsedTocGroupIds,
-          onGroupExpansionChanged: _handleTocGroupExpansionChanged,
-          onSelect: (index) {
-            _openChapter(index);
-          },
+    _beginReaderModal();
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        sheetAnimationStyle: AnimationStyle(
+          duration: AppMotion.sheet,
+          reverseDuration: AppMotion.normal,
         ),
-      ),
-    );
+        builder: (_) => DraggableScrollableSheet(
+          initialChildSize: 0.75,
+          maxChildSize: 0.95,
+          minChildSize: 0.3,
+          builder: (_, scrollController) => ChapterListSheet(
+            chapters: _book.chapters,
+            currentChapter: _chapterIndex,
+            scrollController: scrollController,
+            colors: themeColors,
+            wordCountListenable: _wordCountNotifier,
+            chapterWordCountsListenable: _chapterWordCountsNotifier,
+            collapsedGroupIds: _collapsedTocGroupIds,
+            onGroupExpansionChanged: _handleTocGroupExpansionChanged,
+            onSelect: _openChapter,
+          ),
+        ),
+      );
+    } finally {
+      _endReaderModal();
+    }
   }
 
   void _handleTocGroupExpansionChanged(String groupId, bool expanded) {
@@ -3154,53 +3253,61 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  void _showSettings() {
+  void _showSettings() => unawaited(_presentSettings());
+
+  Future<void> _presentSettings() async {
+    if (!mounted || _readerModalOpen) return;
     var sheetSettings = _settings;
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      sheetAnimationStyle: AnimationStyle(
-        duration: AppMotion.settingsSheet,
-        reverseDuration: AppMotion.settingsSheetClose,
-      ),
-      builder: (_) => StatefulBuilder(
-        builder: (context, setSheetState) {
-          final themeColors = AppTheme.getReaderTheme(
-            sheetSettings.theme,
-            systemBrightness: MediaQuery.platformBrightnessOf(context),
-          );
-          return ReaderSettingsSheet(
-            settings: sheetSettings,
-            colors: themeColors,
-            onChange: (newSettings) {
-              setSheetState(() => sheetSettings = newSettings);
-              _queueSettingsApply(newSettings);
-              _persistSettings(newSettings);
-            },
-            onImportFont: () async {
-              try {
-                final newSettings = await _fontService.pickAndInstallFont(
-                  sheetSettings,
-                );
-                if (newSettings == null) return;
-                if (!context.mounted || !mounted) return;
+    _beginReaderModal();
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        sheetAnimationStyle: AnimationStyle(
+          duration: AppMotion.settingsSheet,
+          reverseDuration: AppMotion.settingsSheetClose,
+        ),
+        builder: (_) => StatefulBuilder(
+          builder: (context, setSheetState) {
+            final themeColors = AppTheme.getReaderTheme(
+              sheetSettings.theme,
+              systemBrightness: MediaQuery.platformBrightnessOf(context),
+            );
+            return ReaderSettingsSheet(
+              settings: sheetSettings,
+              colors: themeColors,
+              onChange: (newSettings) {
                 setSheetState(() => sheetSettings = newSettings);
                 _queueSettingsApply(newSettings);
-                await _storage.saveSettings(newSettings);
-                _showReaderMessage('字体已导入并应用');
-              } catch (e) {
-                _showReaderMessage(
-                  e is FormatException
-                      ? e.message
-                      : '字体导入失败，请选择 .ttf 或 .otf 文件',
-                );
-              }
-            },
-          );
-        },
-      ),
-    );
+                _persistSettings(newSettings);
+              },
+              onImportFont: () async {
+                try {
+                  final newSettings = await _fontService.pickAndInstallFont(
+                    sheetSettings,
+                  );
+                  if (newSettings == null) return;
+                  if (!context.mounted || !mounted) return;
+                  setSheetState(() => sheetSettings = newSettings);
+                  _queueSettingsApply(newSettings);
+                  await _storage.saveSettings(newSettings);
+                  _showReaderMessage('字体已导入并应用');
+                } catch (e) {
+                  _showReaderMessage(
+                    e is FormatException
+                        ? e.message
+                        : '字体导入失败，请选择 .ttf 或 .otf 文件',
+                  );
+                }
+              },
+            );
+          },
+        ),
+      );
+    } finally {
+      _endReaderModal();
+    }
   }
 
   void _showSearch() {
@@ -3314,7 +3421,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
 
-    if (_book.chapters.isEmpty) {
+    if (_book.chapters.isEmpty || _readerLoadError != null) {
       final content = Scaffold(
         backgroundColor: themeColors.background,
         body: SafeArea(
@@ -3331,7 +3438,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                   ),
                   const SizedBox(height: AppSpacing.md),
                   Text(
-                    '这本书没有可阅读的正文',
+                    _readerLoadError ?? '这本书没有可阅读的正文',
                     style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
@@ -3349,6 +3456,14 @@ class _ReaderScreenState extends State<ReaderScreen>
                     onPressed: _closeReader,
                     child: const Text('返回书架'),
                   ),
+                  if (_readerLoadError != null) ...[
+                    const SizedBox(height: AppSpacing.sm),
+                    OutlinedButton.icon(
+                      onPressed: _deleteDamagedBook,
+                      icon: const Icon(Icons.delete_outline_rounded),
+                      label: const Text('删除损坏书籍'),
+                    ),
+                  ],
                 ],
               ),
             ),

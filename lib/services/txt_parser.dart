@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:fast_gbk/fast_gbk.dart';
+import 'package:dart3_big5/big5.dart';
 
 import '../models/book.dart';
 
@@ -14,6 +15,8 @@ const txtParagraphSeparator = '\n';
 // not always use CR/LF. Treat the common Unicode and legacy separators as
 // line breaks as well, otherwise a whole novel can become one giant line.
 final _txtLineBreakPattern = RegExp(r'\r\n?|\n|\u000B|\f|\u0085|\u2028|\u2029');
+final _commonChineseRunes =
+    '的一是不了人我在有他這这為为個个們们來来時时說说書书閱讀读第章回卷內容内容簡介简介正文繁體体中文華华與与'.runes.toSet();
 
 // A line such as "第一卷载官股——皇室内帑、户部出资。" is ordinary prose, not a
 // chapter heading. Chinese headings may end in ! or ?, but a full stop, comma,
@@ -113,12 +116,7 @@ String? detectTxtChapterTitle(String sourceLine) =>
 /// excluded because they never existed in the source file.
 Book upgradeLegacyTxtBook(Book book) {
   if (book.format != BookFormat.txt ||
-      // Parser v2 already discarded empty volume marker lines, and the app
-      // does not retain the original imported TXT. Reparsing its reconstructed
-      // chapters cannot recover those titles, so only the older pre-v2 parser
-      // is migrated automatically. Re-importing the original file creates v3
-      // chapters with complete volume metadata.
-      book.txtParserVersion >= 2 ||
+      book.txtParserVersion >= currentTxtParserVersion ||
       book.chapters.isEmpty) {
     return book;
   }
@@ -132,6 +130,11 @@ Book upgradeLegacyTxtBook(Book book) {
     reconstructedLines.addAll(splitTxtLines(chapter.content));
   }
   final chapters = extractTxtChapters(reconstructedLines);
+
+  // Parser v2 discarded empty volume-marker lines before persistence, so those
+  // exact strings cannot be recreated without the original file. This upgrade
+  // still applies every v3 rule to surviving titles and body text instead of
+  // leaving recoverable v2 books permanently on the old schema.
 
   return Book(
     id: book.id,
@@ -168,8 +171,40 @@ String decodeTxtBytes(List<int> bytes) {
   try {
     return utf8.decode(payload, allowMalformed: false);
   } on FormatException {
-    return const GbkCodec(allowMalformed: true).decode(payload);
+    final gbk = const GbkCodec(allowMalformed: true).decode(payload);
+    final big5 = Big5.decode(payload);
+    return _legacyChineseScore(big5) > _legacyChineseScore(gbk) ? big5 : gbk;
   }
+}
+
+int _legacyChineseScore(String text) {
+  final sample = text.length <= 256 * 1024
+      ? text
+      : '${text.substring(0, 128 * 1024)}${text.substring(text.length - 128 * 1024)}';
+  var score = 0;
+  for (final rune in sample.runes) {
+    if (rune == 0xfffd) {
+      score -= 120;
+    } else if ((rune < 0x20 && rune != 0x09 && rune != 0x0a && rune != 0x0d) ||
+        (rune >= 0xe000 && rune <= 0xf8ff)) {
+      score -= 40;
+    } else if (rune >= 0x4e00 && rune <= 0x9fff) {
+      score += 2;
+      if (_commonChineseRunes.contains(rune)) score += 3;
+    } else if (rune == 0x3002 ||
+        rune == 0xff0c ||
+        rune == 0xff1a ||
+        rune == 0x3001) {
+      score += 2;
+    }
+  }
+  score +=
+      RegExp(
+        r'(?:第.{1,12}[章回卷節节篇]|chapter\s*\d+)',
+        caseSensitive: false,
+      ).allMatches(sample).length *
+      20;
+  return score;
 }
 
 String _decodeUtf16(List<int> bytes, Endian endian) {

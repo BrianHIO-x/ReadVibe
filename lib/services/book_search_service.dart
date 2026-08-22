@@ -84,9 +84,12 @@ class BookSearchService {
       final chapter = book.chapters[chapterIndex];
       final paragraphs = <_SearchParagraph>[];
       var paragraphIndex = 0;
-      for (final rawParagraph in chapter.content.split(
-        _paragraphBreakPattern,
-      )) {
+      final rawParagraphs = chapter.hasRichEpubContent
+          ? chapter.epubBlocks
+                .where((block) => block.isText && block.text.trim().isNotEmpty)
+                .map((block) => block.text)
+          : chapter.content.split(_paragraphBreakPattern);
+      for (final rawParagraph in rawParagraphs) {
         final paragraph = _readerParagraphBody(rawParagraph);
         if (paragraph.isEmpty) continue;
         paragraphs.add(

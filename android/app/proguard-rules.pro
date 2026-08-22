@@ -22,3 +22,8 @@
 -dontwarn java.awt.image.DirectColorModel
 -dontwarn java.awt.image.IndexColorModel
 -dontwarn java.awt.image.PackedColorModel
+
+# PDFBox-Android optionally decodes uncommon JPEG-2000 images through
+# JP2Android. ReadVibe does not bundle that JCenter-only optional decoder;
+# PDFBox deliberately ignores JPX images when it is absent.
+-dontwarn com.gemalto.jp2.JP2Decoder

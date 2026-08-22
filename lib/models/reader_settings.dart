@@ -432,6 +432,60 @@ class ReadingProgress {
   }
 }
 
+/// PDF uses physical page indexes rather than novel chapters and scroll
+/// offsets. Keeping that state separate avoids coupling fixed-layout documents
+/// to ReaderScreen's chapter migration and per-chapter offset maps.
+class PdfReadingProgress {
+  final String bookId;
+  final int pageIndex;
+  final int pageCount;
+  final DateTime lastReadDate;
+
+  const PdfReadingProgress({
+    required this.bookId,
+    required this.pageIndex,
+    required this.pageCount,
+    required this.lastReadDate,
+  });
+
+  double get fraction =>
+      pageCount <= 1 ? 0 : pageIndex.clamp(0, pageCount - 1) / (pageCount - 1);
+
+  Map<String, dynamic> toJson() => {
+    'bookId': bookId,
+    'pageIndex': pageIndex,
+    'pageCount': pageCount,
+    'lastReadDate': lastReadDate.toIso8601String(),
+  };
+
+  factory PdfReadingProgress.fromJson(Map<String, dynamic> json) {
+    final rawPageCount = json['pageCount'];
+    final pageCount = rawPageCount is num
+        ? rawPageCount.toInt().clamp(1, 0x7fffffff)
+        : 1;
+    final rawPageIndex = json['pageIndex'];
+    final pageIndex = rawPageIndex is num
+        ? rawPageIndex.toInt().clamp(0, pageCount - 1)
+        : 0;
+    final rawLastReadDate = json['lastReadDate'];
+    return PdfReadingProgress(
+      bookId: _nonEmptyString(json['bookId']) ?? '',
+      pageIndex: pageIndex,
+      pageCount: pageCount,
+      lastReadDate: rawLastReadDate is String
+          ? DateTime.tryParse(rawLastReadDate) ?? DateTime.now()
+          : DateTime.now(),
+    );
+  }
+
+  ReadingProgress toShelfProgress() => ReadingProgress(
+    bookId: bookId,
+    chapterIndex: pageIndex,
+    scrollProgress: fraction,
+    lastReadDate: lastReadDate,
+  );
+}
+
 String? _nonEmptyString(Object? value) {
   if (value is! String) return null;
   final trimmed = value.trim();

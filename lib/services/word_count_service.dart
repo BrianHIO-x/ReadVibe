@@ -32,11 +32,8 @@ class WordCountService {
     final existing = _chapterCountsInFlight[cacheKey];
     if (existing != null) return existing;
 
-    final contents = <String>[
-      for (final chapter in book.chapters) chapter.content,
-    ];
     late final Future<List<int>> operation;
-    operation = Isolate.run(() => _countVisibleRunesByEntry(contents))
+    operation = Isolate.run(() => _countBookChapterBodies(book))
         .then((counts) {
           final immutableCounts = List<int>.unmodifiable(counts);
           _chapterCountCache[cacheKey] = immutableCounts;
@@ -68,8 +65,9 @@ class WordCountService {
 String _chapterCacheKey(Book book) =>
     '${book.id}:${book.fileSize}:${book.txtParserVersion}:${book.chapters.length}';
 
-List<int> _countVisibleRunesByEntry(List<String> contents) =>
-    List<int>.unmodifiable(contents.map(_countVisibleRunesIn));
+List<int> _countBookChapterBodies(Book book) => List<int>.unmodifiable(
+  book.chapters.map((chapter) => _countVisibleRunesIn(chapter.content)),
+);
 
 int _countVisibleRunesIn(String content) {
   var total = 0;

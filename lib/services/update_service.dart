@@ -2,10 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:path_provider/path_provider.dart';
 
 /// Release metadata fetched from GitHub for a newer version.
 class AppUpdateInfo {
@@ -15,6 +13,7 @@ class AppUpdateInfo {
   final String apkName;
   final int apkSize;
   final String? sha256;
+  final String releasePageUrl;
 
   const AppUpdateInfo({
     required this.version,
@@ -22,6 +21,7 @@ class AppUpdateInfo {
     required this.apkUrl,
     required this.apkName,
     required this.apkSize,
+    required this.releasePageUrl,
     this.sha256,
   });
 }
@@ -40,9 +40,9 @@ class UpdateCheckResult {
 
 /// Silent update check against the project's GitHub Releases.
 ///
-/// The app is sideloaded, so updates mean: compare versions, download the APK
-/// asset, verify it against the SHA-256 recorded in the release notes, then
-/// hand it to the system package installer.
+/// The app is sideloaded, so update checks compare GitHub Releases and hand
+/// the release page to the user's browser. ReadVibe itself never requests APK
+/// installation permission.
 class UpdateService {
   static const _channel = MethodChannel('com.readvibe.app/app_update');
   static const _apiUrl =
@@ -55,9 +55,7 @@ class UpdateService {
   Future<UpdateCheckResult> checkForUpdate() async {
     final client = HttpClient();
     try {
-      final request = await client
-          .getUrl(Uri.parse(_apiUrl))
-          .timeout(_timeout);
+      final request = await client.getUrl(Uri.parse(_apiUrl)).timeout(_timeout);
       request.headers.set('Accept', 'application/vnd.github+json');
       request.headers.set('User-Agent', 'ReadVibe-Android');
       final response = await request.close().timeout(_timeout);
@@ -96,6 +94,9 @@ class UpdateService {
           apkUrl: url,
           apkName: asset['name'] as String,
           apkSize: (asset['size'] as num?)?.toInt() ?? 0,
+          releasePageUrl:
+              json['html_url'] as String? ??
+              'https://github.com/BrianHIO-x/ReadVibe/releases/latest',
           sha256: sha256FromNotes(json['body'] as String? ?? ''),
         ),
       );
@@ -106,81 +107,11 @@ class UpdateService {
     }
   }
 
-  /// Downloads the APK into the update cache directory, reporting
-  /// received/total bytes through [onProgress]. Verifies SHA-256 when the
-  /// release notes carry one.
-  Future<File> downloadApk(
-    AppUpdateInfo info, {
-    void Function(int received, int total)? onProgress,
-  }) async {
-    final directory = Directory(
-      '${(await getTemporaryDirectory()).path}${Platform.pathSeparator}updates',
-    );
-    if (!directory.existsSync()) directory.createSync(recursive: true);
-    final target = File('${directory.path}${Platform.pathSeparator}'
-        'ReadVibe-${info.version}.apk');
-
-    final client = HttpClient();
+  Future<bool> openReleasePage(AppUpdateInfo info) async {
     try {
-      final request = await client.getUrl(Uri.parse(info.apkUrl));
-      request.headers.set('User-Agent', 'ReadVibe-Android');
-      final response = await request.close();
-      if (response.statusCode != 200) {
-        throw HttpException('下载失败（HTTP ${response.statusCode}）');
-      }
-      final total = response.contentLength > 0
-          ? response.contentLength
-          : info.apkSize;
-      final sink = target.openWrite();
-      var received = 0;
-      await for (final chunk in response) {
-        sink.add(chunk);
-        received += chunk.length;
-        onProgress?.call(received, total);
-      }
-      await sink.flush();
-      await sink.close();
-
-      final expected = info.sha256;
-      if (expected != null) {
-        final digest = await sha256.bind(target.openRead()).first;
-        if (digest.toString().toLowerCase() != expected.toLowerCase()) {
-          await target.delete();
-          throw const FormatException('安装包校验失败，请重新下载');
-        }
-      }
-      return target;
-    } finally {
-      client.close();
-    }
-  }
-
-  /// Whether the user has granted "install unknown apps" for ReadVibe.
-  Future<bool> canRequestInstalls() async {
-    try {
-      return await _channel.invokeMethod<bool>('canRequestInstalls') ?? false;
-    } on Object {
-      return false;
-    }
-  }
-
-  /// Opens the system page where the user allows installs from ReadVibe.
-  Future<void> openInstallSettings() async {
-    try {
-      await _channel.invokeMethod<void>('openInstallSettings');
-    } on Object {
-      // Settings page unavailable; the install intent will surface the same
-      // prompt on most devices.
-    }
-  }
-
-  /// Hands the downloaded APK to the system package installer.
-  Future<bool> installApk(String filePath) async {
-    try {
-      return await _channel.invokeMethod<bool>(
-            'installApk',
-            <String, String>{'filePath': filePath},
-          ) ??
+      return await _channel.invokeMethod<bool>('openExternalUrl', {
+            'url': info.releasePageUrl,
+          }) ??
           false;
     } on Object {
       return false;
@@ -204,9 +135,7 @@ class UpdateService {
   /// Extracts the SHA-256 line recorded in release notes
   /// (`SHA-256：…` or `SHA-256: …`).
   static String? sha256FromNotes(String notes) {
-    final match = RegExp(
-      'SHA-256[：:]\\s*([0-9a-fA-F]{64})',
-    ).firstMatch(notes);
+    final match = RegExp('SHA-256[：:]\\s*([0-9a-fA-F]{64})').firstMatch(notes);
     return match?.group(1);
   }
 

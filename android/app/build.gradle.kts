@@ -1,7 +1,22 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+val releaseKeyPropertiesFile = rootProject.file("key.properties")
+val releaseKeyProperties = Properties()
+val hasReleaseSigning = releaseKeyPropertiesFile.isFile.also { available ->
+    if (available) {
+        releaseKeyPropertiesFile.inputStream().use { input ->
+            releaseKeyProperties.load(input)
+        }
+    }
+}
+val requestedReleaseBuild = gradle.startParameter.taskNames.any { task ->
+    task.contains("release", ignoreCase = true)
 }
 
 android {
@@ -32,11 +47,34 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                val storePath = releaseKeyProperties.getProperty("storeFile")
+                    ?: throw GradleException("key.properties 缺少 storeFile")
+                storeFile = rootProject.file(storePath)
+                storePassword = releaseKeyProperties.getProperty("storePassword")
+                    ?: throw GradleException("key.properties 缺少 storePassword")
+                keyAlias = releaseKeyProperties.getProperty("keyAlias")
+                    ?: throw GradleException("key.properties 缺少 keyAlias")
+                keyPassword = releaseKeyProperties.getProperty("keyPassword")
+                    ?: throw GradleException("key.properties 缺少 keyPassword")
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // The local demo uses the debug key. Store distribution must inject
-            // a separately managed release signing configuration.
-            signingConfig = signingConfigs.getByName("debug")
+            if (!hasReleaseSigning && requestedReleaseBuild) {
+                throw GradleException(
+                    "缺少 android/key.properties；release 构建拒绝回退到 debug 签名"
+                )
+            }
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -49,8 +87,7 @@ android {
 
 dependencies {
     implementation("org.apache.poi:poi-scratchpad:5.5.1")
-    // FileProvider hands downloaded update APKs to the system installer.
-    implementation("androidx.core:core:1.13.1")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 }
 
 kotlin {

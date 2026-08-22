@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:flutter/services.dart';
 
 import '../models/book.dart';
 import 'pdf_renderer_service.dart';
@@ -33,11 +34,19 @@ Future<Book> importPdf(
       sourcePath: managedFile.path,
       pageCount: pageCount,
     );
-  } on Object {
+  } on Object catch (error) {
     try {
       if (await managedFile.exists()) await managedFile.delete();
     } on FileSystemException {
       // The failed import remains absent from metadata even if cleanup fails.
+    }
+    if (error is PlatformException) {
+      final message = error.message?.trim();
+      throw FormatException(
+        message == null || message.isEmpty
+            ? 'PDF 已损坏、加密或不受支持'
+            : 'PDF 无法解析：$message',
+      );
     }
     rethrow;
   }

@@ -43,4 +43,41 @@ void main() {
     expect(await session.search('开头'), hasLength(1));
     expect(await session.search('结尾'), hasLength(1));
   });
+
+  test(
+    'EPUB search uses the same heading-inclusive paragraph order as reader',
+    () async {
+      final epub = Book(
+        id: 'epub_search_anchor',
+        title: 'EPUB 搜索样书',
+        format: BookFormat.epub,
+        chapters: const <Chapter>[
+          Chapter(
+            index: 0,
+            title: '第一章',
+            content: '正文命中。',
+            epubBlocks: <EpubContentBlock>[
+              EpubContentBlock(
+                kind: EpubContentBlockKind.text,
+                text: '第一章',
+                isHeading: true,
+              ),
+              EpubContentBlock(kind: EpubContentBlockKind.text, text: '正文命中。'),
+            ],
+          ),
+        ],
+        importDate: DateTime(2026, 1, 1),
+        fileSize: 24,
+      );
+      final session = BookSearchService.openSession(epub);
+      addTearDown(session.dispose);
+
+      final heading = await session.search('第一章');
+      final body = await session.search('正文命中');
+
+      expect(heading.single.paragraphIndex, 0);
+      expect(body.single.paragraphIndex, 1);
+      expect(body.single.characterOffset, 0);
+    },
+  );
 }

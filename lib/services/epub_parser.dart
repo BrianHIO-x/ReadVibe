@@ -111,6 +111,7 @@ Book _parseEpubSync(
     }
     archiveFiles.putIfAbsent(_normalizeArchivePath(file.name), () => file);
   }
+  final encryptedPaths = _epubEncryptedPaths(archiveFiles);
 
   final containerFile = _findArchiveFile(
     archiveFiles,
@@ -126,6 +127,9 @@ Book _parseEpubSync(
     throw const FormatException('container.xml 中未找到 OPF 路径');
   }
   final opfPath = _normalizeArchivePath(rawOpfPath);
+  if (encryptedPaths.contains(opfPath)) {
+    throw const FormatException('EPUB 包内容受 DRM 或加密保护，无法离线解析');
+  }
   final opfFile = _findArchiveFile(archiveFiles, opfPath);
   if (opfFile == null) {
     throw FormatException('无效的 EPUB 文件：无法读取 OPF ($opfPath)');
@@ -149,6 +153,12 @@ Book _parseEpubSync(
       .map((element) => element.getAttribute('idref'))
       .whereType<String>()
       .toList(growable: false);
+  if (spineIds.any((id) {
+    final path = manifest[id]?.path;
+    return path != null && encryptedPaths.contains(path);
+  })) {
+    throw const FormatException('EPUB 正文章节受 DRM 或加密保护，无法离线解析');
+  }
 
   final resourceDirectory = Directory(resourceDirectoryPath);
   resourceDirectory.createSync(recursive: true);
@@ -157,6 +167,10 @@ Book _parseEpubSync(
     outputDirectory: resourceDirectory,
     maxSingleImageBytes: limits.maxSingleImageBytes,
   );
+  final coverArchivePath = _epubCoverArchivePath(opf, manifest);
+  final coverImagePath = coverArchivePath == null
+      ? null
+      : imageStore.extractArchivePath(coverArchivePath)?.path;
   final chapters = <Chapter>[];
   String? activeVolumeTitle;
   final cssDocumentCache = <String, String>{};
@@ -250,7 +264,30 @@ Book _parseEpubSync(
     importDate: importDate,
     fileSize: inputLength,
     sourcePath: resourceDirectory.path,
+    coverImagePath: coverImagePath,
   );
+}
+
+Set<String> _epubEncryptedPaths(Map<String, ArchiveFile> archiveFiles) {
+  final encryption = _findArchiveFile(archiveFiles, 'META-INF/encryption.xml');
+  if (encryption == null) return const <String>{};
+  try {
+    final document = _parseXml(encryption, 'encryption.xml');
+    final paths = <String>{};
+    for (final reference in _elementsNamed(document, 'CipherReference')) {
+      final rawUri = reference.getAttribute('URI');
+      if (rawUri == null || rawUri.trim().isEmpty) continue;
+      final path = _normalizeArchivePath(
+        _safeDecodeUriComponent(rawUri.split('#').first.split('?').first),
+      );
+      if (path.isNotEmpty && path != '..' && !path.startsWith('../')) {
+        paths.add(path);
+      }
+    }
+    return paths;
+  } on FormatException {
+    throw const FormatException('EPUB encryption.xml 已损坏，无法确认内容安全性');
+  }
 }
 
 class _ManifestItem {
@@ -284,6 +321,31 @@ Map<String, _ManifestItem> _extractManifest(XmlDocument opf, String opfDir) {
     );
   }
   return manifest;
+}
+
+String? _epubCoverArchivePath(
+  XmlDocument opf,
+  Map<String, _ManifestItem> manifest,
+) {
+  for (final item in manifest.values) {
+    if (item.properties.contains('cover-image') &&
+        item.mediaType.startsWith('image/')) {
+      return item.path;
+    }
+  }
+  for (final meta in _elementsNamed(opf, 'meta')) {
+    if (meta.getAttribute('name')?.trim().toLowerCase() != 'cover') continue;
+    final id = meta.getAttribute('content')?.trim();
+    final item = id == null ? null : manifest[id];
+    if (item != null && item.mediaType.startsWith('image/')) return item.path;
+  }
+  for (final entry in manifest.entries) {
+    if (entry.key.toLowerCase().contains('cover') &&
+        entry.value.mediaType.startsWith('image/')) {
+      return entry.value.path;
+    }
+  }
+  return null;
 }
 
 Map<String, String> _extractNavigationTitles(
@@ -1342,6 +1404,12 @@ class _EpubImageStore {
     final parsedReference = Uri.tryParse(reference);
     if (parsedReference?.hasScheme == true) return null;
     final archivePath = _resolveArchiveReference(reference, relativeTo);
+    if (archivePath.isEmpty) return null;
+    return extractArchivePath(archivePath);
+  }
+
+  _ExtractedImage? extractArchivePath(String rawArchivePath) {
+    final archivePath = _normalizeArchivePath(rawArchivePath);
     if (archivePath.isEmpty) return null;
     return _cache.putIfAbsent(archivePath, () {
       final file = _findArchiveFile(archiveFiles, archivePath);

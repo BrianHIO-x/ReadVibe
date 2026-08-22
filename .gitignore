@@ -44,3 +44,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local Android release signing material. Back these files up securely; never
+# commit a private key or its passwords.
+/android/key.properties
+/android/app/*.jks
+/android/app/*.keystore
