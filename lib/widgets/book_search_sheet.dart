@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 
-import '../services/book_search_service.dart';
+import '../models/search_match.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_sheet.dart';
 
-class BookSearchSheet extends StatefulWidget {
+class BookSearchSheet<T extends SearchMatch> extends StatefulWidget {
   final ReaderThemeColors colors;
-  final Future<List<BookSearchResult>> Function(String query) onSearch;
-  final ValueChanged<BookSearchResult> onSelect;
+  final Future<List<T>> Function(String query) onSearch;
+  final ValueChanged<T> onSelect;
 
   const BookSearchSheet({
     super.key,
@@ -17,12 +18,13 @@ class BookSearchSheet extends StatefulWidget {
   });
 
   @override
-  State<BookSearchSheet> createState() => _BookSearchSheetState();
+  State<BookSearchSheet<T>> createState() => _BookSearchSheetState<T>();
 }
 
-class _BookSearchSheetState extends State<BookSearchSheet> {
+class _BookSearchSheetState<T extends SearchMatch>
+    extends State<BookSearchSheet<T>> {
   final _controller = TextEditingController();
-  List<BookSearchResult> _results = const <BookSearchResult>[];
+  List<T> _results = [];
   bool _searching = false;
   bool _searched = false;
   String? _errorMessage;
@@ -73,7 +75,7 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
       debugPrintStack(stackTrace: stackTrace);
       if (!mounted || serial != _serial) return;
       setState(() {
-        _results = const <BookSearchResult>[];
+        _results = [];
         _searching = false;
         _searched = true;
         _errorMessage = '搜索失败，请重新输入关键词后再试';
@@ -84,7 +86,7 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
   /// Uses the exact source range returned by the search worker. This remains
   /// correct when a match only exists after newlines, full-width spaces or
   /// repeated whitespace have been normalized.
-  Widget _buildHighlightedSnippet(BookSearchResult result) {
+  Widget _buildHighlightedSnippet(T result) {
     final snippet = result.snippet;
     final baseStyle = TextStyle(color: widget.colors.secondary);
     final matchStart = result.snippetMatchStart.clamp(0, snippet.length);
@@ -119,40 +121,13 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: widget.colors.background,
-      borderRadius: const BorderRadius.vertical(
-        top: Radius.circular(AppRadius.pill),
-      ),
-      clipBehavior: Clip.antiAlias,
+    return AppSheetSurface(
+      colors: widget.colors,
       child: SafeArea(
         top: false,
         child: Column(
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 18, 12, 12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      '全文搜索',
-                      style: TextStyle(
-                        color: widget.colors.text,
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: Icon(
-                      Icons.close_rounded,
-                      color: widget.colors.secondary,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            const AppSheetHeader(title: '全文搜索'),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
               child: TextField(
@@ -180,23 +155,6 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
                           onPressed: _search,
                           icon: const Icon(Icons.arrow_forward_rounded),
                         ),
-                  filled: true,
-                  fillColor: widget.colors.headerBg,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.lg),
-                    borderSide: BorderSide(color: widget.colors.border),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.lg),
-                    borderSide: BorderSide(color: widget.colors.border),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.lg),
-                    borderSide: BorderSide(
-                      color: widget.colors.accent,
-                      width: 1.5,
-                    ),
-                  ),
                 ),
               ),
             ),
@@ -211,8 +169,8 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: Text(
-                          _results.length == BookSearchService.maxResults
-                              ? '已显示前 ${BookSearchService.maxResults} 条，请增加关键词缩小范围'
+                          _results.length == maxDocumentSearchResults
+                              ? '已显示前 $maxDocumentSearchResults 条，请增加关键词缩小范围'
                               : '找到 ${_results.length} 条结果',
                           style: TextStyle(
                             color: widget.colors.secondary,
@@ -251,7 +209,7 @@ class _BookSearchSheetState extends State<BookSearchSheet> {
                                   vertical: 6,
                                 ),
                                 title: Text(
-                                  result.chapterTitle,
+                                  result.title,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(

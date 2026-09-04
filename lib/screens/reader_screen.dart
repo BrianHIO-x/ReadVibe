@@ -14,12 +14,14 @@ import '../theme/app_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
 import '../models/book.dart';
+import '../models/reading_paragraph.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/font_service.dart';
 import '../services/book_search_service.dart';
 import '../services/storage_service.dart';
 import '../widgets/app_toast.dart';
+import '../widgets/app_sheet.dart';
 import '../widgets/chapter_list.dart';
 import '../widgets/chapter_editor_sheet.dart';
 import '../widgets/book_search_sheet.dart';
@@ -1059,17 +1061,9 @@ class _ReaderScreenState extends State<ReaderScreen>
       _paragraphCache[chapter] = cached;
       return cached;
     }
-    final paragraphs = chapter.hasRichEpubContent
-        ? chapter.epubBlocks
-              .where((block) => block.isText && block.text.trim().isNotEmpty)
-              .map(_epubLayout.formatParagraph)
-              .where((paragraph) => paragraph.isNotEmpty)
-              .toList(growable: false)
-        : chapter.content
-              .split(RegExp(r'(?:\r\n?|\n)+'))
-              .map(_formatParagraph)
-              .where((p) => p.isNotEmpty)
-              .toList(growable: false);
+    final paragraphs = readingParagraphs(
+      chapter,
+    ).map((paragraph) => paragraph.displayText).toList(growable: false);
     final characters = paragraphs.fold<int>(
       0,
       (sum, paragraph) => sum + paragraph.length,
@@ -1092,11 +1086,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     _paragraphCache[chapter] = paragraphs;
     _paragraphCacheCharacters += characters;
     return paragraphs;
-  }
-
-  String _formatParagraph(String paragraph) {
-    final body = paragraph.replaceFirst(RegExp(r'^[\s　]+'), '').trimRight();
-    return body.isEmpty ? '' : '$_paragraphIndent$body';
   }
 
   int _paragraphPrefixLength(Chapter chapter, int paragraphIndex) {
@@ -2736,10 +2725,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     _beginReaderModal();
     try {
-      await showModalBottomSheet<void>(
+      await showAppSheet<void>(
         context: context,
-        isScrollControlled: true,
-        backgroundColor: Colors.transparent,
+        colors: themeColors,
         sheetAnimationStyle: AnimationStyle(
           duration: AppMotion.sheet,
           reverseDuration: AppMotion.normal,
@@ -2789,10 +2777,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     var sheetSettings = _settings;
     _beginReaderModal();
     try {
-      await showModalBottomSheet<void>(
+      await showAppSheet<void>(
         context: context,
-        isScrollControlled: true,
-        backgroundColor: Colors.transparent,
+        colors: AppTheme.getReaderTheme(
+          sheetSettings.theme,
+          systemBrightness: MediaQuery.platformBrightnessOf(context),
+        ),
         sheetAnimationStyle: AnimationStyle(
           duration: AppMotion.settingsSheet,
           reverseDuration: AppMotion.settingsSheetClose,
@@ -2853,10 +2843,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     _beginReaderModal();
     BookSearchResult? selectedResult;
     try {
-      selectedResult = await showModalBottomSheet<BookSearchResult>(
+      selectedResult = await showAppSheet<BookSearchResult>(
         context: context,
-        isScrollControlled: true,
-        backgroundColor: Colors.transparent,
+        colors: themeColors,
         builder: (sheetContext) => AnimatedPadding(
           duration: const Duration(milliseconds: 160),
           curve: Curves.easeOutCubic,
@@ -2865,7 +2854,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           ),
           child: FractionallySizedBox(
             heightFactor: 0.88,
-            child: BookSearchSheet(
+            child: BookSearchSheet<BookSearchResult>(
               colors: themeColors,
               onSearch: searchSession.search,
               onSelect: (result) =>
@@ -3042,7 +3031,14 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _showReaderMessage(String message) {
     if (!mounted) return;
-    AppToast.info(context, message);
+    AppToast.info(
+      context,
+      message,
+      colors: AppTheme.getReaderTheme(
+        _settings.theme,
+        systemBrightness: MediaQuery.platformBrightnessOf(context),
+      ),
+    );
   }
 
   @override

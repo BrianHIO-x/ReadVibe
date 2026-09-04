@@ -16,12 +16,15 @@ import '../services/book_export_service.dart';
 import '../models/library_filter.dart';
 import '../widgets/library_search_controls.dart';
 import '../services/storage_service.dart';
-import '../services/book_search_service.dart';
+import '../controllers/library_maintenance_controller.dart';
 import '../services/update_service.dart';
 import '../services/incoming_file_service.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../widgets/app_toast.dart';
+import '../widgets/app_dialog.dart';
+import '../widgets/app_sheet.dart';
+import '../theme/app_overlay_theme.dart';
 import '../widgets/app_update_dialog.dart';
 import '../widgets/book_card.dart';
 import '../widgets/global_settings_sheet.dart';
@@ -76,9 +79,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   bool _settingsOpen = false;
   int _loadSerial = 0;
   Timer? _automaticUpdateTimer;
-  Timer? _storageMaintenanceTimer;
+  late final LibraryMaintenanceController _maintenance;
   bool _automaticUpdateAttempted = false;
-  bool _storageMaintenanceScheduled = false;
   String _applicationVersion = '—';
   final _librarySearchController = TextEditingController();
   final _librarySearchFocus = FocusNode();
@@ -109,6 +111,17 @@ class _LibraryScreenState extends State<LibraryScreen>
     _bookImporter = BookImportCoordinator(_storage);
     _bookExporter = widget.exporter ?? BookExportService();
     _updateChecker = widget.updateChecker ?? UpdateService();
+    _maintenance = LibraryMaintenanceController(
+      repository: _storage,
+      books: () => _books,
+      onAvailability: (values) {
+        if (mounted) setState(() => _availabilityMap.addAll(values));
+      },
+      onError: (error, stack) {
+        debugPrint('Storage maintenance failed: $error');
+        debugPrintStack(stackTrace: stack);
+      },
+    );
     _gridEntranceController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 650),
@@ -136,6 +149,11 @@ class _LibraryScreenState extends State<LibraryScreen>
       debugPrintStack(stackTrace: stackTrace);
     }
   }
+
+  ReaderThemeColors get _feedbackColors => AppTheme.getReaderTheme(
+    _settings.theme,
+    systemBrightness: MediaQuery.platformBrightnessOf(context),
+  );
 
   /// Silent GitHub release check once the shelf has settled. A dismissed
   /// version stays quiet for three days so offline reading is never nagged.
@@ -166,51 +184,11 @@ class _LibraryScreenState extends State<LibraryScreen>
     });
   }
 
-  void _scheduleStorageMaintenance() {
-    if (_storageMaintenanceScheduled) return;
-    _storageMaintenanceScheduled = true;
-    _storageMaintenanceTimer = Timer(const Duration(seconds: 30), () async {
-      _storageMaintenanceTimer = null;
-      try {
-        await BookSearchService.removeObsoleteData(_storage);
-        final result = await _storage.collectOrphanedData();
-        if (result.removedEntries > 0) {
-          debugPrint(
-            'Storage maintenance removed ${result.removedFiles} files and '
-            '${result.removedDirectories} directories.',
-          );
-        }
-        final snapshot = List<Book>.from(_books);
-        final deepAvailability = <String, BookAvailability>{};
-        for (final book in snapshot) {
-          if (!mounted) return;
-          deepAvailability[book.id] = await _storage.checkBookAvailability(
-            book,
-            deep: true,
-          );
-          await Future<void>.delayed(const Duration(milliseconds: 120));
-        }
-        if (mounted) {
-          setState(() {
-            for (final entry in deepAvailability.entries) {
-              if (_books.any((book) => book.id == entry.key)) {
-                _availabilityMap[entry.key] = entry.value;
-              }
-            }
-          });
-        }
-      } on Object catch (error, stackTrace) {
-        debugPrint('Storage maintenance failed: $error');
-        debugPrintStack(stackTrace: stackTrace);
-      }
-    });
-  }
-
   /// Manual check from the global settings sheet. Reports every outcome —
   /// new version, up to date, or unreachable — and ignores the three-day
   /// dismiss window because the user explicitly asked.
   Future<void> _checkUpdateManually() async {
-    AppToast.loading(context, '正在检查更新…');
+    AppToast.loading(context, '正在检查更新…', colors: _feedbackColors);
     final result = await _updateChecker.checkForUpdate();
     if (!mounted) return;
     AppToast.hide(context);
@@ -231,15 +209,10 @@ class _LibraryScreenState extends State<LibraryScreen>
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
-    return showGeneralDialog<void>(
+    return showAppDialog<void>(
       context: context,
-      barrierDismissible: true,
-      barrierLabel: '取消',
-      barrierColor: Colors.black54,
-      transitionDuration: AppMotion.normal,
-      pageBuilder: (ctx, animation, secondaryAnimation) {
-        return AppUpdateDialog(info: info, colors: colors);
-      },
+      colors: colors,
+      builder: (_) => AppUpdateDialog(info: info, colors: colors),
     );
   }
 
@@ -255,7 +228,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   void dispose() {
     _loadSerial++;
     _automaticUpdateTimer?.cancel();
-    _storageMaintenanceTimer?.cancel();
+    _maintenance.dispose();
     _reorderFocusTimer?.cancel();
     _librarySearchController.dispose();
     _librarySearchFocus.dispose();
@@ -367,7 +340,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           }
         }
         _syncAutomaticUpdateCheck();
-        _scheduleStorageMaintenance();
+        _maintenance.schedule();
       }
     } catch (e) {
       debugPrint('Failed to load library: $e');
@@ -456,11 +429,12 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (!mounted) return null;
     final controller = TextEditingController();
     var obscure = true;
-    final password = await showDialog<String>(
+    final password = await showAppDialog<String>(
       context: context,
+      colors: _feedbackColors,
       barrierDismissible: false,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
+        builder: (context, setDialogState) => AppDialog(
           title: const Text('PDF 需要密码'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
@@ -518,12 +492,12 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   void _showError(String message) {
     if (!mounted) return;
-    AppToast.error(context, message);
+    AppToast.error(context, message, colors: _feedbackColors);
   }
 
   void _showMessage(String message) {
     if (!mounted) return;
-    AppToast.success(context, message);
+    AppToast.success(context, message, colors: _feedbackColors);
   }
 
   void _handleShelfPointerDown(PointerDownEvent event) {
@@ -711,40 +685,45 @@ class _LibraryScreenState extends State<LibraryScreen>
                         context,
                       ),
                     );
-                    return GlobalSettingsSheet(
-                      settings: sheetSettings,
+                    return AppOverlayTheme(
                       colors: colors,
-                      onChange: (newSettings) {
-                        setSheetState(() => sheetSettings = newSettings);
-                        if (mounted) setState(() => _settings = newSettings);
-                        _syncAutomaticUpdateCheck();
-                        _persistSettings(newSettings);
-                      },
-                      onImportFont: () async {
-                        try {
-                          final newSettings = await _fontService
-                              .pickAndInstallFont(sheetSettings);
-                          if (newSettings == null) return;
-                          if (!context.mounted || !mounted) return;
+                      child: GlobalSettingsSheet(
+                        settings: sheetSettings,
+                        colors: colors,
+                        onChange: (newSettings) {
                           setSheetState(() => sheetSettings = newSettings);
                           if (mounted) setState(() => _settings = newSettings);
-                          await _storage.saveSettings(newSettings);
-                          _showMessage('字体已导入并应用');
-                        } catch (e) {
-                          _showError(
-                            e is FormatException
-                                ? e.message
-                                : '字体导入失败，请选择 .ttf 或 .otf 文件',
-                          );
-                        }
-                      },
-                      onCheckUpdate: () async {
-                        // Close the sheet first so the result dialog or
-                        // snackbar lands on the shelf instead of the sheet.
-                        Navigator.of(context).pop();
-                        await _checkUpdateManually();
-                      },
-                      applicationVersion: _applicationVersion,
+                          _syncAutomaticUpdateCheck();
+                          _persistSettings(newSettings);
+                        },
+                        onImportFont: () async {
+                          try {
+                            final newSettings = await _fontService
+                                .pickAndInstallFont(sheetSettings);
+                            if (newSettings == null) return;
+                            if (!context.mounted || !mounted) return;
+                            setSheetState(() => sheetSettings = newSettings);
+                            if (mounted) {
+                              setState(() => _settings = newSettings);
+                            }
+                            await _storage.saveSettings(newSettings);
+                            _showMessage('字体已导入并应用');
+                          } catch (e) {
+                            _showError(
+                              e is FormatException
+                                  ? e.message
+                                  : '字体导入失败，请选择 .ttf 或 .otf 文件',
+                            );
+                          }
+                        },
+                        onCheckUpdate: () async {
+                          // Close the sheet first so the result dialog or
+                          // snackbar lands on the shelf instead of the sheet.
+                          Navigator.of(context).pop();
+                          await _checkUpdateManually();
+                        },
+                        applicationVersion: _applicationVersion,
+                      ),
                     );
                   },
                 ),
@@ -772,109 +751,49 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   Future<void> _showBookActions(Book book) async {
     if (_exporting) return;
+    _librarySearchFocus.unfocus();
     final colors = AppTheme.getReaderTheme(
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
-    final action = await showModalBottomSheet<_BookAction>(
+    final action = await showAppSheet<_BookAction>(
       context: context,
-      backgroundColor: Colors.transparent,
-      barrierColor: Colors.black.withValues(alpha: 0.34),
-      builder: (sheetContext) => SafeArea(
-        child: Container(
-          margin: const EdgeInsets.all(AppSpacing.md),
-          padding: const EdgeInsets.fromLTRB(
-            AppSpacing.sm,
-            AppSpacing.lg,
-            AppSpacing.sm,
-            AppSpacing.sm,
+      colors: colors,
+      builder: (sheetContext) => AppActionSheet(
+        colors: colors,
+        title: book.title,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.edit_outlined),
+            title: const Text('修改信息'),
+            subtitle: const Text('修改书名和作者'),
+            onTap: () => Navigator.pop(sheetContext, _BookAction.rename),
           ),
-          decoration: BoxDecoration(
-            color: colors.headerBg,
-            borderRadius: BorderRadius.circular(AppRadius.pill),
-            border: Border.all(color: colors.border),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.18),
-                blurRadius: 24,
-                offset: const Offset(0, 10),
-              ),
-            ],
+          ListTile(
+            leading: const Icon(Icons.save_alt_rounded),
+            title: const Text('导出文件'),
+            subtitle: Text(
+              book.isPdf ? '导出当前 PDF 副本' : '导出 UTF-8 TXT，包含已保存的编辑内容',
+            ),
+            onTap: () => Navigator.pop(sheetContext, _BookAction.exportFile),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
-                child: Text(
-                  book.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: colors.text,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              const SizedBox(height: AppSpacing.md),
-              ListTile(
-                leading: Icon(Icons.edit_outlined, color: colors.accent),
-                title: Text('修改信息', style: TextStyle(color: colors.text)),
-                subtitle: Text(
-                  '修改书名和作者',
-                  style: TextStyle(color: colors.secondary),
-                ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                ),
-                onTap: () => Navigator.pop(sheetContext, _BookAction.rename),
-              ),
-              ListTile(
-                leading: Icon(Icons.save_alt_rounded, color: colors.accent),
-                title: Text('导出文件', style: TextStyle(color: colors.text)),
-                subtitle: Text(
-                  book.isPdf ? '导出当前 PDF 副本' : '导出 UTF-8 TXT，包含已保存的编辑内容',
-                  style: TextStyle(color: colors.secondary),
-                ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(AppRadius.md),
-                ),
-                onTap: () =>
-                    Navigator.pop(sheetContext, _BookAction.exportFile),
-              ),
-              const SizedBox(height: AppSpacing.xs),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-                child: Row(
-                  children: [
-                    _compactBookAction(
-                      sheetContext: sheetContext,
-                      action: _BookAction.move,
-                      icon: Icons.open_with_rounded,
-                      label: '移动',
-                      color: colors.accent,
-                    ),
-                    const SizedBox(width: AppSpacing.sm),
-                    _compactBookAction(
-                      sheetContext: sheetContext,
-                      action: _BookAction.delete,
-                      icon: Icons.delete_outline_rounded,
-                      label: '删除',
-                      color: Color.lerp(
-                        colors.accent,
-                        const Color(0xFFD83B32),
-                        0.72,
-                      )!,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: AppSpacing.sm),
-            ],
+          ListTile(
+            leading: const Icon(Icons.open_with_rounded),
+            title: const Text('移动'),
+            onTap: () => Navigator.pop(sheetContext, _BookAction.move),
           ),
-        ),
+          ListTile(
+            leading: Icon(
+              Icons.delete_outline_rounded,
+              color: AppOverlayTheme.danger(colors),
+            ),
+            title: Text(
+              '删除',
+              style: TextStyle(color: AppOverlayTheme.danger(colors)),
+            ),
+            onTap: () => Navigator.pop(sheetContext, _BookAction.delete),
+          ),
+        ],
       ),
     );
     if (!mounted || action == null) return;
@@ -890,57 +809,10 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
-  Widget _compactBookAction({
-    required BuildContext sheetContext,
-    required _BookAction action,
-    required IconData icon,
-    required String label,
-    required Color color,
-  }) {
-    return Expanded(
-      child: Semantics(
-        button: true,
-        label: label,
-        child: Material(
-          color: color.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(AppRadius.lg),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(AppRadius.lg),
-            onTap: () => Navigator.pop(sheetContext, action),
-            child: Container(
-              height: 66,
-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(AppRadius.lg),
-                border: Border.all(color: color.withValues(alpha: 0.20)),
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(icon, size: 20, color: color),
-                  const SizedBox(height: AppSpacing.xs),
-                  Text(
-                    label,
-                    style: TextStyle(
-                      color: color,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      height: 1,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
   Future<void> _exportBook(Book summary) async {
     if (_exporting || _importing || _openingBook) return;
     setState(() => _exporting = true);
-    AppToast.loading(context, '正在准备导出文件…');
+    AppToast.loading(context, '正在准备导出文件…', colors: _feedbackColors);
     try {
       final book = await _storage.getBook(summary.id);
       if (!mounted) return;
@@ -975,14 +847,11 @@ class _LibraryScreenState extends State<LibraryScreen>
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
-    final edited = await showDialog<({String title, String author})>(
+    final edited = await showAppDialog<({String title, String author})>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: colors.headerBg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.lg),
-        ),
-        title: Text('修改书籍信息', style: TextStyle(color: colors.text)),
+      colors: _feedbackColors,
+      builder: (dialogContext) => AppDialog(
+        title: const Text('修改书籍信息'),
         content: Form(
           key: formKey,
           child: Column(
@@ -999,14 +868,6 @@ class _LibraryScreenState extends State<LibraryScreen>
                   labelText: '书名',
                   hintText: '请输入书籍名称',
                   hintStyle: TextStyle(color: colors.secondary),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                    borderSide: BorderSide(color: colors.border),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                    borderSide: BorderSide(color: colors.accent, width: 1.5),
-                  ),
                 ),
                 validator: (value) =>
                     value == null || value.trim().isEmpty ? '书籍名称不能为空' : null,
@@ -1022,14 +883,6 @@ class _LibraryScreenState extends State<LibraryScreen>
                   labelText: '作者（可留空）',
                   hintText: 'TXT 无元数据时可在这里补充',
                   hintStyle: TextStyle(color: colors.secondary),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                    borderSide: BorderSide(color: colors.border),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                    borderSide: BorderSide(color: colors.accent, width: 1.5),
-                  ),
                 ),
                 onFieldSubmitted: (_) {
                   if (formKey.currentState?.validate() == true) {
@@ -1049,7 +902,6 @@ class _LibraryScreenState extends State<LibraryScreen>
             child: Text('取消', style: TextStyle(color: colors.secondary)),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: colors.accent),
             onPressed: () {
               if (formKey.currentState?.validate() == true) {
                 Navigator.pop(dialogContext, (
@@ -1089,62 +941,32 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
-  void _confirmDeleteBook(Book book) {
-    showGeneralDialog(
+  Future<void> _confirmDeleteBook(Book book) async {
+    final confirmed = await showAppDialog<bool>(
       context: context,
-      barrierDismissible: true,
-      barrierLabel: '取消',
-      barrierColor: Colors.black54,
-      transitionDuration: AppMotion.normal,
-      pageBuilder: (ctx, animation, secondaryAnimation) {
-        final dialogColors = AppTheme.getReaderTheme(
-          _settings.theme,
-          systemBrightness: MediaQuery.platformBrightnessOf(ctx),
-        );
-        return AlertDialog(
-          backgroundColor: dialogColors.headerBg,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadius.lg),
+      colors: _feedbackColors,
+      builder: (dialogContext) => AppDialog(
+        title: const Text('删除书籍'),
+        content: Text('确定要删除「${book.title}」吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
           ),
-          title: Text('删除书籍', style: TextStyle(color: dialogColors.text)),
-          content: Text(
-            '确定要删除「${book.title}」吗？',
-            style: TextStyle(color: dialogColors.text),
+          AppDestructiveButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('删除'),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: Text(
-                '取消',
-                style: TextStyle(color: dialogColors.secondary),
-              ),
-            ),
-            TextButton(
-              onPressed: () async {
-                Navigator.pop(ctx);
-                try {
-                  await _storage.deleteBook(book.id);
-                  await _loadData();
-                } on Object {
-                  _showError('删除失败，请稍后重试');
-                }
-              },
-              child: Text('删除', style: TextStyle(color: dialogColors.accent)),
-            ),
-          ],
-        );
-      },
-      transitionBuilder: (ctx, animation, secondaryAnimation, child) {
-        final curved = CurvedAnimation(
-          parent: animation,
-          curve: AppMotion.emphasized,
-        );
-        return FadeTransition(
-          opacity: animation,
-          child: ScaleTransition(scale: curved, child: child),
-        );
-      },
+        ],
+      ),
     );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _storage.deleteBook(book.id);
+      await _loadData();
+    } on Object {
+      _showError('删除失败，请稍后重试');
+    }
   }
 
   Rect? _rectForKey(GlobalKey key) {
@@ -1253,9 +1075,10 @@ class _LibraryScreenState extends State<LibraryScreen>
     Book book,
     BookAvailability availability,
   ) async {
-    final delete = await showDialog<bool>(
+    final delete = await showAppDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
+      colors: _feedbackColors,
+      builder: (dialogContext) => AppDialog(
         title: Text(availability.label),
         content: Text(
           availability == BookAvailability.sourceMissing
@@ -1267,10 +1090,9 @@ class _LibraryScreenState extends State<LibraryScreen>
             onPressed: () => Navigator.of(dialogContext).pop(false),
             child: const Text('保留'),
           ),
-          FilledButton.icon(
+          AppDestructiveButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            icon: const Icon(Icons.delete_outline_rounded),
-            label: const Text('从书架删除'),
+            child: const Text('从书架删除'),
           ),
         ],
       ),
@@ -1435,6 +1257,10 @@ class _LibraryScreenState extends State<LibraryScreen>
               Expanded(
                 child: AnimatedSwitcher(
                   duration: AppMotion.fast,
+                  layoutBuilder: (current, previous) => Stack(
+                    alignment: Alignment.centerLeft,
+                    children: [...previous, ?current],
+                  ),
                   transitionBuilder: (child, animation) => SlideTransition(
                     position: Tween<Offset>(
                       begin: const Offset(0, 0.18),
@@ -1465,8 +1291,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                     );
                     if (_librarySearchVisible) {
                       WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (mounted && _librarySearchVisible)
+                        if (mounted && _librarySearchVisible) {
                           _librarySearchFocus.requestFocus();
+                        }
                       });
                     } else {
                       _librarySearchFocus.unfocus();

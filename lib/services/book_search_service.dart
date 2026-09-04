@@ -1,34 +1,12 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:io';
 import 'dart:isolate';
 
-import 'package:path/path.dart' as p;
-
 import '../models/book.dart';
-import '../repositories/reader_repositories.dart';
+import '../models/search_match.dart';
+import '../models/reading_paragraph.dart';
 
-class BookSearchResult {
-  final int chapterIndex;
-  final int paragraphIndex;
-  final int characterOffset;
-  final String chapterTitle;
-  final String snippet;
-  final String matchedText;
-  final int snippetMatchStart;
-  final int snippetMatchEnd;
-
-  const BookSearchResult({
-    required this.chapterIndex,
-    required this.paragraphIndex,
-    required this.characterOffset,
-    required this.chapterTitle,
-    required this.snippet,
-    required this.matchedText,
-    required this.snippetMatchStart,
-    required this.snippetMatchEnd,
-  });
-}
+export '../models/search_match.dart' show BookSearchResult;
 
 /// Searches the chapter payload that is already used by the reader.
 ///
@@ -39,13 +17,10 @@ class BookSearchResult {
 class BookSearchService {
   BookSearchService._();
 
-  static const maxResults = 500;
-  static final _paragraphBreakPattern = RegExp(r'(?:\r\n?|\n)+');
-  static final _leadingWhitespacePattern = RegExp(r'^[\s　]+');
+  static const maxResults = maxDocumentSearchResults;
   static final _searchWhitespacePattern = RegExp(
     r'[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+',
   );
-  static Future<void>? _obsoleteDataRemoval;
 
   static BookSearchSession openSession(Book book) => BookSearchSession._(book);
 
@@ -56,25 +31,6 @@ class BookSearchService {
     return session.search(rawQuery).whenComplete(session.dispose);
   }
 
-  /// Removes files created by older releases. The current search path never
-  /// reads or recreates this directory, so interrupted legacy work cannot make
-  /// search unavailable after an overlay installation.
-  static Future<void> removeObsoleteData(AppDataDirectoryProvider storage) {
-    return _obsoleteDataRemoval ??= () async {
-      try {
-        final root = (await storage.getAppDataDirectory()).absolute;
-        final directory = Directory(p.join(root.path, 'search')).absolute;
-        if (p.isWithin(root.path, directory.path) && await directory.exists()) {
-          await directory.delete(recursive: true);
-        }
-      } on Object {
-        // Searching does not use these files. A later app launch can retry the
-        // space cleanup without changing current search availability.
-        _obsoleteDataRemoval = null;
-      }
-    }();
-  }
-
   static _SearchDocument _prepareDocument(Book book) {
     return _SearchDocument(book);
   }
@@ -82,14 +38,8 @@ class BookSearchService {
   static _SearchChapter _prepareChapter(Chapter chapter, int chapterIndex) {
     final paragraphs = <_SearchParagraph>[];
     var paragraphIndex = 0;
-    final rawParagraphs = chapter.hasRichEpubContent
-        ? chapter.epubBlocks
-              .where((block) => block.isText && block.text.trim().isNotEmpty)
-              .map((block) => block.text)
-        : chapter.content.split(_paragraphBreakPattern);
-    for (final rawParagraph in rawParagraphs) {
-      final paragraph = _readerParagraphBody(rawParagraph);
-      if (paragraph.isEmpty) continue;
+    for (final projected in readingParagraphs(chapter)) {
+      final paragraph = projected.body;
       paragraphs.add(
         _SearchParagraph(
           index: paragraphIndex,
@@ -159,10 +109,6 @@ class BookSearchService {
       }
     }
     return results;
-  }
-
-  static String _readerParagraphBody(String value) {
-    return value.replaceFirst(_leadingWhitespacePattern, '').trimRight();
   }
 
   static String _normalizeForSearch(String value) {

@@ -10,12 +10,16 @@ import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/pdf_renderer_service.dart';
-import '../services/book_search_service.dart';
+import '../models/search_match.dart';
 import '../services/storage_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_spacing.dart';
 import '../widgets/book_search_sheet.dart';
+import '../widgets/app_dialog.dart';
+import '../widgets/app_sheet.dart';
+import '../widgets/app_toast.dart';
+import '../widgets/app_popup_menu.dart';
 
 class PdfReaderScreen extends StatefulWidget {
   final Book book;
@@ -51,6 +55,13 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   int? _sliderPage;
   String? _fatalError;
   Timer? _autoHideTimer;
+
+  ReaderThemeColors get _overlayColors =>
+      AppTheme.getReaderTheme(switch (_displayTheme) {
+        PdfDisplayTheme.original => ReaderThemeMode.light,
+        PdfDisplayTheme.paper => ReaderThemeMode.warm,
+        PdfDisplayTheme.dark => ReaderThemeMode.dark,
+      });
 
   int get _pageCount => widget.book.pageCount ?? 0;
   String? get _sourcePath => widget.book.sourcePath;
@@ -202,11 +213,11 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   Future<void> _showPageJumpDialog() async {
     _autoHideTimer?.cancel();
     final controller = TextEditingController(text: '${_currentPage + 1}');
-    final page = await showDialog<int>(
+    final page = await showAppDialog<int>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF242424),
-        title: const Text('跳转页码', style: TextStyle(color: Colors.white)),
+      colors: _overlayColors,
+      builder: (dialogContext) => AppDialog(
+        title: const Text('跳转页码'),
         content: TextField(
           controller: controller,
           autofocus: true,
@@ -214,11 +225,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
           inputFormatters: <TextInputFormatter>[
             FilteringTextInputFormatter.digitsOnly,
           ],
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            hintText: '1 - $_pageCount',
-            hintStyle: const TextStyle(color: Colors.white54),
-          ),
+          decoration: InputDecoration(hintText: '1 - $_pageCount'),
           onSubmitted: (value) {
             final parsed = int.tryParse(value);
             if (parsed != null && parsed >= 1 && parsed <= _pageCount) {
@@ -260,74 +267,59 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   Future<void> _showBookmarks() async {
     _autoHideTimer?.cancel();
     final pages = <int>{..._bookmarks, ..._notes.keys}.toList()..sort();
-    final selected = await showModalBottomSheet<int>(
+    final colors = _overlayColors;
+    final selected = await showAppSheet<int>(
       context: context,
-      backgroundColor: const Color(0xFF242424),
-      builder: (sheetContext) => SafeArea(
-        child: SizedBox(
-          height: math.min(MediaQuery.sizeOf(sheetContext).height * 0.6, 480.0),
-          child: Column(
-            children: [
-              ListTile(
-                title: const Text(
-                  'PDF 书签与笔记',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                trailing: IconButton(
-                  onPressed: () => Navigator.of(sheetContext).pop(),
-                  icon: const Icon(Icons.close_rounded, color: Colors.white70),
-                ),
-              ),
-              const Divider(height: 1, color: Colors.white12),
-              Expanded(
-                child: pages.isEmpty
-                    ? const Center(
-                        child: Text(
-                          '还没有书签或笔记',
-                          style: TextStyle(color: Colors.white60),
-                        ),
-                      )
-                    : ListView.builder(
-                        itemCount: pages.length,
-                        itemBuilder: (context, index) {
-                          final page = pages[index];
-                          final note = _notes[page];
-                          return ListTile(
-                            leading: Icon(
-                              _bookmarks.contains(page)
-                                  ? Icons.bookmark_rounded
-                                  : Icons.note_alt_outlined,
-                              color: _bookmarks.contains(page)
-                                  ? Colors.amberAccent
-                                  : Colors.lightBlueAccent,
-                            ),
-                            title: Text(
-                              '第 ${page + 1} 页',
-                              style: const TextStyle(color: Colors.white),
-                            ),
-                            subtitle: note == null
-                                ? null
-                                : Text(
-                                    note,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: Colors.white60,
+      colors: colors,
+      builder: (sheetContext) => AppSheetSurface(
+        colors: colors,
+        child: SafeArea(
+          top: false,
+          child: SizedBox(
+            height: math.min(
+              MediaQuery.sizeOf(sheetContext).height * 0.65,
+              520.0,
+            ),
+            child: Column(
+              children: [
+                const AppSheetHeader(title: 'PDF 书签与笔记'),
+                const Divider(),
+                Expanded(
+                  child: pages.isEmpty
+                      ? Center(
+                          child: Text(
+                            '还没有书签或笔记',
+                            style: TextStyle(color: colors.secondary),
+                          ),
+                        )
+                      : ListView.builder(
+                          itemCount: pages.length,
+                          itemBuilder: (context, index) {
+                            final page = pages[index];
+                            final note = _notes[page];
+                            return ListTile(
+                              leading: Icon(
+                                _bookmarks.contains(page)
+                                    ? Icons.bookmark_rounded
+                                    : Icons.note_alt_outlined,
+                                color: colors.accent,
+                              ),
+                              title: Text('第 ${page + 1} 页'),
+                              subtitle: note == null
+                                  ? null
+                                  : Text(
+                                      note,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
                                     ),
-                                  ),
-                            trailing: const Icon(
-                              Icons.chevron_right_rounded,
-                              color: Colors.white54,
-                            ),
-                            onTap: () => Navigator.of(sheetContext).pop(page),
-                          );
-                        },
-                      ),
-              ),
-            ],
+                              trailing: const Icon(Icons.chevron_right_rounded),
+                              onTap: () => Navigator.of(sheetContext).pop(page),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -339,29 +331,23 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   Future<void> _editPageNote() async {
     _autoHideTimer?.cancel();
     final controller = TextEditingController(text: _notes[_currentPage] ?? '');
-    final note = await showDialog<String?>(
+    final note = await showAppDialog<String?>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF242424),
-        title: Text(
-          '第 ${_currentPage + 1} 页笔记',
-          style: const TextStyle(color: Colors.white),
-        ),
+      colors: _overlayColors,
+      builder: (dialogContext) => AppDialog(
+        title: Text('第 ${_currentPage + 1} 页笔记'),
         content: TextField(
           controller: controller,
           autofocus: true,
           minLines: 4,
           maxLines: 8,
           maxLength: 4000,
-          style: const TextStyle(color: Colors.white),
-          decoration: const InputDecoration(
-            hintText: '输入本地笔记',
-            hintStyle: TextStyle(color: Colors.white54),
-          ),
+          decoration: const InputDecoration(hintText: '输入本地笔记'),
         ),
         actions: [
           if (_notes.containsKey(_currentPage))
-            TextButton(
+            AppDestructiveButton(
+              filled: false,
               onPressed: () => Navigator.of(dialogContext).pop(''),
               child: const Text('删除笔记'),
             ),
@@ -402,45 +388,30 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
         debugPrint('Failed to embed PDF text annotation: $error');
         debugPrintStack(stackTrace: stackTrace);
         if (mounted) {
-          ScaffoldMessenger.of(
+          AppToast.error(
             context,
-          ).showSnackBar(const SnackBar(content: Text('本地笔记已保存，但写入 PDF 批注失败')));
+            '本地笔记已保存，但写入 PDF 批注失败',
+            colors: _overlayColors,
+          );
         }
       }
     }
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
 
-  Future<List<BookSearchResult>> _searchPdf(String query) async {
+  Future<List<PdfTextSearchResult>> _searchPdf(String query) async {
     final sourcePath = _sourcePath;
-    if (sourcePath == null) return const <BookSearchResult>[];
-    final results = await _renderer.searchText(
-      filePath: sourcePath,
-      query: query,
-    );
-    return results
-        .map(
-          (result) => BookSearchResult(
-            chapterIndex: result.pageIndex,
-            paragraphIndex: 0,
-            characterOffset: 0,
-            chapterTitle: '第 ${result.pageIndex + 1} 页',
-            snippet: result.snippet,
-            matchedText: result.matchedText,
-            snippetMatchStart: result.snippetMatchStart,
-            snippetMatchEnd: result.snippetMatchEnd,
-          ),
-        )
-        .toList(growable: false);
+    if (sourcePath == null) return const <PdfTextSearchResult>[];
+    return _renderer.searchText(filePath: sourcePath, query: query);
   }
 
-  Future<List<BookSearchResult>> _searchPdfWithOcr(String rawQuery) async {
+  Future<List<PdfTextSearchResult>> _searchPdfWithOcr(String rawQuery) async {
     final sourcePath = _sourcePath;
     final query = _normalizeOcrText(rawQuery).toLowerCase();
     if (sourcePath == null || query.isEmpty) {
-      return const <BookSearchResult>[];
+      return const <PdfTextSearchResult>[];
     }
-    final results = <BookSearchResult>[];
+    final results = <PdfTextSearchResult>[];
     for (var pageIndex = 0; pageIndex < _pageCount; pageIndex++) {
       final source = await _renderer.recognizePageText(
         filePath: sourcePath,
@@ -449,7 +420,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
       final normalized = _normalizeOcrText(source);
       final searchable = normalized.toLowerCase();
       var offset = searchable.indexOf(query);
-      while (offset >= 0 && results.length < BookSearchService.maxResults) {
+      while (offset >= 0 && results.length < maxDocumentSearchResults) {
         final end = offset + query.length;
         final snippetStart = math.max(0, offset - 30);
         final snippetEnd = math.min(normalized.length, end + 48);
@@ -459,11 +430,9 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
             '${leading ? '…' : ''}${normalized.substring(snippetStart, snippetEnd)}${trailing ? '…' : ''}';
         final matchStart = (leading ? 1 : 0) + offset - snippetStart;
         results.add(
-          BookSearchResult(
-            chapterIndex: pageIndex,
-            paragraphIndex: 0,
-            characterOffset: 0,
-            chapterTitle: '第 ${pageIndex + 1} 页 · OCR',
+          PdfTextSearchResult(
+            pageIndex: pageIndex,
+            isOcr: true,
             snippet: snippet,
             matchedText: normalized.substring(offset, end),
             snippetMatchStart: matchStart,
@@ -472,7 +441,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
         );
         offset = searchable.indexOf(query, end);
       }
-      if (results.length >= BookSearchService.maxResults) break;
+      if (results.length >= maxDocumentSearchResults) break;
     }
     return results;
   }
@@ -488,11 +457,10 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
 
   Future<void> _showPdfSearch({bool useOcr = false}) async {
     _autoHideTimer?.cancel();
-    final colors = AppTheme.getReaderTheme(ReaderThemeMode.dark);
-    final selected = await showModalBottomSheet<BookSearchResult>(
+    final colors = _overlayColors;
+    final selected = await showAppSheet<PdfTextSearchResult>(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
+      colors: _overlayColors,
       builder: (sheetContext) => AnimatedPadding(
         duration: AppMotion.normal,
         padding: EdgeInsets.only(
@@ -500,16 +468,16 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
         ),
         child: FractionallySizedBox(
           heightFactor: 0.88,
-          child: BookSearchSheet(
+          child: BookSearchSheet<PdfTextSearchResult>(
             colors: colors,
             onSearch: useOcr ? _searchPdfWithOcr : _searchPdf,
             onSelect: (result) =>
-                Navigator.of(sheetContext).pop<BookSearchResult>(result),
+                Navigator.of(sheetContext).pop<PdfTextSearchResult>(result),
           ),
         ),
       ),
     );
-    if (selected != null && mounted) await _goToPage(selected.chapterIndex);
+    if (selected != null && mounted) await _goToPage(selected.pageIndex);
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
 
@@ -528,27 +496,16 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
       debugPrintStack(stackTrace: stackTrace);
     }
     if (!mounted) return;
-    await showDialog<void>(
+    await showAppDialog<void>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF242424),
-        title: Text(
-          '第 ${_currentPage + 1} 页识别文字',
-          style: const TextStyle(color: Colors.white),
-        ),
+      colors: _overlayColors,
+      builder: (dialogContext) => AppDialog(
+        title: Text('第 ${_currentPage + 1} 页识别文字'),
         content: SizedBox(
           width: double.maxFinite,
           child: text.isEmpty
-              ? const Text(
-                  '这一页没有识别到文字。',
-                  style: TextStyle(color: Colors.white60),
-                )
-              : SingleChildScrollView(
-                  child: SelectableText(
-                    text,
-                    style: const TextStyle(color: Colors.white70, height: 1.6),
-                  ),
-                ),
+              ? const Text('这一页没有识别到文字。')
+              : SelectableText(text),
         ),
         actions: [
           TextButton(
@@ -563,42 +520,28 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
 
   Future<void> _showDisplayThemeSheet() async {
     _autoHideTimer?.cancel();
-    final selected = await showModalBottomSheet<PdfDisplayTheme>(
+    final selected = await showAppSheet<PdfDisplayTheme>(
       context: context,
-      backgroundColor: const Color(0xFF242424),
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const ListTile(
-              title: Text(
-                'PDF 显示主题',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w700,
-                ),
+      colors: _overlayColors,
+      builder: (sheetContext) => AppActionSheet(
+        colors: _overlayColors,
+        title: 'PDF 显示主题',
+        subtitle: 'PDF 是固定版式；字号由原文件决定，可用双指缩放阅读。',
+        children: [
+          for (final theme in PdfDisplayTheme.values)
+            ListTile(
+              leading: Icon(
+                theme == _displayTheme
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_unchecked,
+                color: theme == _displayTheme
+                    ? _overlayColors.accent
+                    : _overlayColors.secondary,
               ),
-              subtitle: Text(
-                'PDF 是固定版式；字号由原文件决定，可用双指缩放阅读。',
-                style: TextStyle(color: Colors.white54),
-              ),
+              title: Text(theme.label),
+              onTap: () => Navigator.pop(sheetContext, theme),
             ),
-            for (final theme in PdfDisplayTheme.values)
-              ListTile(
-                leading: Icon(
-                  theme == _displayTheme
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_unchecked,
-                  color: theme == _displayTheme ? Colors.white : Colors.white38,
-                ),
-                title: Text(
-                  theme.label,
-                  style: const TextStyle(color: Colors.white70),
-                ),
-                onTap: () => Navigator.pop(sheetContext, theme),
-              ),
-          ],
-        ),
+        ],
       ),
     );
     if (selected != null && selected != _displayTheme && mounted) {
@@ -612,81 +555,73 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     final sourcePath = _sourcePath;
     if (sourcePath == null) return;
     _autoHideTimer?.cancel();
-    final selected = await showModalBottomSheet<int>(
+    final colors = _overlayColors;
+    final outline = _renderer.getOutline(sourcePath);
+    final selected = await showAppSheet<int>(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF242424),
-      builder: (sheetContext) => SafeArea(
-        child: FractionallySizedBox(
-          heightFactor: 0.75,
-          child: Column(
-            children: [
-              ListTile(
-                title: const Text(
-                  'PDF 大纲',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
+      colors: colors,
+      builder: (sheetContext) => AppSheetSurface(
+        colors: colors,
+        child: SafeArea(
+          top: false,
+          child: FractionallySizedBox(
+            heightFactor: 0.75,
+            child: Column(
+              children: [
+                const AppSheetHeader(title: 'PDF 大纲'),
+                const Divider(),
+                Expanded(
+                  child: FutureBuilder<List<PdfOutlineEntry>>(
+                    future: outline,
+                    builder: (context, snapshot) {
+                      if (snapshot.hasError) {
+                        return Center(
+                          child: Text(
+                            '无法读取 PDF 大纲',
+                            style: TextStyle(color: colors.secondary),
+                          ),
+                        );
+                      }
+                      final entries = snapshot.data;
+                      if (entries == null) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+                      if (entries.isEmpty) {
+                        return Center(
+                          child: Text(
+                            '这份 PDF 没有可用大纲',
+                            style: TextStyle(color: colors.secondary),
+                          ),
+                        );
+                      }
+                      return ListView.builder(
+                        itemCount: entries.length,
+                        itemBuilder: (context, index) {
+                          final entry = entries[index];
+                          return ListTile(
+                            contentPadding: EdgeInsets.only(
+                              left: 20 + entry.depth.clamp(0, 8) * 14,
+                              right: 16,
+                            ),
+                            title: Text(
+                              entry.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: Text(
+                              '${entry.pageIndex + 1}',
+                              style: TextStyle(color: colors.secondary),
+                            ),
+                            onTap: () =>
+                                Navigator.of(sheetContext).pop(entry.pageIndex),
+                          );
+                        },
+                      );
+                    },
                   ),
                 ),
-                trailing: IconButton(
-                  onPressed: () => Navigator.of(sheetContext).pop(),
-                  icon: const Icon(Icons.close_rounded, color: Colors.white70),
-                ),
-              ),
-              const Divider(height: 1, color: Colors.white12),
-              Expanded(
-                child: FutureBuilder<List<PdfOutlineEntry>>(
-                  future: _renderer.getOutline(sourcePath),
-                  builder: (context, snapshot) {
-                    if (snapshot.hasError) {
-                      return const Center(
-                        child: Text(
-                          '无法读取 PDF 大纲',
-                          style: TextStyle(color: Colors.white60),
-                        ),
-                      );
-                    }
-                    final entries = snapshot.data;
-                    if (entries == null) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
-                    if (entries.isEmpty) {
-                      return const Center(
-                        child: Text(
-                          '这份 PDF 没有可用大纲',
-                          style: TextStyle(color: Colors.white60),
-                        ),
-                      );
-                    }
-                    return ListView.builder(
-                      itemCount: entries.length,
-                      itemBuilder: (context, index) {
-                        final entry = entries[index];
-                        return ListTile(
-                          contentPadding: EdgeInsets.only(
-                            left: 20 + entry.depth.clamp(0, 8) * 14,
-                            right: 12,
-                          ),
-                          title: Text(
-                            entry.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(color: Colors.white),
-                          ),
-                          trailing: Text(
-                            '${entry.pageIndex + 1}',
-                            style: const TextStyle(color: Colors.white54),
-                          ),
-                          onTap: () =>
-                              Navigator.of(sheetContext).pop(entry.pageIndex),
-                        );
-                      },
-                    );
-                  },
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -697,9 +632,10 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
 
   Future<void> _deleteUnavailablePdf() async {
     if (_deleting) return;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
+      colors: _overlayColors,
+      builder: (dialogContext) => AppDialog(
         title: const Text('删除这本 PDF？'),
         content: Text('「${widget.book.title}」的源文件已经丢失或无法渲染。可以从书架中移除它。'),
         actions: [
@@ -707,7 +643,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
             onPressed: () => Navigator.of(dialogContext).pop(false),
             child: const Text('取消'),
           ),
-          FilledButton(
+          AppDestructiveButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('删除'),
           ),
@@ -1039,10 +975,10 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                         color: Colors.white,
                       ),
                     ),
-                    PopupMenuButton<String>(
+                    AppPopupMenuButton<String>(
+                      colors: _overlayColors,
                       tooltip: 'PDF 工具',
                       enabled: _fatalError == null && _pageCount > 0,
-                      color: const Color(0xFF2B2B2B),
                       icon: const Icon(Icons.more_vert, color: Colors.white),
                       onSelected: (value) {
                         switch (value) {
@@ -1054,45 +990,21 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                             unawaited(_showPdfSearch(useOcr: true));
                         }
                       },
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(
+                      entries: const [
+                        AppMenuEntry(
                           value: 'theme',
-                          child: ListTile(
-                            leading: Icon(
-                              Icons.brightness_6_outlined,
-                              color: Colors.white70,
-                            ),
-                            title: Text(
-                              '显示主题',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ),
+                          label: '显示主题',
+                          icon: Icons.brightness_6_outlined,
                         ),
-                        PopupMenuItem(
+                        AppMenuEntry(
                           value: 'ocr-page',
-                          child: ListTile(
-                            leading: Icon(
-                              Icons.document_scanner_outlined,
-                              color: Colors.white70,
-                            ),
-                            title: Text(
-                              '识别当前页',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ),
+                          label: '识别当前页',
+                          icon: Icons.document_scanner_outlined,
                         ),
-                        PopupMenuItem(
+                        AppMenuEntry(
                           value: 'ocr-search',
-                          child: ListTile(
-                            leading: Icon(
-                              Icons.manage_search_rounded,
-                              color: Colors.white70,
-                            ),
-                            title: Text(
-                              '扫描件全文搜索',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ),
+                          label: '扫描件全文搜索',
+                          icon: Icons.manage_search_rounded,
                         ),
                       ],
                     ),

@@ -1,23 +1,10 @@
 import 'package:flutter/services.dart';
+import '../models/search_match.dart';
+
+export '../models/search_match.dart' show PdfTextSearchResult;
 
 class PdfPasswordRequiredException extends FormatException {
   const PdfPasswordRequiredException() : super('PDF 受密码保护，请输入打开密码');
-}
-
-class PdfTextSearchResult {
-  final int pageIndex;
-  final String snippet;
-  final String matchedText;
-  final int snippetMatchStart;
-  final int snippetMatchEnd;
-
-  const PdfTextSearchResult({
-    required this.pageIndex,
-    required this.snippet,
-    required this.matchedText,
-    required this.snippetMatchStart,
-    required this.snippetMatchEnd,
-  });
 }
 
 class PdfOutlineEntry {

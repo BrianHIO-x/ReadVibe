@@ -109,7 +109,11 @@ class GlobalSettingsSheet extends StatelessWidget {
                       onPressed: () async {
                         await SystemTextActionService.clearDefaults();
                         if (!context.mounted) return;
-                        AppToast.success(context, '已清除翻译和搜索的默认应用');
+                        AppToast.success(
+                          context,
+                          '已清除翻译和搜索的默认应用',
+                          colors: colors,
+                        );
                       },
                       icon: const Icon(Icons.restart_alt_rounded, size: 18),
                       label: const Text('重新选择默认应用'),

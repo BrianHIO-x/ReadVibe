@@ -6,6 +6,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:readvibe/models/book.dart';
 import 'package:readvibe/screens/pdf_reader_screen.dart';
+import 'package:readvibe/models/reader_settings.dart';
+import 'package:readvibe/theme/app_theme.dart';
+import 'package:readvibe/widgets/app_dialog.dart';
+import 'package:readvibe/widgets/app_sheet.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -37,9 +41,8 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMessageHandler(
           wakelockChannel,
-          (message) async => const StandardMessageCodec().encodeMessage(
-            <Object?>[null],
-          ),
+          (message) async =>
+              const StandardMessageCodec().encodeMessage(<Object?>[null]),
         );
   });
 
@@ -85,4 +88,76 @@ void main() {
     await tester.pump();
     expect(find.byTooltip('取消书签'), findsOneWidget);
   });
+  for (final display in PdfDisplayTheme.values) {
+    testWidgets('PDF jump, note and bookmarks follow ${display.name}', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({
+        'readvibe_pdf_display_theme_pdf_prompts': display.name,
+      });
+      final colors = AppTheme.getReaderTheme(switch (display) {
+        PdfDisplayTheme.original => ReaderThemeMode.light,
+        PdfDisplayTheme.paper => ReaderThemeMode.warm,
+        PdfDisplayTheme.dark => ReaderThemeMode.dark,
+      });
+      final book = Book(
+        id: 'pdf_prompts',
+        title: 'PDF',
+        format: BookFormat.pdf,
+        chapters: const [],
+        pageCount: 3,
+        sourcePath: source.path,
+        importDate: DateTime(2026),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.theme,
+          home: PdfReaderScreen(book: book),
+        ),
+      );
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 120)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('1 / 3'));
+      await tester.pumpAndSettle();
+      final title = tester.widget<Text>(find.text('跳转页码'));
+      final theme = Theme.of(tester.element(find.byType(AppDialog)));
+      expect(theme.dialogTheme.backgroundColor, colors.headerBg);
+      expect(
+        title.style?.color ?? theme.dialogTheme.titleTextStyle!.color,
+        colors.text,
+      );
+      await tester.enterText(find.byType(TextField), '2');
+      await tester.tap(find.text('跳转'));
+      await tester.pumpAndSettle();
+      expect(find.text('2 / 3'), findsOneWidget);
+      await tester.tap(find.byTooltip('添加笔记'));
+      await tester.pumpAndSettle();
+      final field = tester.widget<TextField>(find.byType(TextField));
+      final noteTheme = Theme.of(tester.element(find.byType(AppDialog)));
+      expect(noteTheme.dialogTheme.backgroundColor, colors.headerBg);
+      expect(
+        field.decoration!.hintStyle?.color ??
+            noteTheme.inputDecorationTheme.hintStyle!.color,
+        colors.secondary,
+      );
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('书签列表'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<AppSheetSurface>(find.byType(AppSheetSurface))
+            .colors
+            .headerBg,
+        colors.headerBg,
+      );
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+  }
 }

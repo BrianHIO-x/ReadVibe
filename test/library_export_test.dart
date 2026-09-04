@@ -10,8 +10,11 @@ import 'package:readvibe/services/book_export_service.dart';
 import 'package:readvibe/services/update_service.dart';
 import 'package:readvibe/theme/app_theme.dart';
 import 'package:readvibe/widgets/book_card.dart';
+import 'package:readvibe/widgets/app_dialog.dart';
 
 class _Repository implements LibraryRepository {
+  _Repository({this.theme = ReaderThemeMode.warm});
+  final ReaderThemeMode theme;
   final Book latest = Book(
     id: 'one',
     title: '导出用书',
@@ -32,8 +35,7 @@ class _Repository implements LibraryRepository {
   }
 
   @override
-  Future<ReaderSettings> getSettings() async =>
-      const ReaderSettings(theme: ReaderThemeMode.warm);
+  Future<ReaderSettings> getSettings() async => ReaderSettings(theme: theme);
   @override
   Future<ReadingProgress?> getShelfProgress(Book book) async => null;
   @override
@@ -129,4 +131,62 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     },
   );
+  for (final mode in [
+    ReaderThemeMode.light,
+    ReaderThemeMode.warm,
+    ReaderThemeMode.dark,
+  ]) {
+    testWidgets(
+      'shelf information and delete prompts use the selected ${mode.name} theme',
+      (tester) async {
+        tester.view.physicalSize = const Size(360, 780);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final colors = AppTheme.getReaderTheme(mode);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.theme,
+            home: LibraryScreen(
+              repository: _Repository(theme: mode),
+              updateChecker: _Updates(),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.longPress(find.byType(BookCard).first);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('修改信息'));
+        await tester.pumpAndSettle();
+        expect(find.text('修改书籍信息'), findsOneWidget);
+        expect(
+          Theme.of(
+            tester.element(find.byType(AppDialog)),
+          ).dialogTheme.backgroundColor,
+          colors.headerBg,
+        );
+        await tester.tap(find.text('取消'));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await tester.longPress(find.byType(BookCard).first);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('删除'));
+        await tester.pumpAndSettle();
+        expect(find.text('删除书籍'), findsOneWidget);
+        expect(
+          Theme.of(
+            tester.element(find.byType(AppDialog)),
+          ).dialogTheme.backgroundColor,
+          colors.headerBg,
+        );
+        expect(find.byType(AppDestructiveButton), findsOneWidget);
+        await tester.tap(find.text('取消'));
+        await tester.pumpAndSettle();
+        expect(find.byType(BookCard), findsWidgets);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 3));
+      },
+    );
+  }
 }

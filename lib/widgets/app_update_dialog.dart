@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../services/update_service.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_dialog.dart';
 
 /// Opens GitHub Releases in the browser so ReadVibe does not need Android's
 /// package-installer permission.
@@ -38,15 +39,8 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
   @override
   Widget build(BuildContext context) {
     final colors = widget.colors;
-    return AlertDialog(
-      backgroundColor: colors.headerBg,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppRadius.lg),
-      ),
-      title: Text(
-        '发现新版本 v${widget.info.version}',
-        style: TextStyle(color: colors.text, fontSize: 17),
-      ),
+    return AppDialog(
+      title: Text('发现新版本 v${widget.info.version}'),
       content: SizedBox(
         width: double.maxFinite,
         child: Column(
@@ -61,7 +55,7 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
                     widget.info.notes,
                     style: TextStyle(
                       color: colors.secondary,
-                      fontSize: 13,
+                      fontSize: 14,
                       height: 1.5,
                     ),
                   ),
@@ -78,7 +72,10 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
               const SizedBox(height: AppSpacing.md),
               Text(
                 _error!,
-                style: TextStyle(color: colors.accent, fontSize: 13),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontSize: 14,
+                ),
               ),
             ],
           ],
@@ -92,13 +89,6 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
           ),
         FilledButton(
           onPressed: _opening ? null : _openReleasePage,
-          style: FilledButton.styleFrom(
-            backgroundColor: colors.accent,
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(AppRadius.pill),
-            ),
-          ),
           child: Text(_opening ? '正在打开…' : '前往 GitHub 下载'),
         ),
       ],

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
+import 'app_sheet.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
 import '../models/reader_settings.dart';
@@ -24,13 +25,8 @@ class ReaderSettingsSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final maxHeight = MediaQuery.sizeOf(context).height * 0.62;
     final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
-    return Container(
-      decoration: BoxDecoration(
-        color: colors.headerBg,
-        borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(AppRadius.pill),
-        ),
-      ),
+    return AppSheetSurface(
+      colors: colors,
       child: SafeArea(
         top: false,
         bottom: false,

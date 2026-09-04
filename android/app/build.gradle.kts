@@ -30,7 +30,13 @@ android {
     }
 
     packaging {
-        resources.excludes += "META-INF/DEPENDENCIES"
+        resources.excludes += setOf(
+            "META-INF/DEPENDENCIES",
+            // R8 removes these unused post-quantum engines, but not their data tables.
+            // PDF AES/RSA security and all PDFBox fonts/CMaps remain packaged.
+            "org/bouncycastle/pqc/crypto/picnic/*.properties",
+            "org/bouncycastle/pqc/crypto/sike/*.properties",
+        )
     }
 
     defaultConfig {
@@ -86,6 +92,7 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("org.apache.poi:poi-scratchpad:5.5.1")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     // Bundled on-device model: scanned PDF OCR never uploads page images.

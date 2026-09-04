@@ -37,18 +37,30 @@ abstract interface class BookImportStore
   Future<void> discardImportedBook(Book book);
 }
 
-/// Operations used by the shelf. Reader- and PDF-only state is intentionally
-/// excluded so shelf changes do not depend on either reader implementation.
-abstract interface class LibraryRepository
-    implements BookImportStore, ImportedFontStore {
-  Future<List<Book>> getBookSummaries();
-
-  Future<Book?> getBook(String bookId);
-
+/// Storage operations needed by low-priority maintenance, without reader state.
+abstract interface class LibraryMaintenanceRepository
+    implements AppDataDirectoryProvider {
   Future<BookAvailability> checkBookAvailability(
     Book book, {
     bool deep = false,
   });
+
+  Future<StorageCleanupResult> collectOrphanedData({
+    Duration gracePeriod = const Duration(hours: 24),
+    DateTime? referenceTime,
+  });
+}
+
+/// Operations used by the shelf. Reader- and PDF-only state is intentionally
+/// excluded so shelf changes do not depend on either reader implementation.
+abstract interface class LibraryRepository
+    implements
+        BookImportStore,
+        ImportedFontStore,
+        LibraryMaintenanceRepository {
+  Future<List<Book>> getBookSummaries();
+
+  Future<Book?> getBook(String bookId);
 
   Future<void> updateBookDetails(
     String bookId, {
@@ -59,11 +71,6 @@ abstract interface class LibraryRepository
   Future<void> saveBookOrder(List<String> bookIds);
 
   Future<void> deleteBook(String bookId);
-
-  Future<StorageCleanupResult> collectOrphanedData({
-    Duration gracePeriod = const Duration(hours: 24),
-    DateTime? referenceTime,
-  });
 
   Future<ReadingProgress?> getShelfProgress(Book book);
 

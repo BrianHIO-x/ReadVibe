@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/library_filter.dart';
 import '../theme/app_theme.dart';
+import 'app_popup_menu.dart';
 
 class LibraryFilterButton extends StatelessWidget {
   const LibraryFilterButton({
@@ -14,73 +15,22 @@ class LibraryFilterButton extends StatelessWidget {
   final ValueChanged<ShelfFilter> onSelected;
 
   @override
-  Widget build(BuildContext context) => PopupMenuButton<ShelfFilter>(
+  Widget build(BuildContext context) => AppPopupMenuButton<ShelfFilter>(
+    colors: colors,
     tooltip: '筛选书架',
-    position: PopupMenuPosition.under,
-    onOpened: () => FocusManager.instance.primaryFocus?.unfocus(),
     onSelected: onSelected,
-    color: colors.headerBg,
-    surfaceTintColor: Colors.transparent,
-    elevation: 4,
-    shadowColor: colors.text.withValues(alpha: 0.16),
-    constraints: const BoxConstraints(minWidth: 176, maxWidth: 240),
-    menuPadding: const EdgeInsets.all(6),
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(16),
-      side: BorderSide(color: colors.border),
-    ),
     icon: Icon(
       filter == ShelfFilter.all
           ? Icons.filter_list_rounded
           : Icons.filter_list_alt,
       color: filter == ShelfFilter.all ? colors.secondary : colors.accent,
     ),
-    style: IconButton.styleFrom(
-      minimumSize: const Size(44, 44),
-      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-    ),
-    itemBuilder: (_) => [
+    entries: [
       for (final choice in ShelfFilter.values)
-        PopupMenuItem<ShelfFilter>(
+        AppMenuEntry(
           value: choice,
-          padding: EdgeInsets.zero,
-          height: 44,
-          child: Container(
-            constraints: const BoxConstraints(minHeight: 44),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: choice == filter
-                  ? colors.accent.withValues(alpha: 0.10)
-                  : null,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 26,
-                  child: choice == filter
-                      ? Icon(
-                          Icons.check_rounded,
-                          size: 18,
-                          color: colors.accent,
-                        )
-                      : null,
-                ),
-                Flexible(
-                  child: Text(
-                    choice.label,
-                    style: TextStyle(
-                      color: choice == filter ? colors.accent : colors.text,
-                      fontSize: 14,
-                      fontWeight: choice == filter
-                          ? FontWeight.w600
-                          : FontWeight.w400,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          label: choice.label,
+          selected: choice == filter,
         ),
     ],
   );

@@ -9,6 +9,8 @@ import '../../services/system_text_action_service.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
+import '../../widgets/app_sheet.dart';
+import '../../theme/app_overlay_theme.dart';
 import 'reader_selection_edge_scroller.dart';
 
 class ReaderSelectionArea extends StatefulWidget {
@@ -366,13 +368,17 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
         );
       }
       if (!launched && mounted) {
-        AppToast.error(context, translate ? '所选 AI 应用无法接收翻译内容' : '所选浏览器无法打开搜索');
+        AppToast.error(
+          context,
+          translate ? '所选 AI 应用无法接收翻译内容' : '所选浏览器无法打开搜索',
+          colors: widget.colors,
+        );
       }
     } on Object catch (error, stackTrace) {
       debugPrint('Failed to launch a system text action: $error');
       debugPrintStack(stackTrace: stackTrace);
       if (mounted) {
-        AppToast.error(context, '无法打开所选外部应用');
+        AppToast.error(context, '无法打开所选外部应用', colors: widget.colors);
       }
     }
   }
@@ -389,6 +395,7 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
         action == SystemTextActionType.translate
             ? '没有检测到可接收文字的 AI 应用'
             : '没有可用的浏览器',
+        colors: widget.colors,
       );
       return null;
     }
@@ -397,140 +404,110 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
     var remember = false;
     widget.onReaderModalOpened();
     try {
-      return await showModalBottomSheet<_TextActionChoice>(
+      return await showAppSheet<_TextActionChoice>(
         context: context,
-        backgroundColor: Colors.transparent,
-        barrierColor: Colors.black.withValues(alpha: 0.32),
+        colors: widget.colors,
         builder: (sheetContext) => StatefulBuilder(
           builder: (context, setSheetState) {
             final selected = targets.firstWhere(
               (target) => target.id == selectedId,
             );
-            return SafeArea(
-              child: Container(
-                margin: const EdgeInsets.all(AppSpacing.md),
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.lg,
-                  AppSpacing.lg,
-                  AppSpacing.lg,
-                  AppSpacing.md,
-                ),
-                decoration: BoxDecoration(
-                  color: widget.colors.headerBg,
-                  borderRadius: BorderRadius.circular(AppRadius.pill),
-                  border: Border.all(color: widget.colors.border),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.18),
-                      blurRadius: 24,
-                      offset: const Offset(0, 10),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      action == SystemTextActionType.translate
-                          ? '选择 AI 翻译应用'
-                          : '选择搜索浏览器',
-                      style: TextStyle(
-                        color: widget.colors.text,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: AppSpacing.xs),
-                    Text(
-                      action == SystemTextActionType.translate
-                          ? '左右滑动选择已安装且可以接收文字的 AI 应用'
-                          : '左右滑动选择 edge、chrome 或系统浏览器',
-                      style: TextStyle(
-                        color: widget.colors.secondary,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: AppSpacing.md),
-                    SizedBox(
-                      height: 120,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        physics: const BouncingScrollPhysics(
-                          parent: AlwaysScrollableScrollPhysics(),
-                        ),
-                        padding: const EdgeInsets.symmetric(horizontal: 2),
-                        itemCount: targets.length,
-                        separatorBuilder: (_, _) =>
-                            const SizedBox(width: AppSpacing.sm),
-                        itemBuilder: (context, index) {
-                          final target = targets[index];
-                          return _buildTextActionTargetCard(
-                            target: target,
-                            selected: target.id == selectedId,
-                            action: action,
-                            onTap: target.available
-                                ? () => setSheetState(
-                                    () => selectedId = target.id,
-                                  )
-                                : null,
-                          );
-                        },
-                      ),
-                    ),
-                    const SizedBox(height: AppSpacing.xs),
-                    CheckboxListTile(
-                      value: remember,
-                      onChanged: (value) =>
-                          setSheetState(() => remember = value ?? false),
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      activeColor: widget.colors.accent,
-                      checkColor: Colors.white,
-                      title: Text(
-                        '记住并默认打开',
-                        style: TextStyle(
-                          color: widget.colors.text,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
+            return AppActionSheet(
+              colors: widget.colors,
+              title: action == SystemTextActionType.translate
+                  ? '选择 AI 翻译应用'
+                  : '选择搜索浏览器',
+              subtitle: action == SystemTextActionType.translate
+                  ? '左右滑动选择已安装且可以接收文字的 AI 应用'
+                  : '左右滑动选择 edge、chrome 或系统浏览器',
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        height: 120,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          physics: const BouncingScrollPhysics(
+                            parent: AlwaysScrollableScrollPhysics(),
+                          ),
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          itemCount: targets.length,
+                          separatorBuilder: (_, _) =>
+                              const SizedBox(width: AppSpacing.sm),
+                          itemBuilder: (context, index) {
+                            final target = targets[index];
+                            return _buildTextActionTargetCard(
+                              target: target,
+                              selected: target.id == selectedId,
+                              action: action,
+                              onTap: target.available
+                                  ? () => setSheetState(
+                                      () => selectedId = target.id,
+                                    )
+                                  : null,
+                            );
+                          },
                         ),
                       ),
-                      subtitle: Text(
-                        '下次点击${action == SystemTextActionType.translate ? '翻译' : '搜索'}时直接跳转',
-                        style: TextStyle(
-                          color: widget.colors.secondary,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: AppSpacing.sm),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton(
-                        onPressed: () => Navigator.pop(
-                          sheetContext,
-                          _TextActionChoice(
-                            target: selected,
-                            remember: remember,
+                      const SizedBox(height: AppSpacing.xs),
+                      CheckboxListTile(
+                        value: remember,
+                        onChanged: (value) =>
+                            setSheetState(() => remember = value ?? false),
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        activeColor: widget.colors.accent,
+                        checkColor: AppOverlayTheme.onAccent(widget.colors),
+                        title: Text(
+                          '记住并默认打开',
+                          style: TextStyle(
+                            color: widget.colors.text,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: widget.colors.accent,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(
-                            vertical: AppSpacing.md,
+                        subtitle: Text(
+                          '下次点击${action == SystemTextActionType.translate ? '翻译' : '搜索'}时直接跳转',
+                          style: TextStyle(
+                            color: widget.colors.secondary,
+                            fontSize: 11,
                           ),
                         ),
-                        child: Text(
-                          action == SystemTextActionType.translate
-                              ? '发送给 ${selected.label}'
-                              : '使用 ${selected.label} 搜索',
+                      ),
+                      const SizedBox(height: AppSpacing.sm),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: () => Navigator.pop(
+                            sheetContext,
+                            _TextActionChoice(
+                              target: selected,
+                              remember: remember,
+                            ),
+                          ),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: widget.colors.accent,
+                            foregroundColor: AppOverlayTheme.onAccent(
+                              widget.colors,
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                              vertical: AppSpacing.md,
+                            ),
+                          ),
+                          child: Text(
+                            action == SystemTextActionType.translate
+                                ? '发送给 ${selected.label}'
+                                : '使用 ${selected.label} 搜索',
+                          ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
+              ],
             );
           },
         ),

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_dialog.dart';
 
 typedef ChapterEditSaver = Future<void> Function(String title, String content);
 
@@ -172,9 +173,10 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
       _popAfterRebuild();
       return;
     }
-    final discard = await showDialog<bool>(
+    final discard = await showAppDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
+      colors: widget.colors,
+      builder: (dialogContext) => AppDialog(
         title: const Text('放弃修改？'),
         content: const Text('当前章节还有未保存的修改。'),
         actions: [
@@ -182,7 +184,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
             onPressed: () => Navigator.of(dialogContext).pop(false),
             child: const Text('继续编辑'),
           ),
-          FilledButton(
+          AppDestructiveButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('放弃'),
           ),
@@ -194,9 +196,10 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
 
   Future<bool> _confirmFlattenRichContent() async {
     if (!widget.hasRichContent) return true;
-    return await showDialog<bool>(
+    return await showAppDialog<bool>(
           context: context,
-          builder: (dialogContext) => AlertDialog(
+          colors: widget.colors,
+          builder: (dialogContext) => AppDialog(
             title: const Text('转为纯文本章节？'),
             content: const Text(
               '这一章包含 EPUB 或 Word 的图片、强调和排版样式。保存正文修改后，'

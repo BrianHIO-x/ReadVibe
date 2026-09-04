@@ -13,7 +13,8 @@ import 'package:crypto/crypto.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
-import 'pdf_renderer_service.dart';
+import 'managed_book_resources.dart';
+import 'storage/chapter_payload_codec.dart';
 import 'reader_preferences_store.dart';
 import 'txt_parser.dart';
 
@@ -61,7 +62,7 @@ class _LazyChapterStore {
         sha256.convert(utf8.encode(raw)).toString() != expectedDigest) {
       throw FormatException('章节 ${index + 1} 校验失败');
     }
-    final chapter = _chapterFromValue(jsonDecode(raw), index);
+    final chapter = decodeChapterPayload(jsonDecode(raw), index);
     _cache[index] = chapter;
     while (_cache.length > 8) {
       _cache.remove(_cache.keys.first);
@@ -122,10 +123,14 @@ class _LazyChapter extends Chapter {
 /// without losing imported books.
 class StorageService
     implements LibraryRepository, ReaderRepository, PdfReaderRepository {
-  StorageService({Directory? documentsDirectory})
-    : _providedDocumentsDirectory = documentsDirectory;
+  StorageService({Directory? documentsDirectory, BookResourceStore? resources})
+    : _providedDocumentsDirectory = documentsDirectory,
+      _providedResources = resources;
 
   final Directory? _providedDocumentsDirectory;
+  final BookResourceStore? _providedResources;
+  late final BookResourceStore _resources =
+      _providedResources ?? ManagedBookResources(this);
   Future<Directory>? _appDataDirectory;
 
   static Future<void> _libraryMutationQueue = Future<void>.value();
@@ -134,7 +139,7 @@ class StorageService
   static final Set<String> _deletedBookIds = <String>{};
   late final ReaderPreferencesStore _readerPreferences = ReaderPreferencesStore(
     _deletedBookIds.contains,
-    _deleteManagedFont,
+    _resources.deleteFont,
   );
 
   Future<List<Book>> getBooks() async {
@@ -365,9 +370,7 @@ class StorageService
         throw const FormatException('章节清单缺失或损坏');
       }
       final rawManifest = await manifestFile.readAsString(encoding: utf8);
-      final manifest = await Isolate.run(
-        () => _chapterManifestFromJson(rawManifest),
-      );
+      final manifest = await _decodeChapterManifestInBackground(rawManifest);
       final rawEntries = manifest['chapters'];
       if (manifest['version'] != 2 ||
           rawEntries is! List ||
@@ -390,9 +393,7 @@ class StorageService
         throw const FormatException('章节清单条目格式错误');
       }
 
-      final payload = await Isolate.run(
-        () => jsonEncode(_chapterToJsonMap(replacement)),
-      );
+      final payload = await _encodeEditedChapter(replacement);
       final payloadBytes = utf8.encode(payload);
       final revision = DateTime.now().microsecondsSinceEpoch;
       final fileName =
@@ -617,7 +618,7 @@ class StorageService
           // Metadata remains authoritative; maintenance can retry the payload.
         }
       }
-      await _deleteManagedSourcePath(removedMetadata?['sourcePath']);
+      await _resources.deleteSource(removedMetadata?['sourcePath']);
     });
   }
 
@@ -625,7 +626,7 @@ class StorageService
   @override
   Future<void> discardImportedBook(Book book) async {
     await deleteBook(book.id);
-    await _deleteManagedSourcePath(book.sourcePath);
+    await _resources.deleteSource(book.sourcePath);
   }
 
   /// Reclaims private payloads that are no longer referenced by shelf
@@ -1179,78 +1180,13 @@ class StorageService
   Future<void> saveSettings(ReaderSettings settings) =>
       _readerPreferences.saveSettings(settings);
 
-  Future<void> _deleteManagedFont(String fontPath) async {
-    final root = await getAppDataDirectory();
-    final fontsDirectory = Directory(p.join(root.path, 'fonts')).absolute.path;
-    final font = File(fontPath).absolute;
-    if (!p.isWithin(fontsDirectory, font.path)) return;
-    try {
-      if (await font.exists()) await font.delete();
-    } on FileSystemException {
-      // Font cleanup is best-effort and must not invalidate saved settings.
-    }
-  }
+  @override
+  Future<File> saveImportedFont(String sourcePath, String fileName) =>
+      _resources.saveImportedFont(sourcePath, fileName);
 
   @override
-  Future<File> saveImportedFont(String sourcePath, String fileName) async {
-    final extension = p.extension(fileName).toLowerCase();
-    if (extension != '.ttf' && extension != '.otf') {
-      throw const FormatException('仅支持 .ttf 或 .otf 字体文件');
-    }
-    final source = File(sourcePath);
-    final stat = await source.stat();
-    const maxFontBytes = 64 * 1024 * 1024;
-    if (stat.type != FileSystemEntityType.file || stat.size <= 0) {
-      throw const FormatException('所选字体文件为空或无法读取');
-    }
-    if (stat.size > maxFontBytes) {
-      throw const FormatException('字体文件过大，请选择小于 64 MB 的字体');
-    }
-
-    final root = await getAppDataDirectory();
-    final directory = Directory(p.join(root.path, 'fonts'));
-    if (!await directory.exists()) {
-      await directory.create(recursive: true);
-    }
-
-    final safeName = p
-        .basenameWithoutExtension(fileName)
-        .replaceAll(RegExp(r'[^A-Za-z0-9_\-\u4e00-\u9fa5]+'), '_')
-        .replaceAll(RegExp(r'_+'), '_')
-        .trim();
-    final baseName = safeName.isEmpty ? 'font' : safeName;
-    final target = File(
-      p.join(
-        directory.path,
-        '${DateTime.now().microsecondsSinceEpoch}_$baseName$extension',
-      ),
-    );
-
-    return source.copy(target.path);
-  }
-
-  @override
-  Future<File> saveImportedPdf(String sourcePath, String bookId) async {
-    final source = File(sourcePath);
-    final stat = await source.stat();
-    const maxPdfBytes = 1024 * 1024 * 1024;
-    if (stat.type != FileSystemEntityType.file || stat.size <= 0) {
-      throw const FormatException('PDF 文件为空或无法读取');
-    }
-    if (stat.size > maxPdfBytes) {
-      throw const FormatException('PDF 文件过大，请选择不超过 1 GB 的文件');
-    }
-    final root = await getAppDataDirectory();
-    final directory = Directory(p.join(root.path, 'pdf'));
-    if (!await directory.exists()) await directory.create(recursive: true);
-    final safeId = base64Url.encode(utf8.encode(bookId)).replaceAll('=', '');
-    final target = File(p.join(directory.path, '$safeId.pdf'));
-    final temporary = File('${target.path}.tmp');
-    if (await temporary.exists()) await temporary.delete();
-    await source.copy(temporary.path);
-    if (await target.exists()) await target.delete();
-    return temporary.rename(target.path);
-  }
+  Future<File> saveImportedPdf(String sourcePath, String bookId) =>
+      _resources.saveImportedPdf(sourcePath, bookId);
 
   @override
   Future<Directory> getAppDataDirectory() async {
@@ -1317,39 +1253,6 @@ class StorageService
   ) async {
     final saved = await prefs.setString(key, value);
     if (!saved) throw FileSystemException('无法保存本地数据', key);
-  }
-
-  Future<void> _deleteManagedSourcePath(Object? rawSourcePath) async {
-    if (rawSourcePath is! String || rawSourcePath.trim().isEmpty) return;
-    try {
-      final root = await getAppDataDirectory();
-      final pdfDirectory = Directory(p.join(root.path, 'pdf')).absolute.path;
-      final epubDirectory = Directory(p.join(root.path, 'epub')).absolute.path;
-      final wordDirectory = Directory(p.join(root.path, 'word')).absolute.path;
-      final sourcePath = rawSourcePath.trim();
-      final sourceType = await FileSystemEntity.type(sourcePath);
-      if (sourceType == FileSystemEntityType.file) {
-        final source = File(sourcePath).absolute;
-        if (!p.isWithin(pdfDirectory, source.path) || !await source.exists()) {
-          return;
-        }
-        try {
-          await PdfRendererService.clearFileCache(source.path);
-        } on Object {
-          // Cache cleanup is best-effort; the managed source remains deletable.
-        }
-        await source.delete();
-      } else if (sourceType == FileSystemEntityType.directory) {
-        final source = Directory(sourcePath).absolute;
-        if ((p.isWithin(epubDirectory, source.path) ||
-                p.isWithin(wordDirectory, source.path)) &&
-            await source.exists()) {
-          await source.delete(recursive: true);
-        }
-      }
-    } on FileSystemException {
-      // Metadata remains authoritative if private resource cleanup is interrupted.
-    }
   }
 }
 
@@ -1422,7 +1325,7 @@ List<Chapter> _chaptersFromJson(String raw) {
     throw const FormatException('章节数据为空或格式错误');
   }
   return decoded.indexed
-      .map((entry) => _chapterFromValue(entry.$2, entry.$1))
+      .map((entry) => decodeChapterPayload(entry.$2, entry.$1))
       .toList();
 }
 
@@ -1489,7 +1392,7 @@ Future<bool> _chapterDirectoryLooksPlausible(
           return false;
         }
       } else {
-        await Isolate.run(() => _chapterFromValue(jsonDecode(raw), index));
+        await Isolate.run(() => decodeChapterPayload(jsonDecode(raw), index));
       }
     }
     return true;
@@ -1545,177 +1448,8 @@ List<Chapter> _materializeChapters(List<Chapter> chapters) =>
     }, growable: false);
 
 List<String> _chapterBatchToJson(List<Chapter> chapters) => chapters
-    .map((chapter) => jsonEncode(_chapterToJsonMap(chapter)))
+    .map((chapter) => jsonEncode(encodeChapterPayload(chapter)))
     .toList(growable: false);
-
-Chapter _chapterFromValue(Object? value, int index) {
-  if (value is! Map) throw const FormatException('章节数据格式错误');
-  final map = Map<String, dynamic>.from(value);
-  final title = map['title'];
-  final content = map['content'];
-  if (title is! String || content is! String) {
-    throw const FormatException('章节数据格式错误');
-  }
-  final rawVolumeTitle = map['volumeTitle'];
-  final volumeTitle =
-      rawVolumeTitle is String && rawVolumeTitle.trim().isNotEmpty
-      ? rawVolumeTitle.trim()
-      : null;
-  final epubBlocks = _epubBlocksFromJson(map['epubBlocks']);
-  final restoredContent = content.isNotEmpty || epubBlocks.isEmpty
-      ? content
-      : _plainContentFromEpubBlocks(epubBlocks);
-  return Chapter(
-    index: index,
-    title: title,
-    content: restoredContent,
-    volumeTitle: volumeTitle,
-    epubBlocks: epubBlocks,
-  );
-}
-
-Map<String, dynamic> _chapterToJsonMap(Chapter chapter) => <String, dynamic>{
-  'index': chapter.index,
-  'title': chapter.title,
-  // Rich EPUB blocks already contain the complete visible text. Avoid writing
-  // a second full copy; plain text is rebuilt when the chapter is loaded.
-  'content': chapter.epubBlocks.isEmpty ? chapter.content : '',
-  if (chapter.volumeTitle != null) 'volumeTitle': chapter.volumeTitle,
-  if (chapter.epubBlocks.isNotEmpty)
-    'epubBlocks': chapter.epubBlocks.map(_epubBlockToJson).toList(),
-};
-
-String _plainContentFromEpubBlocks(List<EpubContentBlock> blocks) {
-  var body = blocks.where(
-    (block) => block.isText && !block.isHeading && block.text.trim().isNotEmpty,
-  );
-  if (body.isEmpty) {
-    body = blocks.where(
-      (block) => block.isText && block.text.trim().isNotEmpty,
-    );
-  }
-  return body.map((block) => block.text.trim()).join('\n');
-}
-
-List<EpubContentBlock> _epubBlocksFromJson(Object? raw) {
-  if (raw is! List) return const <EpubContentBlock>[];
-  final blocks = <EpubContentBlock>[];
-  for (final value in raw) {
-    if (value is! Map) continue;
-    final map = Map<String, dynamic>.from(value);
-    final kindName = map['kind'];
-    final kind = EpubContentBlockKind.values
-        .where((candidate) => candidate.name == kindName)
-        .firstOrNull;
-    if (kind == null) continue;
-    final style = _epubStyleFromJson(map['style']);
-    final runs = <EpubTextRun>[];
-    final rawRuns = map['runs'];
-    if (rawRuns is List) {
-      for (final rawRun in rawRuns) {
-        if (rawRun is! Map) continue;
-        final run = Map<String, dynamic>.from(rawRun);
-        final text = run['text'];
-        if (text is! String || text.isEmpty) continue;
-        runs.add(
-          EpubTextRun(text: text, style: _epubStyleFromJson(run['style'])),
-        );
-      }
-    }
-    blocks.add(
-      EpubContentBlock(
-        kind: kind,
-        text: map['text'] is String ? map['text'] as String : '',
-        runs: List<EpubTextRun>.unmodifiable(runs),
-        isHeading: map['isHeading'] == true,
-        imagePath: map['imagePath'] is String
-            ? map['imagePath'] as String
-            : null,
-        altText: map['altText'] is String ? map['altText'] as String : null,
-        imageWidth: _jsonDouble(map['imageWidth']),
-        imageHeight: _jsonDouble(map['imageHeight']),
-        style: style,
-      ),
-    );
-  }
-  return List<EpubContentBlock>.unmodifiable(blocks);
-}
-
-Map<String, dynamic> _epubBlockToJson(EpubContentBlock block) => {
-  'kind': block.kind.name,
-  if (block.text.isNotEmpty) 'text': block.text,
-  if (block.runs.isNotEmpty)
-    'runs': block.runs
-        .map((run) => {'text': run.text, 'style': _epubStyleToJson(run.style)})
-        .toList(),
-  if (block.isHeading) 'isHeading': true,
-  if (block.imagePath != null) 'imagePath': block.imagePath,
-  if (block.altText != null && block.altText!.isNotEmpty)
-    'altText': block.altText,
-  if (block.imageWidth != null) 'imageWidth': block.imageWidth,
-  if (block.imageHeight != null) 'imageHeight': block.imageHeight,
-  'style': _epubStyleToJson(block.style),
-};
-
-EpubContentStyle _epubStyleFromJson(Object? raw) {
-  if (raw is! Map) return const EpubContentStyle();
-  final map = Map<String, dynamic>.from(raw);
-  return EpubContentStyle(
-    fontFamily:
-        map['fontFamily'] is String &&
-            (map['fontFamily'] as String).trim().isNotEmpty
-        ? (map['fontFamily'] as String).trim()
-        : null,
-    fontScale: _jsonDouble(map['fontScale']) ?? 1,
-    fontWeight: map['fontWeight'] is num
-        ? (map['fontWeight'] as num).toInt().clamp(100, 900)
-        : 400,
-    italic: map['italic'] == true,
-    underline: map['underline'] == true,
-    textAlign: map['textAlign'] is String
-        ? map['textAlign'] as String
-        : 'start',
-    lineHeightScale: _jsonDouble(map['lineHeightScale']) ?? 1,
-    letterSpacingEm: _jsonDouble(map['letterSpacingEm']) ?? 0,
-    textIndentEm: _jsonDouble(map['textIndentEm']) ?? 2,
-    marginTopEm: _jsonDouble(map['marginTopEm']) ?? 0,
-    marginBottomEm: _jsonDouble(map['marginBottomEm']) ?? 0,
-    colorArgb: map['colorArgb'] is num
-        ? (map['colorArgb'] as num).toInt()
-        : null,
-    backgroundColorArgb: map['backgroundColorArgb'] is num
-        ? (map['backgroundColorArgb'] as num).toInt()
-        : null,
-    backgroundImagePath: map['backgroundImagePath'] is String
-        ? map['backgroundImagePath'] as String
-        : null,
-  );
-}
-
-Map<String, dynamic> _epubStyleToJson(EpubContentStyle style) => {
-  if (style.fontFamily != null && style.fontFamily!.isNotEmpty)
-    'fontFamily': style.fontFamily,
-  if (style.fontScale != 1) 'fontScale': style.fontScale,
-  if (style.fontWeight != 400) 'fontWeight': style.fontWeight,
-  if (style.italic) 'italic': true,
-  if (style.underline) 'underline': true,
-  if (style.textAlign != 'start') 'textAlign': style.textAlign,
-  if (style.lineHeightScale != 1) 'lineHeightScale': style.lineHeightScale,
-  if (style.letterSpacingEm != 0) 'letterSpacingEm': style.letterSpacingEm,
-  if (style.textIndentEm != 2) 'textIndentEm': style.textIndentEm,
-  if (style.marginTopEm != 0) 'marginTopEm': style.marginTopEm,
-  if (style.marginBottomEm != 0) 'marginBottomEm': style.marginBottomEm,
-  if (style.colorArgb != null) 'colorArgb': style.colorArgb,
-  if (style.backgroundColorArgb != null)
-    'backgroundColorArgb': style.backgroundColorArgb,
-  if (style.backgroundImagePath != null)
-    'backgroundImagePath': style.backgroundImagePath,
-};
-
-double? _jsonDouble(Object? value) {
-  if (value is! num || !value.isFinite) return null;
-  return value.toDouble();
-}
 
 ReadingProgress _remapProgressAfterReparse(
   ReadingProgress progress,
@@ -1766,3 +1500,10 @@ double _chapterReadingWeight(Chapter chapter) {
       .clamp(1, 0x7fffffff)
       .toDouble();
 }
+
+// Worker closures capture only their explicit input, not the write-queue owner.
+Future<Map<String, dynamic>> _decodeChapterManifestInBackground(String raw) =>
+    Isolate.run(() => _chapterManifestFromJson(raw));
+
+Future<String> _encodeEditedChapter(Chapter chapter) =>
+    Isolate.run(() => jsonEncode(encodeChapterPayload(chapter)));

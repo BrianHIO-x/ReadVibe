@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../models/book.dart';
@@ -48,7 +49,7 @@ class PreparedBookExport {
   final String mimeType;
 
   Future<void> dispose() async {
-    if (await directory.exists()) await directory.delete(recursive: true);
+    await _clearStaging(directory);
   }
 }
 
@@ -115,7 +116,7 @@ Future<PreparedBookExport> prepareBookExport(Book book, Directory cache) async {
       pdf ? 'application/pdf' : 'text/plain',
     );
   } on Object {
-    if (await directory.exists()) await directory.delete(recursive: true);
+    await _clearStaging(directory);
     rethrow;
   }
 }
@@ -128,8 +129,9 @@ Future<void> _writeText(Book book, String path) async {
       if (end > text.length) end = text.length;
       if (end < text.length &&
           text.codeUnitAt(end - 1) >= 0xd800 &&
-          text.codeUnitAt(end - 1) <= 0xdbff)
+          text.codeUnitAt(end - 1) <= 0xdbff) {
         end--;
+      }
       await output.writeString(text.substring(start, end), encoding: utf8);
       start = end;
     }
@@ -171,5 +173,13 @@ Future<void> _writeText(Book book, String path) async {
     await output.flush();
   } finally {
     await output.close();
+  }
+}
+
+Future<void> _clearStaging(Directory directory) async {
+  try {
+    if (await directory.exists()) await directory.delete(recursive: true);
+  } on FileSystemException catch (error) {
+    debugPrint('Export cache cleanup failed: $error');
   }
 }

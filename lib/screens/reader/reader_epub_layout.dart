@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../models/book.dart';
+import '../../models/reading_paragraph.dart';
 import '../../models/reader_settings.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_theme.dart';
@@ -36,10 +37,9 @@ class ReaderEpubLayout {
   final double Function(ReaderSettings settings) resolveSimulationLineExtent;
 
   String formatParagraph(EpubContentBlock block) {
-    final body = block.text.replaceFirst(RegExp(r'^[\s　]+'), '').trimRight();
+    final body = visibleParagraphBody(block.text);
     if (body.isEmpty) return '';
-    final indentCount = block.style.textIndentEm.round().clamp(0, 8);
-    return '${List<String>.filled(indentCount, '　').join()}$body';
+    return '${richParagraphPrefix(block)}$body';
   }
 
   int paragraphPrefixLength(Chapter chapter, int paragraphIndex) {

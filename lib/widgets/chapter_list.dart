@@ -5,6 +5,7 @@ import '../models/book.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_sheet.dart';
 import '../services/word_count_service.dart';
 
 typedef TocGroupExpansionChanged = void Function(String groupId, bool expanded);
@@ -66,69 +67,67 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
     final directory = _TocDirectory.fromChapters(widget.chapters);
     _scheduleInitialScroll(directory);
 
-    return Container(
-      decoration: BoxDecoration(
-        color: widget.colors.headerBg,
-        borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(AppRadius.pill),
-        ),
-      ),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              20,
-              AppSpacing.xl,
-              AppSpacing.sm,
-              AppSpacing.md,
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '目录',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
-                          color: widget.colors.text,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      ValueListenableBuilder<int?>(
-                        valueListenable: widget.wordCountListenable,
-                        builder: (context, wordCount, _) => Text(
-                          '${widget.chapters.length} 章 · ${formatBookWordCount(wordCount)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+    return AppSheetSurface(
+      colors: widget.colors,
+      child: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                20,
+                AppSpacing.lg,
+                AppSpacing.sm,
+                AppSpacing.md,
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '目录',
                           style: TextStyle(
-                            fontSize: 12,
-                            color: widget.colors.secondary,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                            color: widget.colors.text,
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 4),
+                        ValueListenableBuilder<int?>(
+                          valueListenable: widget.wordCountListenable,
+                          builder: (context, wordCount, _) => Text(
+                            '${widget.chapters.length} 章 · ${formatBookWordCount(wordCount)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: widget.colors.secondary,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  tooltip: '关闭',
-                  icon: Icon(Icons.close, color: widget.colors.secondary),
-                ),
-              ],
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    tooltip: '关闭',
+                    icon: Icon(Icons.close, color: widget.colors.secondary),
+                  ),
+                ],
+              ),
             ),
-          ),
-          Divider(height: 1, color: widget.colors.border),
-          Expanded(
-            child: CustomScrollView(
-              controller: widget.scrollController,
-              slivers: _buildDirectorySlivers(directory),
+            Divider(height: 1, color: widget.colors.border),
+            Expanded(
+              child: CustomScrollView(
+                controller: widget.scrollController,
+                slivers: _buildDirectorySlivers(directory),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
