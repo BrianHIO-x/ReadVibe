@@ -13,6 +13,7 @@ class WordCountService {
       <String, List<int>>{};
   static final Map<String, Future<List<int>>> _chapterCountsInFlight =
       <String, Future<List<int>>>{};
+  static final Map<String, int> _bookCountGenerations = <String, int>{};
 
   /// Counts each chapter body independently without blocking the UI isolate.
   ///
@@ -25,7 +26,8 @@ class WordCountService {
       return Future<List<int>>.value(stored);
     }
 
-    final cacheKey = _chapterCacheKey(book);
+    final generation = _bookCountGenerations[book.id] ?? 0;
+    final cacheKey = '${_chapterCacheKey(book)}:$generation';
     final cached = _chapterCountCache[cacheKey];
     if (cached != null) return Future<List<int>>.value(cached);
 
@@ -46,6 +48,22 @@ class WordCountService {
         });
     _chapterCountsInFlight[cacheKey] = operation;
     return operation;
+  }
+
+  /// Counts a single edited chapter without rescanning the rest of the book.
+  static Future<int> countContent(String content) =>
+      Isolate.run(() => _countVisibleRunesIn(content));
+
+  /// Drops cached results after a local chapter edit.
+  ///
+  /// The persisted source revision does not change when the user edits
+  /// ReadVibe's private copy, so the old cache key must be invalidated
+  /// explicitly.
+  static void invalidateBook(String bookId) {
+    _bookCountGenerations[bookId] = (_bookCountGenerations[bookId] ?? 0) + 1;
+    final prefix = '$bookId:';
+    _chapterCountCache.removeWhere((key, _) => key.startsWith(prefix));
+    _chapterCountsInFlight.removeWhere((key, _) => key.startsWith(prefix));
   }
 
   /// Derives the whole-book count from the one authoritative chapter scan.

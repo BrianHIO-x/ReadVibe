@@ -231,25 +231,30 @@ class Book {
   Book copyWith({
     String? title,
     String? author,
+    List<Chapter>? chapters,
     int? wordCount,
     List<int>? chapterWordCounts,
     String? sourcePath,
     String? coverImagePath,
     int? pageCount,
     Map<String, String>? embeddedFonts,
+    bool clearWordCounts = false,
   }) {
+    final nextChapters = chapters ?? this.chapters;
     return Book(
       id: id,
       title: title ?? this.title,
       author: author ?? this.author,
       format: format,
-      chapters: chapters,
-      chapterCount: chapterCount,
+      chapters: nextChapters,
+      chapterCount: chapters == null ? chapterCount : nextChapters.length,
       importDate: importDate,
       fileSize: fileSize,
       txtParserVersion: txtParserVersion,
-      wordCount: wordCount ?? this.wordCount,
-      chapterWordCounts: chapterWordCounts ?? this.chapterWordCounts,
+      wordCount: clearWordCounts ? null : wordCount ?? this.wordCount,
+      chapterWordCounts: clearWordCounts
+          ? null
+          : chapterWordCounts ?? this.chapterWordCounts,
       sourcePath: sourcePath ?? this.sourcePath,
       coverImagePath: coverImagePath ?? this.coverImagePath,
       pageCount: pageCount ?? this.pageCount,

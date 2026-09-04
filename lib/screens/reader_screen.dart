@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -8,12 +7,7 @@ import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
-    show
-        RenderRepaintBoundary,
-        RenderSliver,
-        ScrollCacheExtent,
-        SelectedContent;
-import 'package:flutter/scheduler.dart';
+    show RenderRepaintBoundary, RenderSliver, ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../theme/app_theme.dart';
@@ -21,36 +15,40 @@ import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
+import '../repositories/reader_repositories.dart';
 import '../services/font_service.dart';
 import '../services/book_search_service.dart';
 import '../services/storage_service.dart';
-import '../services/system_text_action_service.dart';
-import '../services/word_count_service.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/chapter_list.dart';
+import '../widgets/chapter_editor_sheet.dart';
 import '../widgets/book_search_sheet.dart';
 import '../widgets/reader_settings_sheet.dart';
 import '../widgets/pressable_scale.dart';
 import '../widgets/reading_progress_bar.dart';
-import '../controllers/reader_pagination_controller.dart';
+import '../controllers/chapter_editing_controller.dart';
 import '../controllers/reader_progress_controller.dart';
 import '../controllers/reader_search_controller.dart';
 import '../controllers/reader_selection_controller.dart';
-
-part 'reader/reader_pagination_support.dart';
-part 'reader/reader_selection_support.dart';
+import '../controllers/reader_word_count_controller.dart';
+import 'reader/reader_epub_layout.dart';
+import 'reader/reader_pagination_support.dart';
+import 'reader/reader_selection_support.dart';
+import 'reader/reader_selectable_block.dart';
 
 const double _simulationPageExtentTolerance = 0.01;
 
 /// Reader screen — displays book content with settings overlay
 class ReaderScreen extends StatefulWidget {
   final Book book;
+  final ReaderRepository? repository;
   final ValueListenable<ReaderThemeColors>? transitionColors;
   final ValueChanged<ReaderSettings>? onSettingsChanged;
 
   const ReaderScreen({
     super.key,
     required this.book,
+    this.repository,
     this.transitionColors,
     this.onSettingsChanged,
   });
@@ -65,8 +63,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   static const _readingTapSlop = 18.0;
   static const _readingTapTimeout = Duration(milliseconds: 600);
 
-  final _storage = StorageService();
-  late final _fontService = FontService(_storage);
+  late final ReaderRepository _storage;
+  late final FontService _fontService;
+  late final ChapterEditingController _chapterEditingController;
+  late Book _book;
   late ReaderSettings _settings;
   late int _chapterIndex;
   bool _showOverlay = false;
@@ -112,7 +112,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Set<String> _collapsedTocGroupIds = <String>{};
   double? _pendingScrollOffset;
   double? _pendingScrollProgress;
-  _ReadingTextAnchor? _pendingScrollTextAnchor;
+  ReadingTextAnchor? _pendingScrollTextAnchor;
   bool _preferPendingScrollProgress = false;
   int _scrollRestoreSerial = 0;
   final Map<int, ScrollController> _adjacentScrollControllers =
@@ -120,7 +120,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   final Map<int, int> _adjacentScrollRestoreSerials = <int, int>{};
   int _overlayToggleSerial = 0;
   int? _pageTurnOriginChapterIndex;
-  _ScrollSnapshot? _pageTurnOriginSnapshot;
+  ScrollSnapshot? _pageTurnOriginSnapshot;
   final GlobalKey _currentPageBoundaryKey = GlobalKey();
   final GlobalKey _reversePageBoundaryKey = GlobalKey();
   // The preview page moves between the offstage idle slot and the active
@@ -141,14 +141,13 @@ class _ReaderScreenState extends State<ReaderScreen>
   int _continuousRestoreSerial = 0;
   double? _pendingContinuousProgress;
   double? _pendingContinuousOffset;
-  _ReadingTextAnchor? _pendingContinuousTextAnchor;
-  _SimulationPageTarget? _simulationPageTarget;
+  ReadingTextAnchor? _pendingContinuousTextAnchor;
+  SimulationPageTarget? _simulationPageTarget;
   ScrollController? _simulationPreviewController;
   ScrollController? _simulationPaperBackController;
-  late final ValueNotifier<int?> _wordCountNotifier;
-  late final ValueNotifier<List<int>?> _chapterWordCountsNotifier;
+  late final ReaderWordCountController _wordCountController;
   late final ValueNotifier<double> _visibleProgressNotifier;
-  _ScrollSnapshot _lastScrollSnapshot = const _ScrollSnapshot(
+  ScrollSnapshot _lastScrollSnapshot = const ScrollSnapshot(
     offset: 0,
     progress: 0,
   );
@@ -157,19 +156,26 @@ class _ReaderScreenState extends State<ReaderScreen>
   int _paragraphCacheCharacters = 0;
   final LinkedHashMap<Chapter, double> _simulationContentExtentCache =
       LinkedHashMap<Chapter, double>();
-  _SimulationLayoutSignature? _simulationContentExtentSignature;
-  _SimulationLayoutSignature? _simulationLineExtentSignature;
+  SimulationLayoutSignature? _simulationContentExtentSignature;
+  SimulationLayoutSignature? _simulationLineExtentSignature;
   double? _simulationLineExtentCache;
   double _readerViewportWidth = 0;
   double _readerViewportHeight = 0;
   EdgeInsets _readerViewPadding = EdgeInsets.zero;
   TextScaler _readerTextScaler = TextScaler.noScaling;
 
-  Book get _book => widget.book;
+  ReaderEpubLayout get _epubLayout => ReaderEpubLayout(
+    textScaler: _readerTextScaler,
+    resolveSimulationLineExtent: _resolvedSimulationLineExtent,
+  );
 
   @override
   void initState() {
     super.initState();
+    _storage = widget.repository ?? StorageService();
+    _fontService = FontService(_storage);
+    _chapterEditingController = ChapterEditingController(_storage);
+    _book = widget.book;
     _chapterIndex = 0;
     _settings = const ReaderSettings();
     _continuousChapterKeys = List<GlobalKey>.generate(
@@ -177,19 +183,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       (_) => GlobalKey(),
       growable: false,
     );
-    final storedChapterWordCounts =
-        _book.chapterWordCounts?.length == _book.chapters.length
-        ? _book.chapterWordCounts
-        : null;
-    final storedChapterTotal = storedChapterWordCounts == null
-        ? null
-        : WordCountService.totalFromChapterCounts(storedChapterWordCounts);
-    _wordCountNotifier = ValueNotifier<int?>(
-      storedChapterTotal ?? _book.wordCount,
-    );
-    _chapterWordCountsNotifier = ValueNotifier<List<int>?>(
-      storedChapterWordCounts,
-    );
+    _wordCountController = ReaderWordCountController(_storage, _book);
     _visibleProgressNotifier = ValueNotifier<double>(0);
     _scrollController = _createScrollController();
     _selectionController.active.addListener(
@@ -212,25 +206,8 @@ class _ReaderScreenState extends State<ReaderScreen>
             _setPageDragOffset(animation.value);
           });
     _loadInitialState();
-    if (storedChapterWordCounts == null ||
-        _book.wordCount != storedChapterTotal) {
-      unawaited(_ensureWordCounts());
-    }
-  }
-
-  Future<void> _ensureWordCounts() async {
-    try {
-      final chapterWordCounts = await WordCountService().countChapters(_book);
-      final wordCount = WordCountService.totalFromChapterCounts(
-        chapterWordCounts,
-      );
-      await _storage.saveWordCounts(_book, chapterWordCounts);
-      if (!mounted) return;
-      _chapterWordCountsNotifier.value = chapterWordCounts;
-      _wordCountNotifier.value = wordCount;
-    } on Object catch (error, stackTrace) {
-      debugPrint('Failed to count reader text: $error');
-      debugPrintStack(stackTrace: stackTrace);
+    if (_wordCountController.needsRefresh(_book)) {
+      unawaited(_wordCountController.ensure(_book));
     }
   }
 
@@ -238,8 +215,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     double initialOffset = 0,
     bool? simulationPagination,
   ]) {
-    final controller = _SelectionAwareScrollController(
+    final controller = SelectionAwareScrollController(
       selectionActive: _selectionController.active,
+      selectionDragging: _selectionController.dragging,
       freezeSelectionViewport: () =>
           _settings.readingMode == ReaderReadingMode.simulation,
       paginateToFullViewports:
@@ -342,7 +320,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
   }
 
-  _ScrollSnapshot? _adjacentScrollSnapshot(int chapterIndex) {
+  ScrollSnapshot? _adjacentScrollSnapshot(int chapterIndex) {
     final controller = _adjacentScrollControllers[chapterIndex];
     if (controller == null ||
         !controller.hasClients ||
@@ -354,7 +332,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final offset = rawOffset.isFinite
         ? rawOffset.clamp(0.0, maxExtent).toDouble()
         : 0.0;
-    return _ScrollSnapshot(
+    return ScrollSnapshot(
       offset: offset,
       progress: maxExtent > 0 ? offset / maxExtent : 0,
     );
@@ -363,7 +341,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   /// What the drag preview is actually showing. When a turn commits, this is
   /// the page the user sees under the settling animation, so the committed
   /// chapter must land exactly here.
-  _ScrollSnapshot? _simulationPreviewSnapshot(int chapterIndex) {
+  ScrollSnapshot? _simulationPreviewSnapshot(int chapterIndex) {
     if (_simulationPageTarget?.chapterIndex != chapterIndex) return null;
     final controller = _simulationPreviewController;
     if (controller == null ||
@@ -376,7 +354,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final offset = rawOffset.isFinite
         ? rawOffset.clamp(0.0, maxExtent).toDouble()
         : 0.0;
-    return _ScrollSnapshot(
+    return ScrollSnapshot(
       offset: offset,
       progress: maxExtent > 0 ? offset / maxExtent : 0,
     );
@@ -386,7 +364,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     // Never hide the status bar while the reader chrome is open. The timer
     // scheduled right after the book-opening animation can fire after the
     // user has already summoned the menu, and must not win that race.
-    if (!mounted || _closingReader || _showOverlay) return;
+    if (!mounted || _closingReader || _showOverlay || _readerModalOpen) return;
     _applySystemBarStyle();
     // Bottom gesture navigation stays visible; only the top status bar is
     // hidden for the immersive reading surface.
@@ -535,7 +513,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         : 0.0;
     final hasSavedProgressRatio =
         savedProgress?.chapterProgress.containsKey(_chapterIndex) == true;
-    _lastScrollSnapshot = _ScrollSnapshot(
+    _lastScrollSnapshot = ScrollSnapshot(
       offset: safeRestoredOffset,
       progress: safeRestoredProgress,
     );
@@ -580,7 +558,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     required double offset,
     double? progress,
     required bool preferProgress,
-    _ReadingTextAnchor? textAnchor,
+    ReadingTextAnchor? textAnchor,
   }) {
     _pendingScrollOffset = offset.isFinite && offset >= 0 ? offset : 0;
     _pendingScrollProgress = progress != null && progress.isFinite
@@ -633,7 +611,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           maxExtent: maxExtent,
         );
       }
-      _lastScrollSnapshot = _ScrollSnapshot(
+      _lastScrollSnapshot = ScrollSnapshot(
         offset: offset,
         progress: maxExtent > 0 ? offset / maxExtent : 0,
       );
@@ -684,7 +662,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     required double initialScrollOffset,
   }) {
     if (_settings.readingMode == ReaderReadingMode.simulation) {
-      return _FullViewportPagingScrollController(
+      return FullViewportPagingScrollController(
         initialScrollOffset: initialScrollOffset,
       );
     }
@@ -709,7 +687,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _requestContinuousRestore(
     double progress, {
     double? offset,
-    _ReadingTextAnchor? textAnchor,
+    ReadingTextAnchor? textAnchor,
   }) {
     _continuousAnchorChapterIndex = _chapterIndex;
     _continuousChapterStarts
@@ -890,7 +868,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  _ScrollSnapshot _continuousSnapshotForChapter(int chapterIndex) {
+  ScrollSnapshot _continuousSnapshotForChapter(int chapterIndex) {
     if (!_scrollController.hasClients ||
         !_scrollController.position.hasContentDimensions) {
       return _lastScrollSnapshot;
@@ -905,7 +883,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final localOffset = (_scrollController.offset - start)
         .clamp(0.0, readableExtent)
         .toDouble();
-    return _ScrollSnapshot(
+    return ScrollSnapshot(
       offset: localOffset,
       progress: readableExtent > 0 ? localOffset / readableExtent : 0,
     );
@@ -921,8 +899,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!_closingReader) unawaited(_saveProgress());
     _discardPageTurnSnapshot();
     _discardReversePageTurnSnapshot();
-    _wordCountNotifier.dispose();
-    _chapterWordCountsNotifier.dispose();
+    _wordCountController.dispose();
     _visibleProgressNotifier.dispose();
     _pageTurnController.dispose();
     _pageDragOffsetNotifier.dispose();
@@ -989,7 +966,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     return _enqueueProgressSave(updated);
   }
 
-  ReadingProgress _recordCurrentChapterPosition(_ScrollSnapshot snapshot) {
+  ReadingProgress _recordCurrentChapterPosition(ScrollSnapshot snapshot) {
     final base =
         _currentProgress ??
         ReadingProgress(
@@ -1008,7 +985,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     return updated;
   }
 
-  _ScrollSnapshot _currentScrollSnapshot() {
+  ScrollSnapshot _currentScrollSnapshot() {
     if (_settings.readingMode == ReaderReadingMode.continuous) {
       return _continuousSnapshotForChapter(_chapterIndex);
     }
@@ -1020,7 +997,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       final rawOffset = _scrollController.offset;
       final offset = rawOffset.isFinite && rawOffset >= 0 ? rawOffset : 0.0;
       final maxExtent = _scrollController.position.maxScrollExtent;
-      final snapshot = _ScrollSnapshot(
+      final snapshot = ScrollSnapshot(
         offset: offset,
         progress: maxExtent > 0
             ? (offset / maxExtent).clamp(0.0, 1.0).toDouble()
@@ -1033,7 +1010,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final pendingOffset = _pendingScrollOffset;
     final pendingProgress = _pendingScrollProgress;
     if (pendingOffset != null && pendingOffset.isFinite && pendingOffset >= 0) {
-      final snapshot = _ScrollSnapshot(
+      final snapshot = ScrollSnapshot(
         offset: pendingOffset,
         progress:
             pendingProgress != null &&
@@ -1085,7 +1062,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final paragraphs = chapter.hasRichEpubContent
         ? chapter.epubBlocks
               .where((block) => block.isText && block.text.trim().isNotEmpty)
-              .map(_formatEpubParagraph)
+              .map(_epubLayout.formatParagraph)
               .where((paragraph) => paragraph.isNotEmpty)
               .toList(growable: false)
         : chapter.content
@@ -1122,47 +1099,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     return body.isEmpty ? '' : '$_paragraphIndent$body';
   }
 
-  String _formatEpubParagraph(EpubContentBlock block) {
-    final body = block.text.replaceFirst(RegExp(r'^[\s　]+'), '').trimRight();
-    if (body.isEmpty) return '';
-    final indentCount = block.style.textIndentEm.round().clamp(0, 8);
-    return '${List<String>.filled(indentCount, '　').join()}$body';
-  }
-
   int _paragraphPrefixLength(Chapter chapter, int paragraphIndex) {
     if (!chapter.hasRichEpubContent) return _paragraphIndent.length;
-    var current = 0;
-    for (final block in chapter.epubBlocks) {
-      if (!block.isText || block.text.trim().isEmpty) continue;
-      if (current == paragraphIndex) {
-        return block.style.textIndentEm.round().clamp(0, 8);
-      }
-      current++;
-    }
-    return 0;
-  }
-
-  String _formatChapterTitle(String title) {
-    return title.replaceFirst(RegExp(r'^[\s　]+'), '').trimRight();
-  }
-
-  bool _hasEmbeddedEpubHeading(Chapter chapter, {bool avoidLazyLoad = false}) {
-    if (!chapter.hasRichEpubContent) return false;
-    if (avoidLazyLoad && !chapter.hasKnownSemanticHeading) return false;
-    if (chapter.hasSemanticHeading) return true;
-    for (final block in chapter.epubBlocks) {
-      if (!block.isText || block.text.trim().isEmpty) continue;
-      if (block.isHeading) return true;
-      // Older imported EPUB payloads predate the semantic heading flag. Keep
-      // them compatible when their first styled block is visibly the same
-      // title; otherwise preserve the app-rendered directory title.
-      final sameTitle =
-          _formatChapterTitle(block.text) == _formatChapterTitle(chapter.title);
-      return sameTitle &&
-          block.style.textIndentEm == 0 &&
-          (block.style.fontScale > 1.05 || block.style.fontWeight >= 600);
-    }
-    return false;
+    return _epubLayout.paragraphPrefixLength(chapter, paragraphIndex);
   }
 
   bool _changesTextLayout(ReaderSettings current, ReaderSettings next) {
@@ -1176,7 +1115,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         current.readingMode != next.readingMode;
   }
 
-  _ReadingTextAnchor? _captureReadingTextAnchor(_ScrollSnapshot snapshot) {
+  ReadingTextAnchor? _captureReadingTextAnchor(ScrollSnapshot snapshot) {
     if (_readerViewportWidth <= 0 || _book.chapters.isEmpty) return null;
     final paragraphs = _paragraphsFor(_currentChapter);
     if (paragraphs.isEmpty) return null;
@@ -1223,7 +1162,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           final position = painter.height <= 0
               ? 0
               : painter.getPositionForOffset(Offset(0, localY)).offset;
-          return _ReadingTextAnchor(
+          return ReadingTextAnchor(
             chapterIndex: _chapterIndex,
             paragraphIndex: index,
             characterOffset: position.clamp(0, paragraph.length),
@@ -1234,7 +1173,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         painter.dispose();
       }
     }
-    return _ReadingTextAnchor(
+    return ReadingTextAnchor(
       chapterIndex: _chapterIndex,
       paragraphIndex: paragraphs.length - 1,
       characterOffset: paragraphs.last.length,
@@ -1242,7 +1181,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   double? _scrollOffsetForTextAnchor(
-    _ReadingTextAnchor anchor, {
+    ReadingTextAnchor anchor, {
     required ReaderSettings settings,
     required ReaderReadingMode mode,
     required double viewportDimension,
@@ -1346,7 +1285,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       : settings.fontSize * settings.lineHeight;
 
   double _resolvedSimulationLineExtent(ReaderSettings settings) {
-    final signature = _SimulationLayoutSignature(
+    final signature = SimulationLayoutSignature(
       contentWidth: 0,
       settings: settings,
     );
@@ -1421,7 +1360,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             ? _readerViewPadding.top + AppSpacing.lg
             : AppSpacing.xxl,
     };
-    if (_hasEmbeddedEpubHeading(chapter)) return topPadding;
+    if (_epubLayout.hasEmbeddedHeading(chapter)) return topPadding;
     final titleStyle = TextStyle(
       fontFamily: settings.effectiveFontFamily,
       fontSize: 20,
@@ -1439,7 +1378,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         : null;
     final titlePainter = TextPainter(
       text: TextSpan(
-        text: _formatChapterTitle(chapter.title),
+        text: _epubLayout.formatChapterTitle(chapter.title),
         style: titleStyle,
       ),
       textDirection: TextDirection.ltr,
@@ -1497,7 +1436,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     )..layout(maxWidth: width);
   }
 
-  _ReadingTextAnchor _captureRichEpubTextAnchor({
+  ReadingTextAnchor _captureRichEpubTextAnchor({
     required Chapter chapter,
     required double bodyOffset,
     required ReaderSettings settings,
@@ -1509,7 +1448,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     var paragraphIndex = 0;
     var lastParagraphIndex = 0;
     for (final block in chapter.epubBlocks) {
-      final extent = _epubBlockExtent(
+      final extent = _epubLayout.blockExtent(
         block,
         settings: settings,
         mode: mode,
@@ -1517,7 +1456,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       );
       if (!block.isText || block.text.trim().isEmpty) {
         if (safeOffset < cursor + extent) {
-          return _ReadingTextAnchor(
+          return ReadingTextAnchor(
             chapterIndex: chapter.index,
             paragraphIndex: lastParagraphIndex,
             characterOffset: 0,
@@ -1528,13 +1467,13 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
       lastParagraphIndex = paragraphIndex;
       if (safeOffset < cursor + extent) {
-        final metrics = _epubBlockMetrics(
+        final metrics = _epubLayout.blockMetrics(
           block,
           settings: settings,
           mode: mode,
           width: width,
         );
-        final painter = _layoutEpubTextBlock(
+        final painter = _epubLayout.layoutTextBlock(
           block,
           settings: settings,
           mode: mode,
@@ -1547,12 +1486,12 @@ class _ReaderScreenState extends State<ReaderScreen>
           final position = painter
               .getPositionForOffset(Offset(0, localY))
               .offset;
-          return _ReadingTextAnchor(
+          return ReadingTextAnchor(
             chapterIndex: chapter.index,
             paragraphIndex: paragraphIndex,
             characterOffset: position.clamp(
               0,
-              _formatEpubParagraph(block).length,
+              _epubLayout.formatParagraph(block).length,
             ),
           );
         } finally {
@@ -1563,7 +1502,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       paragraphIndex++;
     }
     final paragraphs = _paragraphsFor(chapter);
-    return _ReadingTextAnchor(
+    return ReadingTextAnchor(
       chapterIndex: chapter.index,
       paragraphIndex: math.max(0, paragraphs.length - 1),
       characterOffset: paragraphs.isEmpty ? 0 : paragraphs.last.length,
@@ -1572,7 +1511,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   double _richEpubOffsetForAnchor({
     required Chapter chapter,
-    required _ReadingTextAnchor anchor,
+    required ReadingTextAnchor anchor,
     required ReaderSettings settings,
     required ReaderReadingMode mode,
     required double width,
@@ -1580,7 +1519,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     var cursor = 0.0;
     var paragraphIndex = 0;
     for (final block in chapter.epubBlocks) {
-      final metrics = _epubBlockMetrics(
+      final metrics = _epubLayout.blockMetrics(
         block,
         settings: settings,
         mode: mode,
@@ -1588,14 +1527,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       );
       if (block.isText && block.text.trim().isNotEmpty) {
         if (paragraphIndex == anchor.paragraphIndex) {
-          final painter = _layoutEpubTextBlock(
+          final painter = _epubLayout.layoutTextBlock(
             block,
             settings: settings,
             mode: mode,
             width: width,
           );
           try {
-            final paragraph = _formatEpubParagraph(block);
+            final paragraph = _epubLayout.formatParagraph(block);
             final caret = painter.getOffsetForCaret(
               TextPosition(
                 offset: anchor.characterOffset.clamp(0, paragraph.length),
@@ -1612,417 +1551,6 @@ class _ReaderScreenState extends State<ReaderScreen>
       cursor += metrics.total;
     }
     return cursor;
-  }
-
-  ({double leading, double content, double trailing, double total})
-  _epubBlockMetrics(
-    EpubContentBlock block, {
-    required ReaderSettings settings,
-    required ReaderReadingMode mode,
-    required double width,
-  }) {
-    final baseLine = mode == ReaderReadingMode.simulation
-        ? _resolvedSimulationLineExtent(settings)
-        : settings.fontSize * settings.lineHeight;
-    final rawLeading = block.style.marginTopEm * settings.fontSize;
-    final leading = mode == ReaderReadingMode.simulation && baseLine > 0
-        ? (rawLeading / baseLine).ceil() * baseLine
-        : rawLeading;
-    final paragraphGap =
-        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
-        ? baseLine
-        : 0.0;
-    final trailing =
-        block.style.marginBottomEm * settings.fontSize + paragraphGap;
-    double content;
-    if (block.isImage) {
-      content = _epubImageHeight(block, width: width, settings: settings);
-    } else {
-      final painter = _layoutEpubTextBlock(
-        block,
-        settings: settings,
-        mode: mode,
-        width: width,
-      );
-      content = painter.height;
-      painter.dispose();
-    }
-    var total = leading + content + trailing;
-    if (mode == ReaderReadingMode.simulation && baseLine > 0) {
-      total = math.max(baseLine, (total / baseLine).ceil() * baseLine);
-    }
-    return (
-      leading: leading,
-      content: content,
-      trailing: math.max(0, total - leading - content),
-      total: total,
-    );
-  }
-
-  double _epubBlockExtent(
-    EpubContentBlock block, {
-    required ReaderSettings settings,
-    required ReaderReadingMode mode,
-    required double width,
-  }) => _epubBlockMetrics(
-    block,
-    settings: settings,
-    mode: mode,
-    width: width,
-  ).total;
-
-  double _epubImageHeight(
-    EpubContentBlock block, {
-    required double width,
-    required ReaderSettings settings,
-  }) {
-    final requestedWidth = block.imageWidth;
-    final displayWidth = requestedWidth != null && requestedWidth > 0
-        ? math.min(width, requestedWidth)
-        : width;
-    final sourceWidth = block.imageWidth;
-    final sourceHeight = block.imageHeight;
-    final aspect =
-        sourceWidth != null &&
-            sourceHeight != null &&
-            sourceWidth > 0 &&
-            sourceHeight > 0
-        ? sourceWidth / sourceHeight
-        : 1.5;
-    final naturalHeight = displayWidth / aspect;
-    return naturalHeight.clamp(
-      settings.fontSize * settings.lineHeight * 2,
-      560.0,
-    );
-  }
-
-  TextPainter _layoutEpubTextBlock(
-    EpubContentBlock block, {
-    required ReaderSettings settings,
-    required ReaderReadingMode mode,
-    required double width,
-  }) {
-    return TextPainter(
-      text: _epubTextSpan(
-        block,
-        settings: settings,
-        foreground: Colors.black,
-        background: Colors.white,
-      ),
-      textDirection: TextDirection.ltr,
-      textAlign: _epubTextAlign(block.style.textAlign),
-      textScaler: _readerTextScaler,
-      strutStyle: mode == ReaderReadingMode.simulation
-          ? _epubSimulationStrutStyle(block, settings)
-          : null,
-    )..layout(maxWidth: width);
-  }
-
-  StrutStyle _epubSimulationStrutStyle(
-    EpubContentBlock block,
-    ReaderSettings settings,
-  ) {
-    final baseLine = _resolvedSimulationLineExtent(settings);
-    var naturalLineExtent =
-        settings.fontSize *
-        block.style.fontScale *
-        settings.lineHeight *
-        block.style.lineHeightScale;
-    var weight = block.style.fontWeight;
-    for (final run in block.runs) {
-      naturalLineExtent = math.max(
-        naturalLineExtent,
-        settings.fontSize *
-            run.style.fontScale *
-            settings.lineHeight *
-            run.style.lineHeightScale,
-      );
-      weight = math.max(weight, run.style.fontWeight);
-    }
-    final lineExtent = baseLine > 0
-        ? math.max(baseLine, (naturalLineExtent / baseLine).ceil() * baseLine)
-        : naturalLineExtent;
-    return StrutStyle(
-      fontFamily: block.style.fontFamily ?? settings.effectiveFontFamily,
-      fontSize: settings.fontSize,
-      height: lineExtent / settings.fontSize,
-      fontWeight: weight >= 600
-          ? (weight >= 800 ? FontWeight.w900 : FontWeight.w700)
-          : settings.effectiveFontWeight,
-      forceStrutHeight: true,
-    );
-  }
-
-  TextSpan _epubTextSpan(
-    EpubContentBlock block, {
-    required ReaderSettings settings,
-    required Color foreground,
-    required Color background,
-  }) {
-    final formatted = _formatEpubParagraph(block);
-    final prefixLength = math.max(0, formatted.length - block.text.length);
-    final children = <InlineSpan>[];
-    if (prefixLength > 0) {
-      children.add(
-        TextSpan(
-          text: formatted.substring(0, prefixLength),
-          style: _epubRunTextStyle(
-            block.style,
-            settings: settings,
-            foreground: foreground,
-            background: background,
-          ),
-        ),
-      );
-    }
-    if (block.runs.isEmpty) {
-      children.add(
-        TextSpan(
-          text: block.text.trim(),
-          style: _epubRunTextStyle(
-            block.style,
-            settings: settings,
-            foreground: foreground,
-            background: background,
-          ),
-        ),
-      );
-    } else {
-      for (final run in block.runs) {
-        children.add(
-          TextSpan(
-            text: run.text,
-            style: _epubRunTextStyle(
-              run.style,
-              settings: settings,
-              foreground: foreground,
-              background: background,
-            ),
-          ),
-        );
-      }
-    }
-    return TextSpan(children: children);
-  }
-
-  TextStyle _epubRunTextStyle(
-    EpubContentStyle style, {
-    required ReaderSettings settings,
-    required Color foreground,
-    required Color background,
-  }) {
-    final weight = style.fontWeight >= 600
-        ? (style.fontWeight >= 800 ? FontWeight.w900 : FontWeight.w700)
-        : settings.effectiveFontWeight;
-    return TextStyle(
-      fontFamily: style.fontFamily ?? settings.effectiveFontFamily,
-      fontSize: settings.fontSize * style.fontScale,
-      fontWeight: weight,
-      fontStyle: style.italic ? FontStyle.italic : FontStyle.normal,
-      decoration: style.underline
-          ? TextDecoration.underline
-          : TextDecoration.none,
-      shadows: settings.effectiveFontShadows(foreground),
-      height: settings.lineHeight * style.lineHeightScale,
-      color: _safePublisherForeground(
-        style.colorArgb,
-        fallback: foreground,
-        background: background,
-      ),
-      backgroundColor: style.backgroundColorArgb == null
-          ? null
-          : Color(style.backgroundColorArgb!).withValues(alpha: 0.18),
-      letterSpacing:
-          settings.fontSize * style.fontScale * style.letterSpacingEm + 0.2,
-    );
-  }
-
-  TextAlign _epubTextAlign(String value) => switch (value) {
-    'center' => TextAlign.center,
-    'end' => TextAlign.end,
-    'justify' => TextAlign.justify,
-    _ => TextAlign.start,
-  };
-
-  Color _epubBlockBackground(
-    EpubContentStyle style,
-    ReaderThemeColors themeColors,
-  ) {
-    final raw = style.backgroundColorArgb;
-    if (raw == null) return Colors.transparent;
-    final publisher = Color(raw);
-    final dark = themeColors.background.computeLuminance() < 0.25;
-    return Color.lerp(themeColors.background, publisher, dark ? 0.16 : 0.42)!;
-  }
-
-  Color _epubForeground(
-    EpubContentStyle style,
-    ReaderThemeColors themeColors,
-    Color background,
-  ) {
-    return _safePublisherForeground(
-      style.colorArgb,
-      fallback: themeColors.text,
-      background: background,
-    );
-  }
-
-  Color _safePublisherForeground(
-    int? raw, {
-    required Color fallback,
-    required Color background,
-  }) {
-    if (raw == null) return fallback;
-    final publisher = Color(raw);
-    final first = publisher.computeLuminance() + 0.05;
-    final second = background.computeLuminance() + 0.05;
-    final contrast = first > second ? first / second : second / first;
-    return contrast >= 3 ? publisher : fallback;
-  }
-
-  Widget _buildEpubBlockWidget({
-    required EpubContentBlock block,
-    required ReaderThemeColors themeColors,
-    required double width,
-    required bool simulationPage,
-  }) {
-    final mode = simulationPage
-        ? ReaderReadingMode.simulation
-        : _settings.readingMode;
-    final metrics = _epubBlockMetrics(
-      block,
-      settings: _settings,
-      mode: mode,
-      width: width,
-    );
-    final blockBackground = _epubBlockBackground(block.style, themeColors);
-    final foreground = _epubForeground(
-      block.style,
-      themeColors,
-      blockBackground == Colors.transparent
-          ? themeColors.background
-          : blockBackground,
-    );
-    Widget content;
-    if (block.isImage) {
-      final path = block.imagePath;
-      final requestedWidth = block.imageWidth;
-      final displayWidth = requestedWidth != null && requestedWidth > 0
-          ? math.min(width, requestedWidth)
-          : width;
-      content = SizedBox(
-        width: displayWidth,
-        height: metrics.content,
-        child: path == null
-            ? _epubImageFallback(block, themeColors)
-            : Image.file(
-                File(path),
-                fit: BoxFit.contain,
-                alignment: Alignment.center,
-                filterQuality: FilterQuality.medium,
-                errorBuilder: (_, _, _) =>
-                    _epubImageFallback(block, themeColors),
-              ),
-      );
-      content = Align(
-        alignment: switch (block.style.textAlign) {
-          'center' => Alignment.center,
-          'end' => Alignment.centerRight,
-          _ => Alignment.centerLeft,
-        },
-        child: content,
-      );
-    } else {
-      content = SizedBox(
-        width: width,
-        height: metrics.content,
-        child: Text.rich(
-          _epubTextSpan(
-            block,
-            settings: _settings,
-            foreground: foreground,
-            background: blockBackground == Colors.transparent
-                ? themeColors.background
-                : blockBackground,
-          ),
-          textAlign: _epubTextAlign(block.style.textAlign),
-          textScaler: _readerTextScaler,
-          strutStyle: simulationPage
-              ? _epubSimulationStrutStyle(block, _settings)
-              : null,
-        ),
-      );
-    }
-
-    final backgroundPath = block.style.backgroundImagePath;
-    final decoration =
-        blockBackground == Colors.transparent && backgroundPath == null
-        ? null
-        : BoxDecoration(
-            color: blockBackground == Colors.transparent
-                ? null
-                : blockBackground,
-            image: backgroundPath != null && File(backgroundPath).existsSync()
-                ? DecorationImage(
-                    image: FileImage(File(backgroundPath)),
-                    fit: BoxFit.cover,
-                    opacity: 0.22,
-                  )
-                : null,
-            borderRadius: BorderRadius.circular(AppRadius.sm),
-          );
-    return SizedBox(
-      height: metrics.total,
-      child: Padding(
-        padding: EdgeInsets.only(
-          top: metrics.leading,
-          bottom: metrics.trailing,
-        ),
-        child: DecoratedBox(
-          decoration: decoration ?? const BoxDecoration(),
-          child: content,
-        ),
-      ),
-    );
-  }
-
-  Widget _epubImageFallback(
-    EpubContentBlock block,
-    ReaderThemeColors themeColors,
-  ) {
-    final label = block.altText?.trim();
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: themeColors.headerBg,
-        border: Border.all(color: themeColors.border),
-        borderRadius: BorderRadius.circular(AppRadius.sm),
-      ),
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(AppSpacing.md),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.broken_image_outlined,
-                color: themeColors.secondary,
-                size: 28,
-              ),
-              if (label != null && label.isNotEmpty) ...[
-                const SizedBox(height: AppSpacing.xs),
-                Text(
-                  label,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: themeColors.secondary, fontSize: 12),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   void _setPageDragOffset(double value) {
@@ -2124,7 +1652,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     image?.dispose();
   }
 
-  void _scheduleReversePageTurnSnapshotCapture(_SimulationPageTarget target) {
+  void _scheduleReversePageTurnSnapshotCapture(SimulationPageTarget target) {
     if (_readerModalOpen ||
         _selectionController.active.value ||
         target.goingNext ||
@@ -2145,7 +1673,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
   }
 
-  Future<bool> _captureReversePageTurnSnapshot(_SimulationPageTarget target) {
+  Future<bool> _captureReversePageTurnSnapshot(SimulationPageTarget target) {
     if (!mounted ||
         _readerModalOpen ||
         _selectionController.active.value ||
@@ -2174,7 +1702,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<bool> _performReversePageTurnSnapshotCapture(
     int serial,
-    _SimulationPageTarget target,
+    SimulationPageTarget target,
   ) async {
     try {
       final pixelRatio = math.min(MediaQuery.devicePixelRatioOf(context), 1.5);
@@ -2472,7 +2000,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       progress: targetProgress,
     );
     _currentProgress = progress;
-    _lastScrollSnapshot = _ScrollSnapshot(
+    _lastScrollSnapshot = ScrollSnapshot(
       offset: targetOffset,
       progress: targetProgress,
     );
@@ -2516,7 +2044,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _discardPageTurnSnapshot();
         _scrollController.jumpTo(0);
         final progress = _recordCurrentChapterPosition(
-          const _ScrollSnapshot(offset: 0, progress: 0),
+          const ScrollSnapshot(offset: 0, progress: 0),
         );
         _enqueueProgressSave(progress);
         _scheduleSimulationSnapshotWarmup();
@@ -2558,7 +2086,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       progress: targetProgress,
     );
     _currentProgress = progress;
-    _lastScrollSnapshot = _ScrollSnapshot(
+    _lastScrollSnapshot = ScrollSnapshot(
       offset: targetOffset,
       progress: targetProgress,
     );
@@ -2654,7 +2182,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
       if (_settings.readingMode != ReaderReadingMode.continuous) {
         final maxExtent = position.maxScrollExtent;
-        _lastScrollSnapshot = _ScrollSnapshot(
+        _lastScrollSnapshot = ScrollSnapshot(
           offset: target,
           progress: maxExtent > 0 ? target / maxExtent : 0,
         );
@@ -2904,7 +2432,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     return null;
   }
 
-  _SimulationPageTarget? _simulationTargetForDirection({
+  SimulationPageTarget? _simulationTargetForDirection({
     required bool goingNext,
   }) {
     if (!_scrollController.hasClients ||
@@ -2928,7 +2456,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           maxExtent: maxExtent,
         );
         if (targetOffset > currentOffset + 0.5) {
-          return _SimulationPageTarget(
+          return SimulationPageTarget(
             chapterIndex: _chapterIndex,
             offset: targetOffset,
             progress: maxExtent > 0 ? targetOffset / maxExtent : 0,
@@ -2939,7 +2467,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (_chapterIndex >= _book.chapters.length - 1) return null;
       final targetIndex = _chapterIndex + 1;
       final preview = _adjacentScrollSnapshot(targetIndex);
-      return _SimulationPageTarget(
+      return SimulationPageTarget(
         chapterIndex: targetIndex,
         offset: preview?.offset ?? 0,
         progress: preview?.progress ?? 0,
@@ -2953,7 +2481,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         pageExtent: pageExtent,
         maxExtent: maxExtent,
       );
-      return _SimulationPageTarget(
+      return SimulationPageTarget(
         chapterIndex: _chapterIndex,
         offset: targetOffset,
         progress: maxExtent > 0 ? targetOffset / maxExtent : 0,
@@ -2967,7 +2495,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       targetIndex,
       pageExtent: pageExtent,
     );
-    return _SimulationPageTarget(
+    return SimulationPageTarget(
       chapterIndex: targetIndex,
       offset: preview?.offset ?? lastPage.offset,
       progress: preview?.progress ?? lastPage.progress,
@@ -2975,7 +2503,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  _ScrollSnapshot _simulationLastPageSnapshot(
+  ScrollSnapshot _simulationLastPageSnapshot(
     int chapterIndex, {
     required double pageExtent,
   }) {
@@ -2983,7 +2511,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         chapterIndex >= _book.chapters.length ||
         !pageExtent.isFinite ||
         pageExtent <= 0) {
-      return const _ScrollSnapshot(offset: 0, progress: 0);
+      return const ScrollSnapshot(offset: 0, progress: 0);
     }
     final chapter = _book.chapters[chapterIndex];
     final horizontalPadding = _settings.pageMargin.horizontalPadding;
@@ -3000,12 +2528,12 @@ class _ReaderScreenState extends State<ReaderScreen>
       contentWidth: contentWidth,
     );
     final rawMaxExtent = math.max(0.0, contentExtent - pageExtent);
-    final offset = _fullViewportMaxScrollExtent(rawMaxExtent, pageExtent);
-    return _ScrollSnapshot(offset: offset, progress: offset > 0 ? 1 : 0);
+    final offset = fullViewportMaxScrollExtent(rawMaxExtent, pageExtent);
+    return ScrollSnapshot(offset: offset, progress: offset > 0 ? 1 : 0);
   }
 
   void _replaceSimulationPageTarget(
-    _SimulationPageTarget? target, {
+    SimulationPageTarget? target, {
     bool hideOverlay = false,
   }) {
     final current = _simulationPageTarget;
@@ -3030,7 +2558,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       // offset. Sharing the adjacent warm-up controller made the revealed
       // page paint its saved reading position first and then jump to the
       // page edge once the scheduled restore landed mid-drag.
-      nextController = _FullViewportPagingScrollController(
+      nextController = FullViewportPagingScrollController(
         initialScrollOffset: target.offset,
       );
     }
@@ -3040,7 +2568,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       final movingPageOffset = target.goingNext
           ? (_pageTurnOriginSnapshot ?? _currentScrollSnapshot()).offset
           : target.offset;
-      nextPaperBackController = _FullViewportPagingScrollController(
+      nextPaperBackController = FullViewportPagingScrollController(
         initialScrollOffset: math.max(0.0, movingPageOffset),
       );
     }
@@ -3128,7 +2656,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _switchChapter(targetIndex, startAtTop: false);
   }
 
-  void _finishSimulationPageTurn(_SimulationPageTarget target) {
+  void _finishSimulationPageTurn(SimulationPageTarget target) {
     _setTextSelectionBlocked(false);
     if (target.chapterIndex != _chapterIndex) {
       _switchChapter(target.chapterIndex, startAtTop: false);
@@ -3225,8 +2753,8 @@ class _ReaderScreenState extends State<ReaderScreen>
             currentChapter: _chapterIndex,
             scrollController: scrollController,
             colors: themeColors,
-            wordCountListenable: _wordCountNotifier,
-            chapterWordCountsListenable: _chapterWordCountsNotifier,
+            wordCountListenable: _wordCountController.wordCount,
+            chapterWordCountsListenable: _wordCountController.chapterWordCounts,
             collapsedGroupIds: _collapsedTocGroupIds,
             onGroupExpansionChanged: _handleTocGroupExpansionChanged,
             onSelect: _openChapter,
@@ -3365,7 +2893,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         result.chapterIndex >= _book.chapters.length) {
       return;
     }
-    final anchor = _ReadingTextAnchor(
+    final anchor = ReadingTextAnchor(
       chapterIndex: result.chapterIndex,
       paragraphIndex: result.paragraphIndex,
       characterOffset:
@@ -3389,6 +2917,126 @@ class _ReaderScreenState extends State<ReaderScreen>
         preferProgress: false,
         textAnchor: anchor,
       );
+    }
+  }
+
+  void _showChapterEditor() => unawaited(_presentChapterEditor());
+
+  Future<void> _presentChapterEditor() async {
+    if (!mounted || _readerModalOpen) return;
+    if (_settings.readingMode != ReaderReadingMode.chapter) {
+      _showReaderMessage('编辑器仅在分章滑动模式中可用');
+      return;
+    }
+    final chapter = _currentChapter;
+    final snapshot = _currentScrollSnapshot();
+    final textAnchor = _captureReadingTextAnchor(snapshot);
+    final progress = _recordCurrentChapterPosition(snapshot);
+    _enqueueProgressSave(progress);
+    final themeColors = AppTheme.getReaderTheme(
+      _settings.theme,
+      systemBrightness: MediaQuery.platformBrightnessOf(context),
+    );
+    var saved = false;
+    _beginReaderModal();
+    _showStatusBar();
+    try {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          fullscreenDialog: true,
+          builder: (_) => ChapterEditorSheet(
+            initialTitle: chapter.title,
+            initialContent: chapter.content,
+            hasRichContent: chapter.hasRichEpubContent,
+            colors: themeColors,
+            onSave: (title, content) async {
+              await _applyChapterEdit(
+                title: title,
+                content: content,
+                snapshot: snapshot,
+                textAnchor: textAnchor,
+              );
+              saved = true;
+            },
+          ),
+        ),
+      );
+    } finally {
+      _endReaderModal();
+      if (mounted) {
+        if (_showOverlay) {
+          _showStatusBar();
+        } else {
+          _hideStatusBarForReader();
+        }
+      }
+    }
+    if (saved && mounted) {
+      _showReaderMessage('当前章节已保存');
+    }
+  }
+
+  Future<void> _applyChapterEdit({
+    required String title,
+    required String content,
+    required ScrollSnapshot snapshot,
+    required ReadingTextAnchor? textAnchor,
+  }) async {
+    if (_settings.readingMode != ReaderReadingMode.chapter) {
+      throw StateError('编辑器仅在分章滑动模式中可用');
+    }
+    // Invalidate any whole-book count that started before this edit. Its
+    // completion must not write stale counts against the new chapter payload.
+    _wordCountController.invalidate();
+    final result = await _chapterEditingController.save(
+      sourceBook: _book,
+      chapterIndex: _chapterIndex,
+      title: title,
+      content: content,
+      existingChapterWordCounts: _wordCountController.chapterWordCounts.value,
+    );
+    if (!mounted) return;
+
+    _paragraphCache.clear();
+    _paragraphCacheCharacters = 0;
+    _simulationContentExtentCache.clear();
+    _simulationContentExtentSignature = null;
+    _discardPageTurnSnapshot();
+    _discardReversePageTurnSnapshot();
+    final previousController = _scrollController;
+    previousController.removeListener(_scheduleProgressSave);
+    final nextController = _createScrollController();
+    final adjacentControllers = _adjacentScrollControllers.values.toSet();
+    _adjacentScrollControllers.clear();
+    _adjacentScrollRestoreSerials.clear();
+    _resetContinuousMetrics();
+    setState(() {
+      _book = result.book;
+      _scrollController = nextController;
+      _warmAdjacentPages = false;
+      _pageDragTargetIndex = null;
+      _readingModeReloading = true;
+      _showOverlay = false;
+    });
+    _wordCountController.apply(
+      chapterCounts: result.chapterWordCounts,
+      total: result.wordCount,
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      previousController.dispose();
+      for (final controller in adjacentControllers) {
+        controller.dispose();
+      }
+    });
+    _scheduleAdjacentWarmup();
+    _requestScrollRestore(
+      offset: snapshot.offset,
+      progress: snapshot.progress,
+      preferProgress: false,
+      textAnchor: textAnchor,
+    );
+    if (result.chapterWordCounts == null) {
+      unawaited(_wordCountController.ensure(_book));
     }
   }
 
@@ -3670,7 +3318,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                                   ),
                                   const SizedBox(height: 2),
                                   Text(
-                                    _formatChapterTitle(_currentChapter.title),
+                                    _epubLayout.formatChapterTitle(
+                                      _currentChapter.title,
+                                    ),
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
@@ -3748,6 +3398,15 @@ class _ReaderScreenState extends State<ReaderScreen>
                               onTap: _showSearch,
                               color: themeColors.secondary,
                             ),
+                            if (_settings.readingMode ==
+                                ReaderReadingMode.chapter)
+                              _bottomBarButton(
+                                icon: Icons.edit_note_rounded,
+                                label: '编辑',
+                                subtitle: '当前章',
+                                onTap: _showChapterEditor,
+                                color: themeColors.secondary,
+                              ),
                             _bottomBarButton(
                               icon: Icons.text_fields,
                               label: '设置',
@@ -3854,7 +3513,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     return ValueListenableBuilder<double>(
       valueListenable: _pageDragOffsetNotifier,
       builder: (context, offset, _) {
-        return _buildSmoothTurnPages(
+        return SmoothTurnPages(
           width: width,
           dragOffset: offset,
           currentPage: currentPage,
@@ -3879,7 +3538,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       chapterIndex++
     ) {
       final chapter = _book.chapters[chapterIndex];
-      final hasEmbeddedHeading = _hasEmbeddedEpubHeading(
+      final hasEmbeddedHeading = _epubLayout.hasEmbeddedHeading(
         chapter,
         avoidLazyLoad: true,
       );
@@ -3900,7 +3559,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                     AppSpacing.xl,
                   ),
                   child: Text(
-                    _formatChapterTitle(chapter.title),
+                    _epubLayout.formatChapterTitle(chapter.title),
                     style: TextStyle(
                       fontFamily: fontFamily,
                       fontSize: 20,
@@ -3924,51 +3583,59 @@ class _ReaderScreenState extends State<ReaderScreen>
                           ? chapter.epubBlockCount
                           : 1)
                     : 1,
-                itemBuilder: (context, itemIndex) {
-                  if (chapter.hasRichEpubContent) {
-                    final contentWidth = math.max(
-                      1.0,
-                      _readerViewportWidth - horizontalPadding * 2,
-                    );
-                    if (!chapter.hasKnownEpubBlockCount) {
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          for (final block in chapter.epubBlocks)
-                            _buildEpubBlockWidget(
-                              block: block,
-                              themeColors: themeColors,
-                              width: contentWidth,
-                              simulationPage: false,
-                            ),
-                        ],
+                itemBuilder: (context, itemIndex) => ReaderSelectableBlock(
+                  child: Builder(
+                    builder: (context) {
+                      if (chapter.hasRichEpubContent) {
+                        final contentWidth = math.max(
+                          1.0,
+                          _readerViewportWidth - horizontalPadding * 2,
+                        );
+                        if (!chapter.hasKnownEpubBlockCount) {
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              for (final block in chapter.epubBlocks)
+                                _epubLayout.buildBlock(
+                                  settings: _settings,
+                                  block: block,
+                                  themeColors: themeColors,
+                                  width: contentWidth,
+                                  simulationPage: false,
+                                ),
+                            ],
+                          );
+                        }
+                        return _epubLayout.buildBlock(
+                          settings: _settings,
+                          block: chapter.epubBlocks[itemIndex],
+                          themeColors: themeColors,
+                          width: contentWidth,
+                          simulationPage: false,
+                        );
+                      }
+                      final separator =
+                          _settings.paragraphSpacing ==
+                              ReaderParagraphSpacing.blankLine
+                          ? '\n\n'
+                          : '\n';
+                      return Text(
+                        _paragraphsFor(chapter).join(separator),
+                        style: TextStyle(
+                          fontFamily: fontFamily,
+                          fontSize: _settings.fontSize,
+                          fontWeight: _settings.effectiveFontWeight,
+                          shadows: _settings.effectiveFontShadows(
+                            themeColors.text,
+                          ),
+                          height: _settings.lineHeight,
+                          color: themeColors.text,
+                          letterSpacing: 0.2,
+                        ),
                       );
-                    }
-                    return _buildEpubBlockWidget(
-                      block: chapter.epubBlocks[itemIndex],
-                      themeColors: themeColors,
-                      width: contentWidth,
-                      simulationPage: false,
-                    );
-                  }
-                  final separator =
-                      _settings.paragraphSpacing ==
-                          ReaderParagraphSpacing.blankLine
-                      ? '\n\n'
-                      : '\n';
-                  return Text(
-                    _paragraphsFor(chapter).join(separator),
-                    style: TextStyle(
-                      fontFamily: fontFamily,
-                      fontSize: _settings.fontSize,
-                      fontWeight: _settings.effectiveFontWeight,
-                      shadows: _settings.effectiveFontShadows(themeColors.text),
-                      height: _settings.lineHeight,
-                      color: themeColors.text,
-                      letterSpacing: 0.2,
-                    ),
-                  );
-                },
+                    },
+                  ),
+                ),
               ),
             ),
             SliverToBoxAdapter(
@@ -3986,12 +3653,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     return RepaintBoundary(
       child: ColoredBox(
         color: themeColors.background,
-        child: _DoubleTapFilteredSelectionArea(
+        child: ReaderSelectionArea(
           colors: themeColors,
           selectionBlocked: _selectionController.blocked,
           selectionActive: _selectionController.active,
+          selectionDragging: _selectionController.dragging,
           onReaderModalOpened: _beginReaderModal,
           onReaderModalClosed: _endReaderModal,
+          edgeScrollController: _scrollController,
+          edgeScrollEnabled: !_readerModalOpen,
           child: CustomScrollView(
             key: ValueKey(
               'continuous-$_continuousAnchorChapterIndex-${_settings.fontSize}-${_settings.lineHeight}',
@@ -4113,7 +3783,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       valueListenable: _pageDragOffsetNotifier,
       builder: (context, offset, _) {
         return switch (_settings.simulationPageTurnEffect) {
-          SimulationPageTurnEffect.simulation => _buildStraightBookTurnPages(
+          SimulationPageTurnEffect.simulation => StraightBookTurnPages(
             width: width,
             dragOffset: offset,
             currentPage: currentPage,
@@ -4123,8 +3793,10 @@ class _ReaderScreenState extends State<ReaderScreen>
             keepAliveNextPage: nextBoundaryPage,
             paperBackPage: paperBackPage,
             themeColors: themeColors,
+            pageTurnSnapshot: _pageTurnSnapshot,
+            reversePageTurnSnapshot: _reversePageTurnSnapshot,
           ),
-          SimulationPageTurnEffect.smooth => _buildSmoothTurnPages(
+          SimulationPageTurnEffect.smooth => SmoothTurnPages(
             width: width,
             dragOffset: offset,
             currentPage: currentPage,
@@ -4138,191 +3810,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  Widget _buildSmoothTurnPages({
-    required double width,
-    required double dragOffset,
-    required Widget currentPage,
-    required Widget? previousPage,
-    required Widget? nextPage,
-    Widget? keepAlivePreviousPage,
-    Widget? keepAliveNextPage,
-  }) {
-    return Stack(
-      children: [
-        // Boundary pages displaced by an active preview copy stay attached
-        // offstage: their shared controllers hold the restored edge position
-        // that _switchChapter inherits when the turn commits.
-        if (keepAlivePreviousPage != null &&
-            !identical(keepAlivePreviousPage, previousPage))
-          Offstage(child: keepAlivePreviousPage),
-        if (keepAliveNextPage != null &&
-            !identical(keepAliveNextPage, nextPage))
-          Offstage(child: keepAliveNextPage),
-        if (previousPage != null)
-          KeyedSubtree(
-            key: const ValueKey('previous-page'),
-            child: Transform.translate(
-              offset: Offset(dragOffset - width, 0),
-              child: _inactivePage(previousPage),
-            ),
-          ),
-        if (nextPage != null)
-          KeyedSubtree(
-            key: const ValueKey('next-page'),
-            child: Transform.translate(
-              offset: Offset(dragOffset + width, 0),
-              child: _inactivePage(nextPage),
-            ),
-          ),
-        KeyedSubtree(
-          key: const ValueKey('current-page'),
-          child: Transform.translate(
-            offset: Offset(dragOffset, 0),
-            child: currentPage,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildStraightBookTurnPages({
-    required double width,
-    required double dragOffset,
-    required Widget currentPage,
-    required Widget? previousPage,
-    required Widget? nextPage,
-    required Widget? paperBackPage,
-    required ReaderThemeColors themeColors,
-    Widget? keepAlivePreviousPage,
-    Widget? keepAliveNextPage,
-  }) {
-    final progress = (dragOffset.abs() / width).clamp(0.0, 1.0);
-    final goingNext = dragOffset <= 0;
-    final targetPage = goingNext ? nextPage : previousPage;
-    final hasTarget = progress > 0.001 && targetPage != null;
-    if (!hasTarget) {
-      // Idle: keep both boundary pages attached offstage so their ListViews
-      // lay out and restore to their page edges before any drag starts. A
-      // page that first attaches mid-drag paints its stale saved position
-      // and then visibly jumps once the scheduled restore lands.
-      return Stack(
-        fit: StackFit.expand,
-        children: [
-          if (previousPage != null) Offstage(child: previousPage),
-          if (nextPage != null) Offstage(child: nextPage),
-          currentPage,
-        ],
-      );
-    }
-    final resolvedTargetPage = targetPage;
-    final leafProgress = goingNext ? progress : 1 - progress;
-    final geometry = _StraightLeafGeometry.calculate(
-      size: Size(width, 1),
-      progress: leafProgress,
-    );
-    final movingPage = goingNext ? currentPage : resolvedTargetPage;
-    final paperBackSnapshot = goingNext
-        ? _pageTurnSnapshot
-        : _reversePageTurnSnapshot;
-    final paperBackSource = paperBackSnapshot != null
-        ? RawImage(
-            image: paperBackSnapshot,
-            fit: BoxFit.fill,
-            filterQuality: FilterQuality.high,
-          )
-        : paperBackPage;
-    final inkTransmission = themeColors.background.computeLuminance() < 0.25
-        ? 0.46
-        : 0.38;
-
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        // Only the turn's active target page is placed visibly. Every other
-        // boundary page stays attached offstage so its shared controller
-        // keeps the restored edge position for a direction flip or a commit.
-        if (keepAlivePreviousPage != null &&
-            !identical(keepAlivePreviousPage, resolvedTargetPage))
-          Offstage(child: keepAlivePreviousPage),
-        if (keepAliveNextPage != null &&
-            !identical(keepAliveNextPage, resolvedTargetPage))
-          Offstage(child: keepAliveNextPage),
-        if (goingNext)
-          KeyedSubtree(
-            key: const ValueKey('physical-next-page'),
-            child: _inactivePage(resolvedTargetPage),
-          )
-        else
-          KeyedSubtree(
-            key: const ValueKey('physical-current-page-base'),
-            child: currentPage,
-          ),
-        KeyedSubtree(
-          key: ValueKey(
-            goingNext
-                ? 'physical-forward-sheet'
-                : 'physical-reversed-forward-sheet',
-          ),
-          child: ClipPath(
-            clipper: _StraightLeafFrontClipper(progress: leafProgress),
-            child: goingNext ? movingPage : _inactivePage(movingPage),
-          ),
-        ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: CustomPaint(
-              painter: _StraightPaperPainter(
-                progress: leafProgress,
-                pageColor: themeColors.background,
-                layer: _StraightPaperPaintLayer.base,
-              ),
-            ),
-          ),
-        ),
-        if (paperBackSource != null)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: ClipPath(
-                clipper: _StraightLeafBackClipper(progress: leafProgress),
-                child: Transform.translate(
-                  offset: Offset(geometry.creaseX * 2 - width, 0),
-                  child: Transform.flip(
-                    flipX: true,
-                    child: Opacity(
-                      opacity: inkTransmission,
-                      child: _inactivePage(paperBackSource),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: CustomPaint(
-              painter: _StraightPaperPainter(
-                progress: leafProgress,
-                pageColor: themeColors.background,
-                layer: _StraightPaperPaintLayer.lighting,
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _inactivePage(Widget child) {
-    return ExcludeSemantics(child: IgnorePointer(child: child));
-  }
-
   double _simulationChapterContentExtent({
     required Chapter chapter,
     required List<String> paragraphs,
     required List<EpubContentBlock> richBlocks,
     required double contentWidth,
   }) {
-    final signature = _SimulationLayoutSignature(
+    final signature = SimulationLayoutSignature(
       contentWidth: contentWidth,
       settings: _settings,
     );
@@ -4349,7 +3843,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             0,
             (extent, block) =>
                 extent +
-                _epubBlockExtent(
+                _epubLayout.blockExtent(
                   block,
                   settings: _settings,
                   mode: ReaderReadingMode.simulation,
@@ -4423,7 +3917,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final bodyItemCount = chapter.hasRichEpubContent
         ? richBlocks.length
         : paragraphs.length;
-    final hasStandaloneTitle = !_hasEmbeddedEpubHeading(chapter);
+    final hasStandaloneTitle = !_epubLayout.hasEmbeddedHeading(chapter);
     final simulationTitleExtent = simulationPage && hasStandaloneTitle
         ? _bodyStartOffset(
             chapter,
@@ -4453,7 +3947,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           height: simulationPage ? lineExtent / 20 : 1.5,
         );
         final titleText = Text(
-          _formatChapterTitle(chapter.title),
+          _epubLayout.formatChapterTitle(chapter.title),
           style: simulationPage ? titleStyle : null,
           strutStyle: simulationPage
               ? StrutStyle(
@@ -4493,7 +3987,8 @@ class _ReaderScreenState extends State<ReaderScreen>
 
       final paragraphIndex = index - titleItemCount;
       if (chapter.hasRichEpubContent) {
-        return _buildEpubBlockWidget(
+        return _epubLayout.buildBlock(
+          settings: _settings,
           block: richBlocks[paragraphIndex],
           themeColors: themeColors,
           width: contentWidth,
@@ -4553,7 +4048,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         scrollCacheExtent: const ScrollCacheExtent.pixels(0),
         padding: scrollViewPadding,
         semanticChildCount: itemCount,
-        childrenDelegate: _ExactScrollExtentSliverChildBuilderDelegate(
+        childrenDelegate: ExactScrollExtentSliverChildBuilderDelegate(
           buildItem,
           childCount: itemCount,
           exactScrollExtent: exactScrollExtent,
@@ -4568,16 +4063,23 @@ class _ReaderScreenState extends State<ReaderScreen>
         scrollCacheExtent: const ScrollCacheExtent.pixels(900),
         padding: scrollViewPadding,
         itemCount: itemCount,
-        itemBuilder: buildItem,
+        itemBuilder: (context, index) =>
+            ReaderSelectableBlock(child: buildItem(context, index)),
       );
     }
 
-    Widget readingContent = _DoubleTapFilteredSelectionArea(
+    Widget readingContent = ReaderSelectionArea(
       colors: themeColors,
       selectionBlocked: _selectionController.blocked,
       selectionActive: _selectionController.active,
+      selectionDragging: _selectionController.dragging,
       onReaderModalOpened: _beginReaderModal,
       onReaderModalClosed: _endReaderModal,
+      edgeScrollController:
+          !simulationPage && identical(controller, _scrollController)
+          ? controller
+          : null,
+      edgeScrollEnabled: !_readerModalOpen,
       child: scrollView,
     );
     if (simulationPage) {
@@ -4624,7 +4126,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 right: horizontalPadding,
                 child: IgnorePointer(
                   child: Text(
-                    '章节 ${chapter.index + 1}/${_book.chapters.length} · ${_formatChapterTitle(chapter.title)}',
+                    '章节 ${chapter.index + 1}/${_book.chapters.length} · ${_epubLayout.formatChapterTitle(chapter.title)}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(

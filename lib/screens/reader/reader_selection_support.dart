@@ -1,25 +1,42 @@
-part of '../reader_screen.dart';
+import 'dart:async';
+import 'dart:math' as math;
 
-class _DoubleTapFilteredSelectionArea extends StatefulWidget {
+import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show SelectedContent;
+
+import '../../services/system_text_action_service.dart';
+import '../../theme/app_spacing.dart';
+import '../../theme/app_theme.dart';
+import '../../widgets/app_toast.dart';
+import 'reader_selection_edge_scroller.dart';
+
+class ReaderSelectionArea extends StatefulWidget {
   final Widget child;
   final ReaderThemeColors colors;
   final ValueListenable<bool> selectionBlocked;
   final ValueNotifier<bool> selectionActive;
+  final ValueNotifier<bool> selectionDragging;
   final VoidCallback onReaderModalOpened;
   final VoidCallback onReaderModalClosed;
+  final ScrollController? edgeScrollController;
+  final bool edgeScrollEnabled;
 
-  const _DoubleTapFilteredSelectionArea({
+  const ReaderSelectionArea({
+    super.key,
     required this.child,
     required this.colors,
     required this.selectionBlocked,
     required this.selectionActive,
+    required this.selectionDragging,
     required this.onReaderModalOpened,
     required this.onReaderModalClosed,
+    this.edgeScrollController,
+    this.edgeScrollEnabled = true,
   });
 
   @override
-  State<_DoubleTapFilteredSelectionArea> createState() =>
-      _DoubleTapFilteredSelectionAreaState();
+  State<ReaderSelectionArea> createState() => _ReaderSelectionAreaState();
 }
 
 class _TextActionChoice {
@@ -29,8 +46,7 @@ class _TextActionChoice {
   const _TextActionChoice({required this.target, required this.remember});
 }
 
-class _DoubleTapFilteredSelectionAreaState
-    extends State<_DoubleTapFilteredSelectionArea> {
+class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
   static const _tapSlop = 18.0;
   static const _doubleTapSlop = 100.0;
   static const _doubleTapTimeout = Duration(milliseconds: 300);
@@ -44,6 +60,8 @@ class _DoubleTapFilteredSelectionAreaState
   };
 
   final _selectionAreaKey = GlobalKey<SelectionAreaState>();
+  final _geometryKey = GlobalKey();
+  MultiSelectableSelectionContainerDelegate? _geometry;
   int? _pointer;
   Offset? _downPosition;
   Duration? _downTime;
@@ -57,6 +75,38 @@ class _DoubleTapFilteredSelectionAreaState
   Timer? _suppressionTimer;
   bool _externallyBlocked = false;
   bool _ownsActiveSelection = false;
+  bool _ownsSelectionDrag = false;
+  bool _bodyScrollInProgress = false;
+  int _scrollMenuGeneration = 0;
+  ValueListenable<SelectableRegionSelectionStatus>? _regionStatus;
+  ContextMenuController? _scrollContextMenu;
+
+  void _bindRegionStatus(BuildContext context) {
+    final status = SelectableRegionSelectionStatusScope.maybeOf(context);
+    if (identical(status, _regionStatus)) return;
+    _regionStatus?.removeListener(_syncSelectionDragging);
+    _regionStatus = status;
+    status?.addListener(_syncSelectionDragging);
+  }
+
+  void _syncSelectionDragging() {
+    final dragging =
+        _ownsActiveSelection &&
+        _regionStatus?.value == SelectableRegionSelectionStatus.changing;
+    if (dragging) {
+      _scrollMenuGeneration++;
+      _scrollContextMenu?.remove();
+      _ownsSelectionDrag = true;
+      if (!widget.selectionDragging.value) {
+        widget.selectionDragging.value = true;
+      }
+    } else if (_ownsSelectionDrag) {
+      _ownsSelectionDrag = false;
+      if (widget.selectionDragging.value) {
+        widget.selectionDragging.value = false;
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -66,8 +116,12 @@ class _DoubleTapFilteredSelectionAreaState
   }
 
   @override
-  void didUpdateWidget(covariant _DoubleTapFilteredSelectionArea oldWidget) {
+  void didUpdateWidget(covariant ReaderSelectionArea oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!widget.edgeScrollEnabled) {
+      _scrollMenuGeneration++;
+      _scrollContextMenu?.remove();
+    }
     if (identical(oldWidget.selectionBlocked, widget.selectionBlocked)) return;
     oldWidget.selectionBlocked.removeListener(_handleSelectionBlockChanged);
     _externallyBlocked = widget.selectionBlocked.value;
@@ -154,6 +208,49 @@ class _DoubleTapFilteredSelectionAreaState
     _downTime = null;
     _moved = false;
     _secondTapCandidate = false;
+  }
+
+  bool _handleReaderScroll(ScrollNotification notification) {
+    if (notification.depth != 0 ||
+        widget.edgeScrollController == null ||
+        !widget.edgeScrollEnabled) {
+      return false;
+    }
+    if (notification is ScrollStartNotification &&
+        notification.dragDetails != null &&
+        _ownsActiveSelection &&
+        !widget.selectionDragging.value) {
+      _bodyScrollInProgress = true;
+      _scrollMenuGeneration++;
+      _scrollContextMenu?.remove();
+      _selectionAreaKey.currentState?.selectableRegion.hideToolbar(false);
+    } else if (notification is ScrollEndNotification && _bodyScrollInProgress) {
+      _bodyScrollInProgress = false;
+      final generation = ++_scrollMenuGeneration;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final controller = widget.edgeScrollController;
+        if (!mounted ||
+            generation != _scrollMenuGeneration ||
+            !_ownsActiveSelection ||
+            widget.selectionDragging.value ||
+            _externallyBlocked ||
+            !widget.edgeScrollEnabled ||
+            controller == null ||
+            !controller.hasClients ||
+            controller.position.isScrollingNotifier.value) {
+          return;
+        }
+        final state = _selectionAreaKey.currentState?.selectableRegion;
+        if (state == null) return;
+        final menu = ContextMenuController();
+        _scrollContextMenu = menu;
+        menu.show(
+          context: context,
+          contextMenuBuilder: (context) => _buildContextMenu(context, state),
+        );
+      });
+    }
+    return false;
   }
 
   void _handleSelectionChanged(SelectedContent? content) {
@@ -623,6 +720,51 @@ class _DoubleTapFilteredSelectionAreaState
     );
   }
 
+  TextSelectionToolbarAnchors _toolbarAnchors(BuildContext overlayContext) {
+    final media = MediaQuery.of(overlayContext);
+    final safe = Rect.fromLTRB(
+      media.padding.left + 12,
+      media.padding.top + 12,
+      media.size.width - media.padding.right - 12,
+      media.size.height -
+          math.max(media.padding.bottom, media.viewInsets.bottom) -
+          12,
+    );
+    final box = _geometryKey.currentContext?.findRenderObject();
+    var anchor = safe.center;
+    if (box is RenderBox && box.attached && box.hasSize) {
+      // A lazy child can disappear during teardown/reflow. Never call the
+      // framework glyph-height getters, which assert both endpoints exist.
+      final geometry = _geometry?.value;
+      for (final point in [
+        geometry?.startSelectionPoint,
+        geometry?.endSelectionPoint,
+      ]) {
+        if (point == null || !point.localPosition.isFinite) continue;
+        final global = box.localToGlobal(point.localPosition);
+        if (global.isFinite &&
+            global.dy >= safe.top &&
+            global.dy <= safe.bottom) {
+          anchor = global - Offset(0, point.lineHeight);
+          break;
+        }
+      }
+    }
+    // If a selection spans the whole screen, the platform's "above start /
+    // below end" pair has no room on either side. Use one visible anchor with
+    // space for the toolbar above it, rather than placing it below the screen.
+    final reserve = math.min(72.0, math.max(0.0, safe.height / 2));
+    return TextSelectionToolbarAnchors(
+      primaryAnchor: Offset(
+        anchor.dx.clamp(safe.left, math.max(safe.left, safe.right)),
+        anchor.dy.clamp(
+          safe.top + reserve,
+          math.max(safe.top + reserve, safe.bottom),
+        ),
+      ),
+    );
+  }
+
   Widget _buildContextMenu(BuildContext context, SelectableRegionState state) {
     if (_externallyBlocked) return const SizedBox.shrink();
     final selectedText = _selectedContent?.plainText.trim();
@@ -667,7 +809,7 @@ class _DoubleTapFilteredSelectionAreaState
         ),
       ),
       child: AdaptiveTextSelectionToolbar.buttonItems(
-        anchors: state.contextMenuAnchors,
+        anchors: _toolbarAnchors(context),
         buttonItems: buttons,
       ),
     );
@@ -676,6 +818,12 @@ class _DoubleTapFilteredSelectionAreaState
   @override
   void dispose() {
     widget.selectionBlocked.removeListener(_handleSelectionBlockChanged);
+    _regionStatus?.removeListener(_syncSelectionDragging);
+    _scrollMenuGeneration++;
+    _scrollContextMenu?.remove();
+    if (_ownsSelectionDrag && widget.selectionDragging.value) {
+      widget.selectionDragging.value = false;
+    }
     if (_ownsActiveSelection && widget.selectionActive.value) {
       widget.selectionActive.value = false;
     }
@@ -687,15 +835,29 @@ class _DoubleTapFilteredSelectionAreaState
     if (active) {
       _ownsActiveSelection = true;
       if (!widget.selectionActive.value) widget.selectionActive.value = true;
+      _syncSelectionDragging();
       return;
     }
     if (!_ownsActiveSelection) return;
     _ownsActiveSelection = false;
+    _scrollMenuGeneration++;
+    _syncSelectionDragging();
     if (widget.selectionActive.value) widget.selectionActive.value = false;
   }
 
   @override
   Widget build(BuildContext context) {
+    final scrollController = widget.edgeScrollController;
+    final content = scrollController == null
+        ? widget.child
+        : ReaderSelectionEdgeScroller(
+            controller: scrollController,
+            selectionActive: widget.selectionActive,
+            selectionBlocked: widget.selectionBlocked,
+            onSelectionChanged: _handleSelectionChanged,
+            enabled: widget.edgeScrollEnabled,
+            child: widget.child,
+          );
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: _handlePointerDown,
@@ -706,13 +868,26 @@ class _DoubleTapFilteredSelectionAreaState
         key: _selectionAreaKey,
         onSelectionChanged: _handleSelectionChanged,
         contextMenuBuilder: _buildContextMenu,
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          // Winning this arena prevents the usual double-tap word selection.
-          // The selection callback above is a second guard for platform gesture
-          // implementations that resolve the selectable region first.
-          onDoubleTap: () {},
-          child: widget.child,
+        child: Builder(
+          key: _geometryKey,
+          builder: (context) {
+            _bindRegionStatus(context);
+            final registrar = SelectionContainer.maybeOf(context);
+            _geometry = registrar is MultiSelectableSelectionContainerDelegate
+                ? registrar
+                : null;
+            return GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              // Winning this arena prevents the usual double-tap word selection.
+              // The selection callback above is a second guard for platform
+              // gesture implementations that resolve the region first.
+              onDoubleTap: () {},
+              child: NotificationListener<ScrollNotification>(
+                onNotification: _handleReaderScroll,
+                child: content,
+              ),
+            );
+          },
         ),
       ),
     );

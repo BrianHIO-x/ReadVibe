@@ -13,6 +13,7 @@ class GlobalSettingsSheet extends StatelessWidget {
   final ValueChanged<ReaderSettings> onChange;
   final Future<void> Function() onImportFont;
   final Future<void> Function() onCheckUpdate;
+  final String applicationVersion;
 
   const GlobalSettingsSheet({
     super.key,
@@ -21,6 +22,7 @@ class GlobalSettingsSheet extends StatelessWidget {
     required this.onChange,
     required this.onImportFont,
     required this.onCheckUpdate,
+    required this.applicationVersion,
   });
 
   @override
@@ -177,7 +179,7 @@ class GlobalSettingsSheet extends StatelessWidget {
                       onPressed: () => showLicensePage(
                         context: context,
                         applicationName: 'ReadVibe',
-                        applicationVersion: '0.6.7',
+                        applicationVersion: applicationVersion,
                         applicationLegalese: '本地离线阅读器',
                       ),
                       icon: const Icon(Icons.balance_outlined, size: 18),

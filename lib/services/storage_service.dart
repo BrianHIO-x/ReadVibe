@@ -12,34 +12,19 @@ import 'package:crypto/crypto.dart';
 
 import '../models/book.dart';
 import '../models/reader_settings.dart';
+import '../repositories/reader_repositories.dart';
 import 'pdf_renderer_service.dart';
+import 'reader_preferences_store.dart';
 import 'txt_parser.dart';
 
+export '../repositories/reader_repositories.dart' show StorageCleanupResult;
+
 const _kBooksKey = 'readvibe_books';
-const _kSettingsKey = 'readvibe_settings';
-const _kProgressPrefix = 'readvibe_progress_';
-const _kPdfProgressPrefix = 'readvibe_pdf_progress_';
-const _kPdfBookmarksPrefix = 'readvibe_pdf_bookmarks_';
-const _kPdfNotesPrefix = 'readvibe_pdf_notes_';
-const _kPdfDisplayThemePrefix = 'readvibe_pdf_display_theme_';
-const _kTocCollapsedPrefix = 'readvibe_toc_collapsed_';
 const _kChapterPrefix = 'readvibe_chapters_';
 // Large novels can exceed 10 MB. A two-second deadline was too aggressive on
 // slower phones and could make a valid saved book appear unreadable.
 const _kChapterIoTimeout = Duration(seconds: 30);
 const _kLegacyMigrationTimeout = Duration(milliseconds: 250);
-
-class StorageCleanupResult {
-  final int removedFiles;
-  final int removedDirectories;
-
-  const StorageCleanupResult({
-    required this.removedFiles,
-    required this.removedDirectories,
-  });
-
-  int get removedEntries => removedFiles + removedDirectories;
-}
 
 class _LazyChapterStore {
   final String chaptersDirectoryPath;
@@ -135,7 +120,8 @@ class _LazyChapter extends Chapter {
 /// limits. Chapter files therefore live in the app's documents directory. The
 /// legacy preference key is still read once so early Flutter builds migrate
 /// without losing imported books.
-class StorageService {
+class StorageService
+    implements LibraryRepository, ReaderRepository, PdfReaderRepository {
   StorageService({Directory? documentsDirectory})
     : _providedDocumentsDirectory = documentsDirectory;
 
@@ -145,11 +131,11 @@ class StorageService {
   static Future<void> _libraryMutationQueue = Future<void>.value();
   static final Map<String, Future<void>> _chapterWriteQueues =
       <String, Future<void>>{};
-  static final Map<String, int> _preferenceWriteVersions = <String, int>{};
-  static final Map<String, Future<void>> _preferenceWriteQueues =
-      <String, Future<void>>{};
   static final Set<String> _deletedBookIds = <String>{};
-  static int _nextPreferenceWriteVersion = 0;
+  late final ReaderPreferencesStore _readerPreferences = ReaderPreferencesStore(
+    _deletedBookIds.contains,
+    _deleteManagedFont,
+  );
 
   Future<List<Book>> getBooks() async {
     final prefs = await SharedPreferences.getInstance();
@@ -184,6 +170,7 @@ class StorageService {
 
   /// Loads only shelf metadata. Chapter payloads stay on disk until a book is
   /// opened, keeping startup time and resident memory stable as the shelf grows.
+  @override
   Future<List<Book>> getBookSummaries() async {
     final prefs = await SharedPreferences.getInstance();
     final summaries = <Book>[];
@@ -197,6 +184,7 @@ class StorageService {
     return summaries;
   }
 
+  @override
   Future<Book?> getBook(String bookId) async {
     final prefs = await SharedPreferences.getInstance();
     final metadata = _readBookMetadata(
@@ -242,6 +230,7 @@ class StorageService {
   /// Performs a bounded shelf health check without decoding the full chapter
   /// payload. It catches missing files and obvious interrupted/truncated JSON
   /// while preserving getBookSummaries()'s low-memory startup behavior.
+  @override
   Future<BookAvailability> checkBookAvailability(
     Book book, {
     bool deep = false,
@@ -310,6 +299,7 @@ class StorageService {
     }
   }
 
+  @override
   Future<void> saveBook(Book book) async {
     if (book.isPdf &&
         (book.sourcePath == null ||
@@ -342,10 +332,153 @@ class StorageService {
     });
   }
 
+  /// Replaces one chapter without decoding or rewriting the rest of the book.
+  ///
+  /// A revisioned payload is flushed before the manifest is swapped. The
+  /// manifest is the commit point, so a crash can leave only an unreferenced
+  /// chapter file, never a manifest that points at a half-written payload.
+  @override
+  Future<void> replaceChapter(Book sourceBook, Chapter replacement) async {
+    if (sourceBook.isPdf ||
+        sourceBook.id.isEmpty ||
+        replacement.index < 0 ||
+        replacement.index >= sourceBook.chapterCount ||
+        replacement.title.trim().isEmpty ||
+        replacement.content.trim().isEmpty) {
+      throw const FormatException('章节标题和正文不能为空');
+    }
+    if (_deletedBookIds.contains(sourceBook.id)) {
+      throw StateError('书籍不存在或已删除');
+    }
+
+    final directory = await _chapterDirectory(sourceBook.id);
+    await _enqueueChapterWrite(directory.path, () async {
+      if (!await directory.exists()) {
+        final chapters = List<Chapter>.of(sourceBook.chapters);
+        chapters[replacement.index] = replacement;
+        await _writeChapterDirectory(directory, chapters);
+        return;
+      }
+
+      final manifestFile = await _resolveChapterManifestFile(directory);
+      if (manifestFile == null) {
+        throw const FormatException('章节清单缺失或损坏');
+      }
+      final rawManifest = await manifestFile.readAsString(encoding: utf8);
+      final manifest = await Isolate.run(
+        () => _chapterManifestFromJson(rawManifest),
+      );
+      final rawEntries = manifest['chapters'];
+      if (manifest['version'] != 2 ||
+          rawEntries is! List ||
+          manifest['chapterCount'] is! num ||
+          (manifest['chapterCount'] as num).toInt() != rawEntries.length ||
+          rawEntries.length != sourceBook.chapterCount) {
+        throw const FormatException('章节清单版本或数量不一致');
+      }
+
+      final entries = rawEntries
+          .map((entry) {
+            if (entry is! Map) {
+              throw const FormatException('章节清单条目格式错误');
+            }
+            return Map<String, dynamic>.from(entry);
+          })
+          .toList(growable: false);
+      final oldFileName = entries[replacement.index]['file'];
+      if (oldFileName is! String || !_isStoredChapterFileName(oldFileName)) {
+        throw const FormatException('章节清单条目格式错误');
+      }
+
+      final payload = await Isolate.run(
+        () => jsonEncode(_chapterToJsonMap(replacement)),
+      );
+      final payloadBytes = utf8.encode(payload);
+      final revision = DateTime.now().microsecondsSinceEpoch;
+      final fileName =
+          '${replacement.index.toString().padLeft(6, '0')}-$revision.json';
+      final chaptersDirectory = Directory(p.join(directory.path, 'chapters'));
+      if (!await chaptersDirectory.exists()) {
+        throw const FormatException('章节目录不存在');
+      }
+      final targetFile = File(p.join(chaptersDirectory.path, fileName));
+      await targetFile.writeAsString(payload, encoding: utf8, flush: true);
+
+      entries[replacement.index] = <String, dynamic>{
+        'file': fileName,
+        'bytes': payloadBytes.length,
+        'sha256': sha256.convert(payloadBytes).toString(),
+        'title': replacement.title,
+        if (replacement.volumeTitle != null)
+          'volumeTitle': replacement.volumeTitle,
+        'hasRichContent': replacement.hasRichEpubContent,
+        'richBlockCount': replacement.epubBlockCount,
+        'hasSemanticHeading': replacement.hasSemanticHeading,
+      };
+      final committedManifest = <String, dynamic>{
+        ...manifest,
+        'version': 2,
+        'chapterCount': entries.length,
+        'chapters': entries,
+      };
+      final liveManifest = File(p.join(directory.path, 'manifest.json'));
+      final temporaryManifest = File('${liveManifest.path}.edit.tmp');
+      final backupManifest = File('${liveManifest.path}.edit.bak');
+      await temporaryManifest.writeAsString(
+        jsonEncode(committedManifest),
+        encoding: utf8,
+        flush: true,
+      );
+      if (await backupManifest.exists()) await backupManifest.delete();
+      if (await liveManifest.exists()) {
+        await liveManifest.rename(backupManifest.path);
+      } else if (manifestFile.path != liveManifest.path) {
+        await manifestFile.rename(backupManifest.path);
+      }
+      try {
+        await temporaryManifest.rename(liveManifest.path);
+      } on Object {
+        if (await backupManifest.exists() && !await liveManifest.exists()) {
+          await backupManifest.rename(liveManifest.path);
+        }
+        if (await targetFile.exists()) await targetFile.delete();
+        rethrow;
+      }
+
+      try {
+        if (await backupManifest.exists()) await backupManifest.delete();
+        final oldFile = File(p.join(chaptersDirectory.path, oldFileName));
+        if (oldFile.path != targetFile.path && await oldFile.exists()) {
+          await oldFile.delete();
+        }
+      } on FileSystemException {
+        // The new manifest is authoritative. Stale private files are harmless
+        // because no manifest references them.
+      }
+    });
+
+    // The old statistics describe the pre-edit payload. Clear them in the
+    // same public operation so a process restart between editing and recount
+    // never presents stale values as authoritative.
+    await _enqueueLibraryMutation(() async {
+      final prefs = await SharedPreferences.getInstance();
+      final metadata = _readBookMetadata(prefs);
+      final index = metadata.indexWhere((book) => book['id'] == sourceBook.id);
+      if (index < 0 || _deletedBookIds.contains(sourceBook.id)) {
+        throw StateError('书籍不存在或已删除');
+      }
+      metadata[index].remove('wordCount');
+      metadata[index].remove('chapterWordCounts');
+      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+      await prefs.remove('$_kChapterPrefix${sourceBook.id}');
+    });
+  }
+
   Future<void> renameBook(String bookId, String title) async {
     await updateBookDetails(bookId, title: title);
   }
 
+  @override
   Future<void> updateBookDetails(
     String bookId, {
     required String title,
@@ -379,6 +512,7 @@ class StorageService {
   /// Persists the shelf order without rewriting chapter payloads. Unknown
   /// metadata is retained so a concurrent background update cannot make a book
   /// disappear merely because it was not present in the drag snapshot.
+  @override
   Future<void> saveBookOrder(List<String> bookIds) async {
     final seen = <String>{};
     final requested = bookIds
@@ -408,6 +542,7 @@ class StorageService {
 
   /// Persists per-chapter counts and their sum in one metadata transaction.
   /// A single chapter-body scan is therefore authoritative for both displays.
+  @override
   Future<void> saveWordCounts(
     Book sourceBook,
     List<int> chapterWordCounts,
@@ -441,6 +576,7 @@ class StorageService {
     });
   }
 
+  @override
   Future<void> deleteBook(String bookId) async {
     if (bookId.isEmpty) return;
     _deletedBookIds.add(bookId);
@@ -452,51 +588,7 @@ class StorageService {
           .firstOrNull;
       metadata.removeWhere((book) => book['id'] == bookId);
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
-      final progressKey = '$_kProgressPrefix$bookId';
-      final pdfProgressKey = '$_kPdfProgressPrefix$bookId';
-      final pdfBookmarksKey = '$_kPdfBookmarksPrefix$bookId';
-      final pdfNotesKey = '$_kPdfNotesPrefix$bookId';
-      final pdfDisplayThemeKey = '$_kPdfDisplayThemePrefix$bookId';
-      final tocCollapsedKey = '$_kTocCollapsedPrefix$bookId';
-      final progressVersion = _invalidatePreferenceWrite(progressKey);
-      final pdfProgressVersion = _invalidatePreferenceWrite(pdfProgressKey);
-      final pdfBookmarksVersion = _invalidatePreferenceWrite(pdfBookmarksKey);
-      final pdfNotesVersion = _invalidatePreferenceWrite(pdfNotesKey);
-      final pdfDisplayThemeVersion = _invalidatePreferenceWrite(
-        pdfDisplayThemeKey,
-      );
-      final tocVersion = _invalidatePreferenceWrite(tocCollapsedKey);
-      await _enqueuePreferenceWrite(progressKey, () async {
-        if (_preferenceWriteVersions[progressKey] != progressVersion) return;
-        await prefs.remove(progressKey);
-      });
-      await _enqueuePreferenceWrite(tocCollapsedKey, () async {
-        if (_preferenceWriteVersions[tocCollapsedKey] != tocVersion) return;
-        await prefs.remove(tocCollapsedKey);
-      });
-      await _enqueuePreferenceWrite(pdfProgressKey, () async {
-        if (_preferenceWriteVersions[pdfProgressKey] != pdfProgressVersion) {
-          return;
-        }
-        await prefs.remove(pdfProgressKey);
-      });
-      await _enqueuePreferenceWrite(pdfBookmarksKey, () async {
-        if (_preferenceWriteVersions[pdfBookmarksKey] != pdfBookmarksVersion) {
-          return;
-        }
-        await prefs.remove(pdfBookmarksKey);
-      });
-      await _enqueuePreferenceWrite(pdfNotesKey, () async {
-        if (_preferenceWriteVersions[pdfNotesKey] != pdfNotesVersion) return;
-        await prefs.remove(pdfNotesKey);
-      });
-      await _enqueuePreferenceWrite(pdfDisplayThemeKey, () async {
-        if (_preferenceWriteVersions[pdfDisplayThemeKey] !=
-            pdfDisplayThemeVersion) {
-          return;
-        }
-        await prefs.remove(pdfDisplayThemeKey);
-      });
+      await _readerPreferences.clearBookState(bookId);
       await prefs.remove('$_kChapterPrefix$bookId');
 
       final file = await _chapterFile(bookId);
@@ -530,6 +622,7 @@ class StorageService {
   }
 
   /// Removes files left by an import that failed before its metadata commit.
+  @override
   Future<void> discardImportedBook(Book book) async {
     await deleteBook(book.id);
     await _deleteManagedSourcePath(book.sourcePath);
@@ -538,6 +631,7 @@ class StorageService {
   /// Reclaims private payloads that are no longer referenced by shelf
   /// metadata. A grace period protects imports that wrote their files but have
   /// not committed metadata yet, as well as recoverable interrupted writes.
+  @override
   Future<StorageCleanupResult> collectOrphanedData({
     Duration gracePeriod = const Duration(hours: 24),
     DateTime? referenceTime,
@@ -860,7 +954,10 @@ class StorageService {
   }
 
   Future<List<Chapter>> _loadChapterDirectory(Directory directory) async {
-    final manifestFile = File(p.join(directory.path, 'manifest.json'));
+    final manifestFile = await _resolveChapterManifestFile(directory);
+    if (manifestFile == null) {
+      throw const FormatException('章节清单不存在');
+    }
     final rawManifest = await manifestFile.readAsString(encoding: utf8);
     final manifest = await Isolate.run(
       () => _chapterManifestFromJson(rawManifest),
@@ -894,7 +991,7 @@ class StorageService {
       final fileName = entry['file'];
       final title = entry['title'];
       if (fileName is! String ||
-          !RegExp(r'^\d{6,}\.json$').hasMatch(fileName) ||
+          !_isStoredChapterFileName(fileName) ||
           title is! String ||
           title.trim().isEmpty) {
         throw const FormatException('章节清单条目格式错误');
@@ -1013,286 +1110,74 @@ class StorageService {
     }
   }
 
-  Future<ReadingProgress?> getProgress(String bookId) async {
-    if (_deletedBookIds.contains(bookId)) return null;
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('$_kProgressPrefix$bookId');
-    if (raw == null) return null;
-    try {
-      return ReadingProgress.fromJson(
-        Map<String, dynamic>.from(jsonDecode(raw) as Map),
-      );
-    } on Object {
-      return null;
-    }
-  }
+  @override
+  Future<ReadingProgress?> getProgress(String bookId) =>
+      _readerPreferences.getProgress(bookId);
 
-  Future<void> saveProgress(ReadingProgress progress) async {
-    if (progress.bookId.isEmpty || _deletedBookIds.contains(progress.bookId)) {
-      return;
-    }
-    await _setLatestString(
-      '$_kProgressPrefix${progress.bookId}',
-      jsonEncode(progress.toJson()),
-    );
-  }
+  @override
+  Future<void> saveProgress(ReadingProgress progress) =>
+      _readerPreferences.saveProgress(progress);
 
+  @override
   Future<PdfReadingProgress?> getPdfProgress(
     String bookId, {
     required int pageCount,
     bool migrateLegacy = true,
-  }) async {
-    if (bookId.isEmpty || _deletedBookIds.contains(bookId) || pageCount <= 0) {
-      return null;
-    }
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('$_kPdfProgressPrefix$bookId');
-    if (raw != null) {
-      try {
-        final stored = PdfReadingProgress.fromJson(
-          Map<String, dynamic>.from(jsonDecode(raw) as Map),
-        );
-        if (stored.bookId == bookId) {
-          return PdfReadingProgress(
-            bookId: bookId,
-            pageIndex: stored.pageIndex.clamp(0, pageCount - 1),
-            pageCount: pageCount,
-            lastReadDate: stored.lastReadDate,
-          );
-        }
-      } on Object {
-        // Fall through to the legacy ReadingProgress migration below.
-      }
-    }
+  }) => _readerPreferences.getPdfProgress(
+    bookId,
+    pageCount: pageCount,
+    migrateLegacy: migrateLegacy,
+  );
 
-    final legacy = await getProgress(bookId);
-    if (legacy == null) return null;
-    final migrated = PdfReadingProgress(
-      bookId: bookId,
-      pageIndex: legacy.chapterIndex.clamp(0, pageCount - 1),
-      pageCount: pageCount,
-      lastReadDate: legacy.lastReadDate,
-    );
-    if (migrateLegacy) await savePdfProgress(migrated);
-    return migrated;
-  }
+  @override
+  Future<void> savePdfProgress(PdfReadingProgress progress) =>
+      _readerPreferences.savePdfProgress(progress);
 
-  Future<void> savePdfProgress(PdfReadingProgress progress) async {
-    if (progress.bookId.isEmpty ||
-        progress.pageCount <= 0 ||
-        _deletedBookIds.contains(progress.bookId)) {
-      return;
-    }
-    final safe = PdfReadingProgress(
-      bookId: progress.bookId,
-      pageIndex: progress.pageIndex.clamp(0, progress.pageCount - 1),
-      pageCount: progress.pageCount,
-      lastReadDate: progress.lastReadDate,
-    );
-    await _setLatestString(
-      '$_kPdfProgressPrefix${progress.bookId}',
-      jsonEncode(safe.toJson()),
-    );
-  }
+  @override
+  Future<ReadingProgress?> getShelfProgress(Book book) =>
+      _readerPreferences.getShelfProgress(book);
 
-  Future<ReadingProgress?> getShelfProgress(Book book) async {
-    if (!book.isPdf) return getProgress(book.id);
-    final pageCount = book.pageCount;
-    if (pageCount == null || pageCount <= 0) return null;
-    return (await getPdfProgress(
-      book.id,
-      pageCount: pageCount,
-      migrateLegacy: false,
-    ))?.toShelfProgress();
-  }
+  @override
+  Future<Set<int>> getPdfBookmarks(String bookId, int pageCount) =>
+      _readerPreferences.getPdfBookmarks(bookId, pageCount);
 
-  Future<Set<int>> getPdfBookmarks(String bookId, int pageCount) async {
-    if (bookId.isEmpty || pageCount <= 0 || _deletedBookIds.contains(bookId)) {
-      return <int>{};
-    }
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('$_kPdfBookmarksPrefix$bookId');
-    if (raw == null) return <int>{};
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! List) return <int>{};
-      return decoded
-          .whereType<num>()
-          .map((value) => value.toInt())
-          .where((page) => page >= 0 && page < pageCount)
-          .take(2000)
-          .toSet();
-    } on Object {
-      return <int>{};
-    }
-  }
+  @override
+  Future<void> savePdfBookmarks(String bookId, Set<int> pages, int pageCount) =>
+      _readerPreferences.savePdfBookmarks(bookId, pages, pageCount);
 
-  Future<void> savePdfBookmarks(
-    String bookId,
-    Set<int> pages,
-    int pageCount,
-  ) async {
-    if (bookId.isEmpty || pageCount <= 0 || _deletedBookIds.contains(bookId)) {
-      return;
-    }
-    final safePages =
-        pages.where((page) => page >= 0 && page < pageCount).take(2000).toList()
-          ..sort();
-    await _setLatestString(
-      '$_kPdfBookmarksPrefix$bookId',
-      jsonEncode(safePages),
-    );
-  }
+  @override
+  Future<Map<int, String>> getPdfNotes(String bookId, int pageCount) =>
+      _readerPreferences.getPdfNotes(bookId, pageCount);
 
-  Future<Map<int, String>> getPdfNotes(String bookId, int pageCount) async {
-    if (bookId.isEmpty || pageCount <= 0 || _deletedBookIds.contains(bookId)) {
-      return <int, String>{};
-    }
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('$_kPdfNotesPrefix$bookId');
-    if (raw == null) return <int, String>{};
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return <int, String>{};
-      final notes = <int, String>{};
-      for (final entry in decoded.entries.take(2000)) {
-        final page = int.tryParse(entry.key.toString());
-        final note = entry.value;
-        if (page == null ||
-            page < 0 ||
-            page >= pageCount ||
-            note is! String ||
-            note.trim().isEmpty) {
-          continue;
-        }
-        notes[page] = note.trim().substring(
-          0,
-          math.min(4000, note.trim().length),
-        );
-      }
-      return notes;
-    } on Object {
-      return <int, String>{};
-    }
-  }
-
+  @override
   Future<void> savePdfNotes(
     String bookId,
     Map<int, String> notes,
     int pageCount,
-  ) async {
-    if (bookId.isEmpty || pageCount <= 0 || _deletedBookIds.contains(bookId)) {
-      return;
-    }
-    final safe = <String, String>{};
-    for (final entry in notes.entries.take(2000)) {
-      final note = entry.value.trim();
-      if (entry.key < 0 || entry.key >= pageCount || note.isEmpty) continue;
-      safe[entry.key.toString()] = note.substring(
-        0,
-        math.min(4000, note.length),
-      );
-    }
-    await _setLatestString('$_kPdfNotesPrefix$bookId', jsonEncode(safe));
-  }
+  ) => _readerPreferences.savePdfNotes(bookId, notes, pageCount);
 
-  Future<PdfDisplayTheme> getPdfDisplayTheme(String bookId) async {
-    if (bookId.isEmpty || _deletedBookIds.contains(bookId)) {
-      return PdfDisplayTheme.original;
-    }
-    final prefs = await SharedPreferences.getInstance();
-    final stored = prefs.getString('$_kPdfDisplayThemePrefix$bookId');
-    return PdfDisplayTheme.values.firstWhere(
-      (theme) => theme.name == stored,
-      orElse: () => PdfDisplayTheme.original,
-    );
-  }
+  @override
+  Future<PdfDisplayTheme> getPdfDisplayTheme(String bookId) =>
+      _readerPreferences.getPdfDisplayTheme(bookId);
 
-  Future<void> savePdfDisplayTheme(String bookId, PdfDisplayTheme theme) async {
-    if (bookId.isEmpty || _deletedBookIds.contains(bookId)) return;
-    await _setLatestString('$_kPdfDisplayThemePrefix$bookId', theme.name);
-  }
+  @override
+  Future<void> savePdfDisplayTheme(String bookId, PdfDisplayTheme theme) =>
+      _readerPreferences.savePdfDisplayTheme(bookId, theme);
 
-  Future<Set<String>> getCollapsedTocGroups(String bookId) async {
-    if (bookId.isEmpty) return <String>{};
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('$_kTocCollapsedPrefix$bookId');
-    if (raw == null) return <String>{};
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! List) return <String>{};
-      return decoded
-          .whereType<String>()
-          .map((value) => value.trim())
-          .where((value) => value.isNotEmpty && value.length <= 256)
-          .take(512)
-          .toSet();
-    } on Object {
-      return <String>{};
-    }
-  }
+  @override
+  Future<Set<String>> getCollapsedTocGroups(String bookId) =>
+      _readerPreferences.getCollapsedTocGroups(bookId);
 
-  Future<void> saveCollapsedTocGroups(
-    String bookId,
-    Set<String> groupIds,
-  ) async {
-    if (bookId.isEmpty || _deletedBookIds.contains(bookId)) return;
-    final values =
-        groupIds
-            .map((value) => value.trim())
-            .where((value) => value.isNotEmpty && value.length <= 256)
-            .take(512)
-            .toList()
-          ..sort();
-    await _setLatestString('$_kTocCollapsedPrefix$bookId', jsonEncode(values));
-  }
+  @override
+  Future<void> saveCollapsedTocGroups(String bookId, Set<String> groupIds) =>
+      _readerPreferences.saveCollapsedTocGroups(bookId, groupIds);
 
-  static const _defaultSettings = ReaderSettings();
+  @override
+  Future<ReaderSettings> getSettings() => _readerPreferences.getSettings();
 
-  Future<ReaderSettings> getSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_kSettingsKey);
-    if (raw == null) return _defaultSettings;
-    try {
-      return ReaderSettings.fromJson(
-        Map<String, dynamic>.from(jsonDecode(raw) as Map),
-      );
-    } on Object {
-      return _defaultSettings;
-    }
-  }
-
-  Future<void> saveSettings(ReaderSettings settings) async {
-    final version = ++_nextPreferenceWriteVersion;
-    _preferenceWriteVersions[_kSettingsKey] = version;
-    await _enqueuePreferenceWrite(_kSettingsKey, () async {
-      if (_preferenceWriteVersions[_kSettingsKey] != version) return;
-      final prefs = await SharedPreferences.getInstance();
-      if (_preferenceWriteVersions[_kSettingsKey] != version) return;
-
-      String? previousImportedFontPath;
-      final previousRaw = prefs.getString(_kSettingsKey);
-      if (previousRaw != null) {
-        try {
-          previousImportedFontPath = ReaderSettings.fromJson(
-            Map<String, dynamic>.from(jsonDecode(previousRaw) as Map),
-          ).importedFontPath;
-        } on Object {
-          // A damaged old settings record should not block saving a valid one.
-        }
-      }
-      await _setString(prefs, _kSettingsKey, jsonEncode(settings.toJson()));
-
-      // A newer queued setting may still refer to the previous font. Only the
-      // latest write is allowed to reclaim the old managed file.
-      if (_preferenceWriteVersions[_kSettingsKey] != version) return;
-      final currentImportedFontPath = settings.importedFontPath;
-      if (previousImportedFontPath != null &&
-          previousImportedFontPath != currentImportedFontPath) {
-        await _deleteManagedFont(previousImportedFontPath);
-      }
-    });
-  }
+  @override
+  Future<void> saveSettings(ReaderSettings settings) =>
+      _readerPreferences.saveSettings(settings);
 
   Future<void> _deleteManagedFont(String fontPath) async {
     final root = await getAppDataDirectory();
@@ -1306,6 +1191,7 @@ class StorageService {
     }
   }
 
+  @override
   Future<File> saveImportedFont(String sourcePath, String fileName) async {
     final extension = p.extension(fileName).toLowerCase();
     if (extension != '.ttf' && extension != '.otf') {
@@ -1343,6 +1229,7 @@ class StorageService {
     return source.copy(target.path);
   }
 
+  @override
   Future<File> saveImportedPdf(String sourcePath, String bookId) async {
     final source = File(sourcePath);
     final stat = await source.stat();
@@ -1365,6 +1252,7 @@ class StorageService {
     return temporary.rename(target.path);
   }
 
+  @override
   Future<Directory> getAppDataDirectory() async {
     return _appDataDirectory ??= _createAppDataDirectory();
   }
@@ -1422,25 +1310,6 @@ class StorageService {
     });
   }
 
-  static Future<void> _enqueuePreferenceWrite(
-    String key,
-    Future<void> Function() action,
-  ) {
-    final previous = _preferenceWriteQueues[key] ?? Future<void>.value();
-    final operation = previous.then((_) => action());
-    late final Future<void> safeTail;
-    safeTail = operation.then<void>(
-      (_) {},
-      onError: (Object _, StackTrace _) {},
-    );
-    _preferenceWriteQueues[key] = safeTail;
-    return operation.whenComplete(() {
-      if (identical(_preferenceWriteQueues[key], safeTail)) {
-        _preferenceWriteQueues.remove(key);
-      }
-    });
-  }
-
   static Future<void> _setString(
     SharedPreferences prefs,
     String key,
@@ -1448,23 +1317,6 @@ class StorageService {
   ) async {
     final saved = await prefs.setString(key, value);
     if (!saved) throw FileSystemException('无法保存本地数据', key);
-  }
-
-  static Future<void> _setLatestString(String key, String value) async {
-    final version = ++_nextPreferenceWriteVersion;
-    _preferenceWriteVersions[key] = version;
-    await _enqueuePreferenceWrite(key, () async {
-      if (_preferenceWriteVersions[key] != version) return;
-      final prefs = await SharedPreferences.getInstance();
-      if (_preferenceWriteVersions[key] != version) return;
-      await _setString(prefs, key, value);
-    });
-  }
-
-  static int _invalidatePreferenceWrite(String key) {
-    final version = ++_nextPreferenceWriteVersion;
-    _preferenceWriteVersions[key] = version;
-    return version;
   }
 
   Future<void> _deleteManagedSourcePath(Object? rawSourcePath) async {
@@ -1582,7 +1434,8 @@ Future<bool> _chapterDirectoryLooksPlausible(
     if (!await directory.exists()) return false;
     final chapters = Directory(p.join(directory.path, 'chapters'));
     if (!await chapters.exists()) return false;
-    final manifest = File(p.join(directory.path, 'manifest.json'));
+    final manifest = await _resolveChapterManifestFile(directory);
+    if (manifest == null) return false;
     final stat = await manifest.stat();
     if (stat.type != FileSystemEntityType.file ||
         stat.size < 2 ||
@@ -1616,7 +1469,7 @@ Future<bool> _chapterDirectoryLooksPlausible(
       final fileName = entry['file'];
       final expectedBytes = entry['bytes'];
       if (fileName is! String ||
-          !RegExp(r'^\d{6,}\.json$').hasMatch(fileName) ||
+          !_isStoredChapterFileName(fileName) ||
           expectedBytes is! num ||
           expectedBytes.toInt() < 2) {
         return false;
@@ -1643,6 +1496,34 @@ Future<bool> _chapterDirectoryLooksPlausible(
   } on Object {
     return false;
   }
+}
+
+bool _isStoredChapterFileName(String value) =>
+    RegExp(r'^\d{6,}(?:-[A-Za-z0-9_-]+)?\.json$').hasMatch(value);
+
+/// Recovers the tiny manifest swap used by chapter editing.
+///
+/// The chapter payload is written first, therefore a staged manifest is safe
+/// to promote. If staging never completed, the previous manifest remains the
+/// fallback. Returning a candidate even when rename is unavailable keeps the
+/// book readable on restrictive filesystems.
+Future<File?> _resolveChapterManifestFile(Directory directory) async {
+  final live = File(p.join(directory.path, 'manifest.json'));
+  if (await live.exists()) return live;
+  final staged = File('${live.path}.edit.tmp');
+  final backup = File('${live.path}.edit.bak');
+  // Prefer the last known committed manifest. A background shelf scan can
+  // enter this recovery path during the tiny rename window of an active edit;
+  // promoting the staged manifest there would race the writer's commit.
+  for (final candidate in <File>[backup, staged]) {
+    if (!await candidate.exists()) continue;
+    try {
+      return await candidate.rename(live.path);
+    } on FileSystemException {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 Map<String, dynamic> _chapterManifestFromJson(String raw) {

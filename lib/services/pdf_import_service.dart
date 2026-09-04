@@ -4,14 +4,15 @@ import 'package:path/path.dart' as p;
 import 'package:flutter/services.dart';
 
 import '../models/book.dart';
+import '../repositories/reader_repositories.dart';
 import 'pdf_renderer_service.dart';
-import 'storage_service.dart';
 
 Future<Book> importPdf(
   String sourcePath,
   String fileName,
-  StorageService storage, {
+  ImportedPdfStore storage, {
   String? password,
+  PdfRendererGateway renderer = const PlatformPdfRendererGateway(),
 }) async {
   final source = File(sourcePath);
   final stat = await source.stat();
@@ -24,17 +25,17 @@ Future<Book> importPdf(
   try {
     late final int pageCount;
     if (password != null) {
-      pageCount = await PdfRendererService.unlockPdf(
+      pageCount = await renderer.unlockPdf(
         filePath: managedFile.path,
         password: password,
       );
     } else {
       try {
-        pageCount = await PdfRendererService.getPageCount(managedFile.path);
+        pageCount = await renderer.getPageCount(managedFile.path);
       } on PdfPasswordRequiredException {
         // Permission-only encryption often has an empty user password. Remove
         // that protection locally without bothering the user for a password.
-        pageCount = await PdfRendererService.unlockPdf(
+        pageCount = await renderer.unlockPdf(
           filePath: managedFile.path,
           password: '',
         );

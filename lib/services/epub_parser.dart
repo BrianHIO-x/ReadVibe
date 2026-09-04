@@ -11,7 +11,7 @@ import 'package:path/path.dart' as p;
 import 'package:xml/xml.dart';
 
 import '../models/book.dart';
-import 'storage_service.dart';
+import '../repositories/reader_repositories.dart';
 
 /// Resource limits are grouped so the security boundaries can be exercised by
 /// small fixtures without allocating hundreds of megabytes in tests.
@@ -39,7 +39,7 @@ const _defaultEpubParseLimits = EpubParseLimits();
 Future<Book> parseEpub(
   String filePath,
   String fileName,
-  StorageService storage, {
+  AppDataDirectoryProvider storage, {
   EpubParseLimits limits = _defaultEpubParseLimits,
 }) async {
   final now = DateTime.now();

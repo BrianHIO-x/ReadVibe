@@ -57,6 +57,8 @@ class MainActivity : FlutterActivity() {
         )
     }
 
+    private var bookExporter: BookExportHandler? = null
+
     private val documentExecutor = Executors.newSingleThreadExecutor()
     private val pdfExecutor = Executors.newSingleThreadExecutor()
     private val pdfAnalysisExecutor = Executors.newSingleThreadExecutor()
@@ -119,6 +121,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        bookExporter = BookExportHandler(this, flutterEngine.dartExecutor.binaryMessenger)
         PDFBoxResourceLoader.init(applicationContext)
         incomingFileChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -1016,7 +1019,14 @@ class MainActivity : FlutterActivity() {
         )
     }
 
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (bookExporter?.onActivityResult(requestCode, resultCode, data) == true) return
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
     override fun onDestroy() {
+        bookExporter?.dispose()
+        bookExporter = null
         documentExecutor.shutdownNow()
         pdfExecutor.execute { closePdfSession() }
         pdfExecutor.shutdown()

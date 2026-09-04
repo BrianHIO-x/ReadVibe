@@ -43,15 +43,26 @@ class UpdateCheckResult {
 /// The app is sideloaded, so update checks compare GitHub Releases and hand
 /// the release page to the user's browser. ReadVibe itself never requests APK
 /// installation permission.
-class UpdateService {
+abstract interface class UpdateChecker {
+  Future<UpdateCheckResult> checkForUpdate();
+
+  Future<String> currentVersion();
+}
+
+class UpdateService implements UpdateChecker {
   static const _channel = MethodChannel('com.readvibe.app/app_update');
   static const _apiUrl =
       'https://api.github.com/repos/BrianHIO-x/ReadVibe/releases/latest';
   static const _timeout = Duration(seconds: 12);
 
+  @override
+  Future<String> currentVersion() async =>
+      (await PackageInfo.fromPlatform()).version;
+
   /// Checks the release feed: a newer release when available, up-to-date
   /// when the feed answers with the current version, or an error when the
   /// feed cannot be reached or parsed.
+  @override
   Future<UpdateCheckResult> checkForUpdate() async {
     final client = HttpClient();
     try {

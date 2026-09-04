@@ -6,7 +6,7 @@ import 'dart:isolate';
 import 'package:path/path.dart' as p;
 
 import '../models/book.dart';
-import 'storage_service.dart';
+import '../repositories/reader_repositories.dart';
 
 class BookSearchResult {
   final int chapterIndex;
@@ -59,7 +59,7 @@ class BookSearchService {
   /// Removes files created by older releases. The current search path never
   /// reads or recreates this directory, so interrupted legacy work cannot make
   /// search unavailable after an overlay installation.
-  static Future<void> removeObsoleteData(StorageService storage) {
+  static Future<void> removeObsoleteData(AppDataDirectoryProvider storage) {
     return _obsoleteDataRemoval ??= () async {
       try {
         final root = (await storage.getAppDataDirectory()).absolute;

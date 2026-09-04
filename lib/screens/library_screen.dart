@@ -10,16 +10,15 @@ import '../theme/app_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
 import '../services/font_service.dart';
+import '../repositories/reader_repositories.dart';
+import '../services/book_import_coordinator.dart';
+import '../services/book_export_service.dart';
+import '../models/library_filter.dart';
+import '../widgets/library_search_controls.dart';
 import '../services/storage_service.dart';
-import '../services/txt_parser.dart';
-import '../services/epub_parser.dart';
-import '../services/pdf_import_service.dart';
-import '../services/pdf_renderer_service.dart';
 import '../services/book_search_service.dart';
-import '../services/word_parser.dart';
 import '../services/update_service.dart';
 import '../services/incoming_file_service.dart';
-import '../services/mobi_parser.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../widgets/app_toast.dart';
@@ -33,28 +32,22 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Library / bookshelf screen
 class LibraryScreen extends StatefulWidget {
-  const LibraryScreen({super.key});
+  final LibraryRepository? repository;
+  final UpdateChecker? updateChecker;
+  final BookExporter? exporter;
+
+  const LibraryScreen({
+    super.key,
+    this.repository,
+    this.updateChecker,
+    this.exporter,
+  });
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-enum _BookAction { rename, move, delete }
-
-enum _ShelfFilter { all, recent, unread, txt, epub, kindle, word, pdf }
-
-extension _ShelfFilterInfo on _ShelfFilter {
-  String get label => switch (this) {
-    _ShelfFilter.all => '全部',
-    _ShelfFilter.recent => '最近阅读',
-    _ShelfFilter.unread => '未读',
-    _ShelfFilter.txt => 'TXT',
-    _ShelfFilter.epub => 'EPUB',
-    _ShelfFilter.kindle => 'MOBI/AZW',
-    _ShelfFilter.word => 'Word',
-    _ShelfFilter.pdf => 'PDF',
-  };
-}
+enum _BookAction { rename, move, delete, exportFile }
 
 Offset _centerDragAnchorStrategy(
   Draggable<Object> draggable,
@@ -67,8 +60,12 @@ Offset _centerDragAnchorStrategy(
 
 class _LibraryScreenState extends State<LibraryScreen>
     with TickerProviderStateMixin {
-  final _storage = StorageService();
-  late final _fontService = FontService(_storage);
+  late final LibraryRepository _storage;
+  late final FontService _fontService;
+  late final BookImportCoordinator _bookImporter;
+  late final BookExporter _bookExporter;
+  bool _exporting = false;
+  late final UpdateChecker _updateChecker;
   List<Book> _books = [];
   Map<String, ReadingProgress> _progressMap = {};
   Map<String, BookAvailability> _availabilityMap = {};
@@ -82,9 +79,11 @@ class _LibraryScreenState extends State<LibraryScreen>
   Timer? _storageMaintenanceTimer;
   bool _automaticUpdateAttempted = false;
   bool _storageMaintenanceScheduled = false;
+  String _applicationVersion = '—';
   final _librarySearchController = TextEditingController();
+  final _librarySearchFocus = FocusNode();
   bool _librarySearchVisible = false;
-  _ShelfFilter _shelfFilter = _ShelfFilter.all;
+  ShelfFilter _shelfFilter = ShelfFilter.all;
 
   late final AnimationController _gridEntranceController;
   late final AnimationController _emptyIconController;
@@ -105,6 +104,11 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   void initState() {
     super.initState();
+    _storage = widget.repository ?? StorageService();
+    _fontService = FontService(_storage);
+    _bookImporter = BookImportCoordinator(_storage);
+    _bookExporter = widget.exporter ?? BookExportService();
+    _updateChecker = widget.updateChecker ?? UpdateService();
     _gridEntranceController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 650),
@@ -114,10 +118,23 @@ class _LibraryScreenState extends State<LibraryScreen>
       duration: const Duration(milliseconds: 2400),
     );
     _gridScrollController.addListener(_handleGridScroll);
+    unawaited(_loadApplicationVersion());
     _loadData();
     unawaited(
       IncomingFileService.start(_importIncomingBook, onError: _showError),
     );
+  }
+
+  Future<void> _loadApplicationVersion() async {
+    try {
+      final version = await _updateChecker.currentVersion();
+      if (mounted && version.trim().isNotEmpty) {
+        setState(() => _applicationVersion = version.trim());
+      }
+    } on Object catch (error, stackTrace) {
+      debugPrint('Failed to read application version: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
   }
 
   /// Silent GitHub release check once the shelf has settled. A dismissed
@@ -133,7 +150,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       _automaticUpdateTimer = null;
       _automaticUpdateAttempted = true;
       if (!mounted) return;
-      final result = await UpdateService().checkForUpdate();
+      final result = await _updateChecker.checkForUpdate();
       final info = result.info;
       if (!mounted || !_settings.automaticUpdateChecks || info == null) return;
       final prefs = await SharedPreferences.getInstance();
@@ -194,7 +211,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   /// dismiss window because the user explicitly asked.
   Future<void> _checkUpdateManually() async {
     AppToast.loading(context, '正在检查更新…');
-    final result = await UpdateService().checkForUpdate();
+    final result = await _updateChecker.checkForUpdate();
     if (!mounted) return;
     AppToast.hide(context);
     final info = result.info;
@@ -241,6 +258,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     _storageMaintenanceTimer?.cancel();
     _reorderFocusTimer?.cancel();
     _librarySearchController.dispose();
+    _librarySearchFocus.dispose();
     IncomingFileService.stop();
     _gridScrollController.removeListener(_handleGridScroll);
     _gridScrollController.dispose();
@@ -261,22 +279,22 @@ class _LibraryScreenState extends State<LibraryScreen>
               book.format.name.toLowerCase().contains(query);
           if (!matchesQuery) return false;
           return switch (_shelfFilter) {
-            _ShelfFilter.all => true,
-            _ShelfFilter.recent => _progressMap.containsKey(book.id),
-            _ShelfFilter.unread => !_progressMap.containsKey(book.id),
-            _ShelfFilter.txt => book.format == BookFormat.txt,
-            _ShelfFilter.epub => book.format == BookFormat.epub,
-            _ShelfFilter.kindle =>
+            ShelfFilter.all => true,
+            ShelfFilter.recent => _progressMap.containsKey(book.id),
+            ShelfFilter.unread => !_progressMap.containsKey(book.id),
+            ShelfFilter.txt => book.format == BookFormat.txt,
+            ShelfFilter.epub => book.format == BookFormat.epub,
+            ShelfFilter.kindle =>
               book.format == BookFormat.mobi ||
                   book.format == BookFormat.azw ||
                   book.format == BookFormat.azw3,
-            _ShelfFilter.word =>
+            ShelfFilter.word =>
               book.format == BookFormat.doc || book.format == BookFormat.docx,
-            _ShelfFilter.pdf => book.format == BookFormat.pdf,
+            ShelfFilter.pdf => book.format == BookFormat.pdf,
           };
         })
         .toList(growable: false);
-    if (_shelfFilter == _ShelfFilter.recent) {
+    if (_shelfFilter == ShelfFilter.recent) {
       filtered.sort((first, second) {
         final firstDate = _progressMap[first.id]?.lastReadDate;
         final secondDate = _progressMap[second.id]?.lastReadDate;
@@ -291,12 +309,12 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   bool get _hasShelfQueryOrFilter =>
       _librarySearchController.text.trim().isNotEmpty ||
-      _shelfFilter != _ShelfFilter.all;
+      _shelfFilter != ShelfFilter.all;
 
   void _clearShelfQueryAndFilter() {
     _librarySearchController.clear();
     setState(() {
-      _shelfFilter = _ShelfFilter.all;
+      _shelfFilter = ShelfFilter.all;
       _librarySearchVisible = false;
     });
   }
@@ -373,21 +391,12 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _importBook() async {
-    if (_importing) return;
+    if (_importing || _exporting) return;
     setState(() => _importing = true);
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: [
-          'txt',
-          'epub',
-          'mobi',
-          'azw',
-          'azw3',
-          'docx',
-          'doc',
-          'pdf',
-        ],
+        allowedExtensions: BookImportCoordinator.supportedExtensions,
       );
 
       if (result == null || result.files.isEmpty || !mounted) return;
@@ -406,7 +415,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _importIncomingBook(IncomingBookFile file) async {
-    while (mounted && (_importing || _loading)) {
+    while (mounted && (_importing || _loading || _exporting)) {
       await Future<void>.delayed(const Duration(milliseconds: 160));
     }
     if (!mounted) return;
@@ -425,55 +434,16 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _importBookPath(String path, String fileName) async {
-    Book? importedBook;
-    var metadataSaved = false;
     try {
-      final ext = fileName.toLowerCase();
-      if (ext.endsWith('.epub')) {
-        importedBook = await parseEpub(path, fileName, _storage);
-      } else if (ext.endsWith('.pdf')) {
-        try {
-          importedBook = await importPdf(path, fileName, _storage);
-        } on PdfPasswordRequiredException {
-          final password = await _requestPdfPassword(fileName);
-          if (password == null) return;
-          try {
-            importedBook = await importPdf(
-              path,
-              fileName,
-              _storage,
-              password: password,
-            );
-          } on PdfPasswordRequiredException {
-            throw const FormatException('PDF 密码不正确');
-          }
-        }
-      } else if (ext.endsWith('.txt')) {
-        importedBook = await parseTxt(path, fileName);
-      } else if (ext.endsWith('.mobi') ||
-          ext.endsWith('.azw') ||
-          ext.endsWith('.azw3')) {
-        importedBook = await parseKindleBook(path, fileName);
-      } else if (ext.endsWith('.docx') || ext.endsWith('.doc')) {
-        importedBook = await parseWordDocument(path, fileName, _storage);
-      } else {
-        throw const FormatException(
-          '不支持的文件格式，请选择 TXT、EPUB、MOBI、AZW、AZW3、PDF、DOCX 或 DOC',
-        );
-      }
-      await _storage.saveBook(importedBook);
-      metadataSaved = true;
+      final importedBook = await _bookImporter.importFile(
+        path: path,
+        fileName: fileName,
+        requestPdfPassword: () => _requestPdfPassword(fileName),
+      );
+      if (importedBook == null) return;
       await _loadData();
       _showMessage('「${importedBook.title}」已导入书架');
     } catch (error) {
-      if (!metadataSaved && importedBook != null) {
-        try {
-          await _storage.discardImportedBook(importedBook);
-        } on Object catch (cleanupError, cleanupStack) {
-          debugPrint('Failed to clean an interrupted import: $cleanupError');
-          debugPrintStack(stackTrace: cleanupStack);
-        }
-      }
       _showError(
         error is FormatException && error.message.trim().isNotEmpty
             ? error.message
@@ -774,6 +744,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                         Navigator.of(context).pop();
                         await _checkUpdateManually();
                       },
+                      applicationVersion: _applicationVersion,
                     );
                   },
                 ),
@@ -800,6 +771,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _showBookActions(Book book) async {
+    if (_exporting) return;
     final colors = AppTheme.getReaderTheme(
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
@@ -849,15 +821,28 @@ class _LibraryScreenState extends State<LibraryScreen>
               const SizedBox(height: AppSpacing.md),
               ListTile(
                 leading: Icon(Icons.edit_outlined, color: colors.accent),
-                title: Text('修改书籍名称', style: TextStyle(color: colors.text)),
+                title: Text('修改信息', style: TextStyle(color: colors.text)),
                 subtitle: Text(
-                  '只修改书架显示名称，不改动原文件',
+                  '修改书名和作者',
                   style: TextStyle(color: colors.secondary),
                 ),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(AppRadius.md),
                 ),
                 onTap: () => Navigator.pop(sheetContext, _BookAction.rename),
+              ),
+              ListTile(
+                leading: Icon(Icons.save_alt_rounded, color: colors.accent),
+                title: Text('导出文件', style: TextStyle(color: colors.text)),
+                subtitle: Text(
+                  book.isPdf ? '导出当前 PDF 副本' : '导出 UTF-8 TXT，包含已保存的编辑内容',
+                  style: TextStyle(color: colors.secondary),
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                ),
+                onTap: () =>
+                    Navigator.pop(sheetContext, _BookAction.exportFile),
               ),
               const SizedBox(height: AppSpacing.xs),
               Padding(
@@ -894,6 +879,8 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
     if (!mounted || action == null) return;
     switch (action) {
+      case _BookAction.exportFile:
+        await _exportBook(book);
       case _BookAction.rename:
         await _renameBook(book);
       case _BookAction.move:
@@ -948,6 +935,36 @@ class _LibraryScreenState extends State<LibraryScreen>
         ),
       ),
     );
+  }
+
+  Future<void> _exportBook(Book summary) async {
+    if (_exporting || _importing || _openingBook) return;
+    setState(() => _exporting = true);
+    AppToast.loading(context, '正在准备导出文件…');
+    try {
+      final book = await _storage.getBook(summary.id);
+      if (!mounted) return;
+      if (book == null) throw const FormatException('书籍已不存在或正文无法读取');
+      final saved = await _bookExporter.exportBook(book);
+      if (!mounted) return;
+      AppToast.hide(context);
+      _showMessage(saved ? '「${book.title}」已导出' : '已取消导出');
+    } on Object catch (error, stackTrace) {
+      debugPrint('Book export failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (mounted) {
+        AppToast.hide(context);
+        _showError(
+          error is FormatException
+              ? error.message.toString()
+              : error is PlatformException && error.message != null
+              ? error.message!
+              : '导出失败，请检查存储空间与保存位置',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
   }
 
   Future<void> _renameBook(Book book) async {
@@ -1264,7 +1281,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _openBookFromCover(Book book, GlobalKey coverKey) async {
-    if (_openingBook) return;
+    if (_openingBook || _exporting) return;
     final availability =
         _availabilityMap[book.id] ?? BookAvailability.available;
     if (availability.blocksOpening) {
@@ -1394,7 +1411,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     return Padding(
       padding: _reorderMode
           ? const EdgeInsets.fromLTRB(12, 2, 12, 2)
-          : const EdgeInsets.fromLTRB(20, AppSpacing.lg, 20, AppSpacing.md),
+          : const EdgeInsets.fromLTRB(16, AppSpacing.lg, 16, AppSpacing.md),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1415,27 +1432,30 @@ class _LibraryScreenState extends State<LibraryScreen>
                 ),
               ),
               const SizedBox(width: AppSpacing.sm),
-              AnimatedSwitcher(
-                duration: AppMotion.fast,
-                transitionBuilder: (child, animation) => SlideTransition(
-                  position: Tween<Offset>(
-                    begin: const Offset(0, 0.18),
-                    end: Offset.zero,
-                  ).animate(animation),
-                  child: FadeTransition(opacity: animation, child: child),
-                ),
-                child: Text(
-                  _reorderMode ? '调整顺序' : '书架',
-                  key: ValueKey(_reorderMode),
-                  style: TextStyle(
-                    fontSize: _reorderMode ? 20 : 24,
-                    fontWeight: FontWeight.w700,
-                    color: colors.text,
-                    letterSpacing: -0.3,
+              Expanded(
+                child: AnimatedSwitcher(
+                  duration: AppMotion.fast,
+                  transitionBuilder: (child, animation) => SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0, 0.18),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: FadeTransition(opacity: animation, child: child),
+                  ),
+                  child: Text(
+                    _reorderMode ? '调整顺序' : '书架',
+                    key: ValueKey(_reorderMode),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: _reorderMode ? 20 : 24,
+                      fontWeight: FontWeight.w700,
+                      color: colors.text,
+                      letterSpacing: -0.3,
+                    ),
                   ),
                 ),
               ),
-              const Spacer(),
               if (!_reorderMode) ...[
                 IconButton(
                   tooltip: '搜索书架',
@@ -1443,6 +1463,14 @@ class _LibraryScreenState extends State<LibraryScreen>
                     setState(
                       () => _librarySearchVisible = !_librarySearchVisible,
                     );
+                    if (_librarySearchVisible) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (mounted && _librarySearchVisible)
+                          _librarySearchFocus.requestFocus();
+                      });
+                    } else {
+                      _librarySearchFocus.unfocus();
+                    }
                   },
                   icon: Icon(
                     _librarySearchVisible
@@ -1451,39 +1479,10 @@ class _LibraryScreenState extends State<LibraryScreen>
                     color: colors.secondary,
                   ),
                 ),
-                PopupMenuButton<_ShelfFilter>(
-                  tooltip: '筛选书架',
-                  initialValue: _shelfFilter,
+                LibraryFilterButton(
+                  filter: _shelfFilter,
+                  colors: colors,
                   onSelected: (value) => setState(() => _shelfFilter = value),
-                  icon: Icon(
-                    _shelfFilter == _ShelfFilter.all
-                        ? Icons.filter_list_rounded
-                        : Icons.filter_list_alt,
-                    color: _shelfFilter == _ShelfFilter.all
-                        ? colors.secondary
-                        : colors.accent,
-                  ),
-                  itemBuilder: (_) => [
-                    for (final filter in _ShelfFilter.values)
-                      PopupMenuItem<_ShelfFilter>(
-                        value: filter,
-                        child: Row(
-                          children: [
-                            SizedBox(
-                              width: 24,
-                              child: filter == _shelfFilter
-                                  ? Icon(
-                                      Icons.check_rounded,
-                                      size: 18,
-                                      color: colors.accent,
-                                    )
-                                  : null,
-                            ),
-                            Text(filter.label),
-                          ],
-                        ),
-                      ),
-                  ],
                 ),
               ],
               AnimatedSwitcher(
@@ -1508,7 +1507,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                       )
                     : ElevatedButton.icon(
                         key: const ValueKey('import-book'),
-                        onPressed: _importing ? null : _importBook,
+                        onPressed: _importing || _exporting
+                            ? null
+                            : _importBook,
                         icon: Icon(
                           _importing ? Icons.hourglass_empty : Icons.add,
                           size: 18,
@@ -1567,7 +1568,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             curve: AppMotion.standard,
             child:
                 !_reorderMode &&
-                    (_librarySearchVisible || _shelfFilter != _ShelfFilter.all)
+                    (_librarySearchVisible || _hasShelfQueryOrFilter)
                 ? Padding(
                     padding: const EdgeInsets.fromLTRB(
                       AppSpacing.sm,
@@ -1575,47 +1576,14 @@ class _LibraryScreenState extends State<LibraryScreen>
                       AppSpacing.sm,
                       0,
                     ),
-                    child: TextField(
+                    child: LibrarySearchControls(
                       controller: _librarySearchController,
-                      autofocus: _librarySearchVisible,
-                      onChanged: (_) => setState(() {}),
-                      style: TextStyle(color: colors.text, fontSize: 14),
-                      decoration: InputDecoration(
-                        hintText: '搜索书名、作者或格式',
-                        prefixIcon: Icon(
-                          Icons.search_rounded,
-                          color: colors.secondary,
-                        ),
-                        suffixIcon: _librarySearchController.text.isEmpty
-                            ? (_shelfFilter == _ShelfFilter.all
-                                  ? null
-                                  : Padding(
-                                      padding: const EdgeInsets.only(right: 8),
-                                      child: Chip(
-                                        label: Text(_shelfFilter.label),
-                                        visualDensity: VisualDensity.compact,
-                                      ),
-                                    ))
-                            : IconButton(
-                                tooltip: '清除搜索',
-                                onPressed: () {
-                                  _librarySearchController.clear();
-                                  setState(() {});
-                                },
-                                icon: const Icon(Icons.close_rounded),
-                              ),
-                        filled: true,
-                        fillColor: colors.headerBg,
-                        isDense: true,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(AppRadius.pill),
-                          borderSide: BorderSide(color: colors.border),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(AppRadius.pill),
-                          borderSide: BorderSide(color: colors.border),
-                        ),
-                      ),
+                      focusNode: _librarySearchFocus,
+                      filter: _shelfFilter,
+                      colors: colors,
+                      onChanged: () => setState(() {}),
+                      onClearFilter: () =>
+                          setState(() => _shelfFilter = ShelfFilter.all),
                     ),
                   )
                 : const SizedBox.shrink(),

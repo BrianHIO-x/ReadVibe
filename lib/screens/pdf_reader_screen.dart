@@ -8,6 +8,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/book.dart';
 import '../models/reader_settings.dart';
+import '../repositories/reader_repositories.dart';
 import '../services/pdf_renderer_service.dart';
 import '../services/book_search_service.dart';
 import '../services/storage_service.dart';
@@ -18,15 +19,23 @@ import '../widgets/book_search_sheet.dart';
 
 class PdfReaderScreen extends StatefulWidget {
   final Book book;
+  final PdfReaderRepository? repository;
+  final PdfRendererGateway? renderer;
 
-  const PdfReaderScreen({super.key, required this.book});
+  const PdfReaderScreen({
+    super.key,
+    required this.book,
+    this.repository,
+    this.renderer,
+  });
 
   @override
   State<PdfReaderScreen> createState() => _PdfReaderScreenState();
 }
 
 class _PdfReaderScreenState extends State<PdfReaderScreen> {
-  final _storage = StorageService();
+  late final PdfReaderRepository _storage;
+  late final PdfRendererGateway _renderer;
   final Map<String, Future<String>> _renderTasks = <String, Future<String>>{};
   final Map<int, TransformationController> _transformControllers =
       <int, TransformationController>{};
@@ -49,6 +58,8 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   @override
   void initState() {
     super.initState();
+    _storage = widget.repository ?? StorageService();
+    _renderer = widget.renderer ?? const PlatformPdfRendererGateway();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     unawaited(_setWakelock(true));
     _loadProgress();
@@ -75,9 +86,11 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
         _storage.getPdfBookmarks(widget.book.id, _pageCount),
         _storage.getPdfNotes(widget.book.id, _pageCount),
         _storage.getPdfDisplayTheme(widget.book.id),
-        PdfRendererService.getTextAnnotations(
-          sourcePath,
-        ).catchError((Object _, StackTrace _) => const <PdfTextAnnotation>[]),
+        _renderer
+            .getTextAnnotations(sourcePath)
+            .catchError(
+              (Object _, StackTrace _) => const <PdfTextAnnotation>[],
+            ),
       ]);
       progress = values[0] as PdfReadingProgress?;
       bookmarks = values[1] as Set<int>;
@@ -377,7 +390,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     final sourcePath = _sourcePath;
     if (sourcePath != null) {
       try {
-        await PdfRendererService.syncTextNote(
+        await _renderer.syncTextNote(
           filePath: sourcePath,
           pageIndex: _currentPage,
           noteId: 'ReadVibe:${widget.book.id}:$_currentPage',
@@ -401,7 +414,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   Future<List<BookSearchResult>> _searchPdf(String query) async {
     final sourcePath = _sourcePath;
     if (sourcePath == null) return const <BookSearchResult>[];
-    final results = await PdfRendererService.searchText(
+    final results = await _renderer.searchText(
       filePath: sourcePath,
       query: query,
     );
@@ -429,7 +442,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     }
     final results = <BookSearchResult>[];
     for (var pageIndex = 0; pageIndex < _pageCount; pageIndex++) {
-      final source = await PdfRendererService.recognizePageText(
+      final source = await _renderer.recognizePageText(
         filePath: sourcePath,
         pageIndex: pageIndex,
       );
@@ -506,7 +519,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     _autoHideTimer?.cancel();
     var text = '';
     try {
-      text = await PdfRendererService.recognizePageText(
+      text = await _renderer.recognizePageText(
         filePath: sourcePath,
         pageIndex: _currentPage,
       );
@@ -624,7 +637,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
               const Divider(height: 1, color: Colors.white12),
               Expanded(
                 child: FutureBuilder<List<PdfOutlineEntry>>(
-                  future: PdfRendererService.getOutline(sourcePath),
+                  future: _renderer.getOutline(sourcePath),
                   builder: (context, snapshot) {
                     if (snapshot.hasError) {
                       return const Center(
@@ -723,7 +736,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     late final Future<String> task;
     task = () async {
       try {
-        return await PdfRendererService.renderPage(
+        return await _renderer.renderPage(
           filePath: sourcePath,
           pageIndex: pageIndex,
           widthPx: normalizedWidth,

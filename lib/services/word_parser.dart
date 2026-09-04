@@ -8,7 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:xml/xml.dart';
 
 import '../models/book.dart';
-import 'storage_service.dart';
+import '../repositories/reader_repositories.dart';
 import 'txt_parser.dart';
 
 const _documentChannel = MethodChannel('com.readvibe.app/document_parser');
@@ -22,7 +22,7 @@ const _maxDocumentXmlBytes = 96 * 1024 * 1024;
 Future<Book> parseWordDocument(
   String filePath,
   String fileName,
-  StorageService storage,
+  AppDataDirectoryProvider storage,
 ) async {
   final extension = fileName.toLowerCase();
   if (extension.endsWith('.docx')) {

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 /// selection-area widgets.
 class ReaderSelectionController {
   final ValueNotifier<bool> active = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> dragging = ValueNotifier<bool>(false);
   final ValueNotifier<bool> blocked = ValueNotifier<bool>(false);
 
   void setBlocked(bool value) {
@@ -11,7 +12,10 @@ class ReaderSelectionController {
   }
 
   void dispose() {
+    dragging.value = false;
+    active.value = false;
     active.dispose();
+    dragging.dispose();
     blocked.dispose();
   }
 }

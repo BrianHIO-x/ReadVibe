@@ -1,6 +1,18 @@
-part of '../reader_screen.dart';
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 
-class _SimulationLayoutSignature {
+import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+
+import '../../controllers/reader_pagination_controller.dart';
+import '../../models/reader_settings.dart';
+import '../../theme/app_theme.dart';
+
+const _simulationPageExtentTolerance = 0.01;
+
+class SimulationLayoutSignature {
   final double contentWidth;
   final double fontSize;
   final double lineHeight;
@@ -10,7 +22,7 @@ class _SimulationLayoutSignature {
   final FontWeight fontWeight;
   final ReaderParagraphSpacing paragraphSpacing;
 
-  _SimulationLayoutSignature({
+  SimulationLayoutSignature({
     required this.contentWidth,
     required ReaderSettings settings,
   }) : fontSize = settings.fontSize,
@@ -21,7 +33,7 @@ class _SimulationLayoutSignature {
        fontWeight = settings.effectiveFontWeight,
        paragraphSpacing = settings.paragraphSpacing;
 
-  bool matches(_SimulationLayoutSignature other) {
+  bool matches(SimulationLayoutSignature other) {
     return contentWidth == other.contentWidth &&
         fontSize == other.fontSize &&
         lineHeight == other.lineHeight &&
@@ -38,11 +50,11 @@ class _SimulationLayoutSignature {
 /// extrapolates unseen children from the currently visible average; a one-page
 /// overestimate at the chapter tail makes a forward turn target a phantom page
 /// and then clamp back to the same visible page when the real tail is laid out.
-class _ExactScrollExtentSliverChildBuilderDelegate
+class ExactScrollExtentSliverChildBuilderDelegate
     extends SliverChildBuilderDelegate {
   final double exactScrollExtent;
 
-  _ExactScrollExtentSliverChildBuilderDelegate(
+  ExactScrollExtentSliverChildBuilderDelegate(
     super.builder, {
     required int childCount,
     required double exactScrollExtent,
@@ -60,27 +72,27 @@ class _ExactScrollExtentSliverChildBuilderDelegate
   ) => exactScrollExtent;
 }
 
-class _SimulationPageTarget {
+class SimulationPageTarget {
   final int chapterIndex;
   final double offset;
   final double progress;
   final bool goingNext;
 
-  const _SimulationPageTarget({
+  const SimulationPageTarget({
     required this.chapterIndex,
     required this.offset,
     required this.progress,
     required this.goingNext,
   });
 
-  bool matches(_SimulationPageTarget other) {
+  bool matches(SimulationPageTarget other) {
     return chapterIndex == other.chapterIndex &&
         goingNext == other.goingNext &&
         (offset - other.offset).abs() < 0.5;
   }
 }
 
-double _fullViewportMaxScrollExtent(
+double fullViewportMaxScrollExtent(
   double rawMaxScrollExtent,
   double viewportDimension,
 ) => ReaderPaginationController.fullViewportMaxScrollExtent(
@@ -93,8 +105,8 @@ double _fullViewportMaxScrollExtent(
 /// pages. The added range is blank paper after the real chapter content, so
 /// the final page starts at the next exact viewport boundary instead of
 /// overlapping the preceding page to bottom-align a short remainder.
-class _FullViewportPagingScrollController extends ScrollController {
-  _FullViewportPagingScrollController({super.initialScrollOffset})
+class FullViewportPagingScrollController extends ScrollController {
+  FullViewportPagingScrollController({super.initialScrollOffset})
     : super(keepScrollOffset: false);
 
   @override
@@ -132,7 +144,7 @@ class _FullViewportPagingScrollPosition extends ScrollPositionWithSingleContext
   bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
     final applied = super.applyContentDimensions(
       minScrollExtent,
-      _fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension),
+      fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension),
     );
     _schedulePageGridRealign();
     return applied;
@@ -185,18 +197,19 @@ mixin _PageGridRealignMixin on ScrollPositionWithSingleContext {
 
 /// Separates direct reader scrolling from Flutter's selection edge scroller.
 ///
-/// Once a non-empty selection exists, a finger dragging the underlying
-/// Scrollable must not compete with the selection handle for the same pointer.
-/// Chapter and continuous modes still allow programmatic [animateTo] calls so
-/// Flutter can extend the selection at the viewport edge. Simulation mode adds
+/// A retained selection allows normal scrolling; an active selection gesture
+/// owns the viewport and blocks direct offsets and flings.
+/// Programmatic selection-edge scrolling remains available. Simulation keeps
 /// the stricter finite-page lock and rejects every pixel mutation.
-class _SelectionAwareScrollController extends ScrollController {
+class SelectionAwareScrollController extends ScrollController {
   final ValueListenable<bool> selectionActive;
+  final ValueListenable<bool> selectionDragging;
   final bool Function() freezeSelectionViewport;
   final bool paginateToFullViewports;
 
-  _SelectionAwareScrollController({
+  SelectionAwareScrollController({
     required this.selectionActive,
+    required this.selectionDragging,
     required this.freezeSelectionViewport,
     required this.paginateToFullViewports,
     super.initialScrollOffset,
@@ -216,6 +229,7 @@ class _SelectionAwareScrollController extends ScrollController {
       keepScrollOffset: keepScrollOffset,
       debugLabel: debugLabel,
       selectionActive: selectionActive,
+      selectionDragging: selectionDragging,
       viewportIsFrozen: () =>
           selectionActive.value && freezeSelectionViewport(),
       paginateToFullViewports: paginateToFullViewports,
@@ -226,6 +240,7 @@ class _SelectionAwareScrollController extends ScrollController {
 class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext
     with _PageGridRealignMixin {
   final ValueListenable<bool> selectionActive;
+  final ValueListenable<bool> selectionDragging;
   final bool Function() viewportIsFrozen;
   final bool paginateToFullViewports;
   Completer<void>? _frozenAnimationCompleter;
@@ -234,6 +249,7 @@ class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext
     required super.physics,
     required super.context,
     required this.selectionActive,
+    required this.selectionDragging,
     required this.viewportIsFrozen,
     required this.paginateToFullViewports,
     super.oldPosition,
@@ -242,6 +258,7 @@ class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext
     super.debugLabel,
   }) {
     selectionActive.addListener(_handleSelectionActivityChanged);
+    selectionDragging.addListener(_handleSelectionDragChanged);
   }
 
   @override
@@ -252,7 +269,7 @@ class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext
     final applied = super.applyContentDimensions(
       minScrollExtent,
       paginateToFullViewports
-          ? _fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension)
+          ? fullViewportMaxScrollExtent(maxScrollExtent, viewportDimension)
           : maxScrollExtent,
     );
     _schedulePageGridRealign();
@@ -260,8 +277,20 @@ class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext
   }
 
   void _handleSelectionActivityChanged() {
+    if (selectionActive.value && activity?.isScrolling == true) {
+      // Stop pre-existing inertia as selection takes ownership of the viewport.
+      // Blocking drag deltas alone leaves ballistic motion running underneath.
+      goIdle();
+    }
     if (!viewportIsFrozen()) _releaseFrozenAnimation();
   }
+
+  void _handleSelectionDragChanged() {
+    if (selectionDragging.value && activity?.isScrolling == true) goIdle();
+  }
+
+  bool get _blocksDirectScrolling =>
+      selectionDragging.value || viewportIsFrozen();
 
   void _releaseFrozenAnimation() {
     final completer = _frozenAnimationCompleter;
@@ -291,14 +320,24 @@ class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext
 
   @override
   void applyUserOffset(double delta) {
-    if (selectionActive.value) return;
+    if (_blocksDirectScrolling) return;
     super.applyUserOffset(delta);
   }
 
   @override
   void pointerScroll(double delta) {
-    if (selectionActive.value) return;
+    if (_blocksDirectScrolling) return;
     super.pointerScroll(delta);
+  }
+
+  @override
+  void goBallistic(double velocity) {
+    if (_blocksDirectScrolling) {
+      // A selection gesture must not turn its release into a reading fling.
+      goIdle();
+      return;
+    }
+    super.goBallistic(velocity);
   }
 
   @override
@@ -323,68 +362,271 @@ class _SelectionAwareScrollPosition extends ScrollPositionWithSingleContext
   @override
   void dispose() {
     selectionActive.removeListener(_handleSelectionActivityChanged);
+    selectionDragging.removeListener(_handleSelectionDragChanged);
     _releaseFrozenAnimation();
     super.dispose();
   }
 }
 
-class _ReadingTextAnchor {
+class ReadingTextAnchor {
   final int chapterIndex;
   final int paragraphIndex;
   final int characterOffset;
 
-  const _ReadingTextAnchor({
+  const ReadingTextAnchor({
     required this.chapterIndex,
     required this.paragraphIndex,
     required this.characterOffset,
   });
 }
 
-class _ScrollSnapshot {
+class ScrollSnapshot {
   final double offset;
   final double progress;
 
-  const _ScrollSnapshot({required this.offset, required this.progress});
+  const ScrollSnapshot({required this.offset, required this.progress});
 }
 
-enum _StraightPaperPaintLayer { base, lighting }
+class SmoothTurnPages extends StatelessWidget {
+  final double width;
+  final double dragOffset;
+  final Widget currentPage;
+  final Widget? previousPage;
+  final Widget? nextPage;
+  final Widget? keepAlivePreviousPage;
+  final Widget? keepAliveNextPage;
 
-class _StraightLeafFrontClipper extends CustomClipper<Path> {
+  const SmoothTurnPages({
+    super.key,
+    required this.width,
+    required this.dragOffset,
+    required this.currentPage,
+    required this.previousPage,
+    required this.nextPage,
+    this.keepAlivePreviousPage,
+    this.keepAliveNextPage,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        if (keepAlivePreviousPage != null &&
+            !identical(keepAlivePreviousPage, previousPage))
+          Offstage(child: keepAlivePreviousPage!),
+        if (keepAliveNextPage != null &&
+            !identical(keepAliveNextPage, nextPage))
+          Offstage(child: keepAliveNextPage!),
+        if (previousPage != null)
+          KeyedSubtree(
+            key: const ValueKey('previous-page'),
+            child: Transform.translate(
+              offset: Offset(dragOffset - width, 0),
+              child: _inactivePage(previousPage!),
+            ),
+          ),
+        if (nextPage != null)
+          KeyedSubtree(
+            key: const ValueKey('next-page'),
+            child: Transform.translate(
+              offset: Offset(dragOffset + width, 0),
+              child: _inactivePage(nextPage!),
+            ),
+          ),
+        KeyedSubtree(
+          key: const ValueKey('current-page'),
+          child: Transform.translate(
+            offset: Offset(dragOffset, 0),
+            child: currentPage,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class StraightBookTurnPages extends StatelessWidget {
+  final double width;
+  final double dragOffset;
+  final Widget currentPage;
+  final Widget? previousPage;
+  final Widget? nextPage;
+  final Widget? paperBackPage;
+  final ReaderThemeColors themeColors;
+  final Widget? keepAlivePreviousPage;
+  final Widget? keepAliveNextPage;
+  final ui.Image? pageTurnSnapshot;
+  final ui.Image? reversePageTurnSnapshot;
+
+  const StraightBookTurnPages({
+    super.key,
+    required this.width,
+    required this.dragOffset,
+    required this.currentPage,
+    required this.previousPage,
+    required this.nextPage,
+    required this.paperBackPage,
+    required this.themeColors,
+    required this.pageTurnSnapshot,
+    required this.reversePageTurnSnapshot,
+    this.keepAlivePreviousPage,
+    this.keepAliveNextPage,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = (dragOffset.abs() / width).clamp(0.0, 1.0);
+    final goingNext = dragOffset <= 0;
+    final targetPage = goingNext ? nextPage : previousPage;
+    final hasTarget = progress > 0.001 && targetPage != null;
+    if (!hasTarget) {
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          if (previousPage != null) Offstage(child: previousPage!),
+          if (nextPage != null) Offstage(child: nextPage!),
+          currentPage,
+        ],
+      );
+    }
+    final resolvedTargetPage = targetPage;
+    final leafProgress = goingNext ? progress : 1 - progress;
+    final geometry = StraightLeafGeometry.calculate(
+      size: Size(width, 1),
+      progress: leafProgress,
+    );
+    final movingPage = goingNext ? currentPage : resolvedTargetPage;
+    final paperBackSnapshot = goingNext
+        ? pageTurnSnapshot
+        : reversePageTurnSnapshot;
+    final paperBackSource = paperBackSnapshot != null
+        ? RawImage(
+            image: paperBackSnapshot,
+            fit: BoxFit.fill,
+            filterQuality: FilterQuality.high,
+          )
+        : paperBackPage;
+    final inkTransmission = themeColors.background.computeLuminance() < 0.25
+        ? 0.46
+        : 0.38;
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (keepAlivePreviousPage != null &&
+            !identical(keepAlivePreviousPage, resolvedTargetPage))
+          Offstage(child: keepAlivePreviousPage!),
+        if (keepAliveNextPage != null &&
+            !identical(keepAliveNextPage, resolvedTargetPage))
+          Offstage(child: keepAliveNextPage!),
+        if (goingNext)
+          KeyedSubtree(
+            key: const ValueKey('physical-next-page'),
+            child: _inactivePage(resolvedTargetPage),
+          )
+        else
+          KeyedSubtree(
+            key: const ValueKey('physical-current-page-base'),
+            child: currentPage,
+          ),
+        KeyedSubtree(
+          key: ValueKey(
+            goingNext
+                ? 'physical-forward-sheet'
+                : 'physical-reversed-forward-sheet',
+          ),
+          child: ClipPath(
+            clipper: StraightLeafFrontClipper(progress: leafProgress),
+            child: goingNext ? movingPage : _inactivePage(movingPage),
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: CustomPaint(
+              painter: StraightPaperPainter(
+                progress: leafProgress,
+                pageColor: themeColors.background,
+                layer: StraightPaperPaintLayer.base,
+              ),
+            ),
+          ),
+        ),
+        if (paperBackSource != null)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: ClipPath(
+                clipper: StraightLeafBackClipper(progress: leafProgress),
+                child: Transform.translate(
+                  offset: Offset(geometry.creaseX * 2 - width, 0),
+                  child: Transform.flip(
+                    flipX: true,
+                    child: Opacity(
+                      opacity: inkTransmission,
+                      child: _inactivePage(paperBackSource),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: CustomPaint(
+              painter: StraightPaperPainter(
+                progress: leafProgress,
+                pageColor: themeColors.background,
+                layer: StraightPaperPaintLayer.lighting,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+Widget _inactivePage(Widget child) {
+  return ExcludeSemantics(child: IgnorePointer(child: child));
+}
+
+enum StraightPaperPaintLayer { base, lighting }
+
+class StraightLeafFrontClipper extends CustomClipper<Path> {
   final double progress;
 
-  const _StraightLeafFrontClipper({required this.progress});
+  const StraightLeafFrontClipper({required this.progress});
 
   @override
   Path getClip(Size size) =>
-      _StraightLeafGeometry.calculate(size: size, progress: progress).frontPath;
+      StraightLeafGeometry.calculate(size: size, progress: progress).frontPath;
 
   @override
-  bool shouldReclip(covariant _StraightLeafFrontClipper oldClipper) {
+  bool shouldReclip(covariant StraightLeafFrontClipper oldClipper) {
     return oldClipper.progress != progress;
   }
 }
 
-class _StraightLeafBackClipper extends CustomClipper<Path> {
+class StraightLeafBackClipper extends CustomClipper<Path> {
   final double progress;
 
-  const _StraightLeafBackClipper({required this.progress});
+  const StraightLeafBackClipper({required this.progress});
 
   @override
   Path getClip(Size size) =>
-      _StraightLeafGeometry.calculate(size: size, progress: progress).backPath;
+      StraightLeafGeometry.calculate(size: size, progress: progress).backPath;
 
   @override
-  bool shouldReclip(covariant _StraightLeafBackClipper oldClipper) {
+  bool shouldReclip(covariant StraightLeafBackClipper oldClipper) {
     return oldClipper.progress != progress;
   }
 }
 
-class _StraightPaperPainter extends CustomPainter {
+class StraightPaperPainter extends CustomPainter {
   final double progress;
   final Color pageColor;
-  final _StraightPaperPaintLayer layer;
+  final StraightPaperPaintLayer layer;
 
-  const _StraightPaperPainter({
+  const StraightPaperPainter({
     required this.progress,
     required this.pageColor,
     required this.layer,
@@ -395,7 +637,7 @@ class _StraightPaperPainter extends CustomPainter {
     if (size.isEmpty) return;
     final p = progress.clamp(0.0, 1.0).toDouble();
     if (p <= 0 || p >= 1) return;
-    final geometry = _StraightLeafGeometry.calculate(size: size, progress: p);
+    final geometry = StraightLeafGeometry.calculate(size: size, progress: p);
     final strength = geometry.foldStrength;
     final visibleBounds = geometry.backPath.getBounds().intersect(
       Offset.zero & size,
@@ -403,7 +645,7 @@ class _StraightPaperPainter extends CustomPainter {
     if (visibleBounds.width <= 0.1) return;
 
     final isDarkPage = pageColor.computeLuminance() < 0.25;
-    if (layer == _StraightPaperPaintLayer.base) {
+    if (layer == StraightPaperPaintLayer.base) {
       canvas.drawShadow(
         geometry.backPath,
         Colors.black.withValues(alpha: 0.30 * strength),
@@ -459,21 +701,21 @@ class _StraightPaperPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _StraightPaperPainter oldDelegate) {
+  bool shouldRepaint(covariant StraightPaperPainter oldDelegate) {
     return oldDelegate.progress != progress ||
         oldDelegate.pageColor != pageColor ||
         oldDelegate.layer != layer;
   }
 }
 
-class _StraightLeafGeometry {
+class StraightLeafGeometry {
   final Path frontPath;
   final Path backPath;
   final double creaseX;
   final double outerEdgeX;
   final double foldStrength;
 
-  const _StraightLeafGeometry({
+  const StraightLeafGeometry({
     required this.frontPath,
     required this.backPath,
     required this.creaseX,
@@ -481,7 +723,7 @@ class _StraightLeafGeometry {
     required this.foldStrength,
   });
 
-  static _StraightLeafGeometry calculate({
+  static StraightLeafGeometry calculate({
     required Size size,
     required double progress,
   }) {
@@ -498,7 +740,7 @@ class _StraightLeafGeometry {
           size.height,
         ),
       );
-    return _StraightLeafGeometry(
+    return StraightLeafGeometry(
       frontPath: front,
       backPath: back,
       creaseX: creaseX,

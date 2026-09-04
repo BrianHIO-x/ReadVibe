@@ -44,6 +44,111 @@ class PdfTextAnnotation {
   });
 }
 
+abstract interface class PdfRendererGateway {
+  Future<int> getPageCount(String filePath);
+
+  Future<bool> isPasswordProtected(String filePath);
+
+  Future<int> unlockPdf({required String filePath, required String password});
+
+  Future<void> syncTextNote({
+    required String filePath,
+    required int pageIndex,
+    required String noteId,
+    required String contents,
+  });
+
+  Future<String> recognizePageText({
+    required String filePath,
+    required int pageIndex,
+  });
+
+  Future<String> renderPage({
+    required String filePath,
+    required int pageIndex,
+    required int widthPx,
+  });
+
+  Future<void> clearFileCache(String filePath);
+
+  Future<List<PdfTextSearchResult>> searchText({
+    required String filePath,
+    required String query,
+  });
+
+  Future<List<PdfOutlineEntry>> getOutline(String filePath);
+
+  Future<List<PdfTextAnnotation>> getTextAnnotations(String filePath);
+}
+
+/// Injectable adapter around the Android MethodChannel implementation.
+class PlatformPdfRendererGateway implements PdfRendererGateway {
+  const PlatformPdfRendererGateway();
+
+  @override
+  Future<int> getPageCount(String filePath) =>
+      PdfRendererService.getPageCount(filePath);
+
+  @override
+  Future<bool> isPasswordProtected(String filePath) =>
+      PdfRendererService.isPasswordProtected(filePath);
+
+  @override
+  Future<int> unlockPdf({required String filePath, required String password}) =>
+      PdfRendererService.unlockPdf(filePath: filePath, password: password);
+
+  @override
+  Future<void> syncTextNote({
+    required String filePath,
+    required int pageIndex,
+    required String noteId,
+    required String contents,
+  }) => PdfRendererService.syncTextNote(
+    filePath: filePath,
+    pageIndex: pageIndex,
+    noteId: noteId,
+    contents: contents,
+  );
+
+  @override
+  Future<String> recognizePageText({
+    required String filePath,
+    required int pageIndex,
+  }) => PdfRendererService.recognizePageText(
+    filePath: filePath,
+    pageIndex: pageIndex,
+  );
+
+  @override
+  Future<String> renderPage({
+    required String filePath,
+    required int pageIndex,
+    required int widthPx,
+  }) => PdfRendererService.renderPage(
+    filePath: filePath,
+    pageIndex: pageIndex,
+    widthPx: widthPx,
+  );
+
+  @override
+  Future<void> clearFileCache(String filePath) =>
+      PdfRendererService.clearFileCache(filePath);
+
+  @override
+  Future<List<PdfTextSearchResult>> searchText({
+    required String filePath,
+    required String query,
+  }) => PdfRendererService.searchText(filePath: filePath, query: query);
+
+  @override
+  Future<List<PdfOutlineEntry>> getOutline(String filePath) =>
+      PdfRendererService.getOutline(filePath);
+
+  @override
+  Future<List<PdfTextAnnotation>> getTextAnnotations(String filePath) =>
+      PdfRendererService.getTextAnnotations(filePath);
+}
+
 class PdfRendererService {
   static const _channel = MethodChannel('com.readvibe.app/pdf_renderer');
 

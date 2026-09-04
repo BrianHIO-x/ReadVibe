@@ -4,12 +4,12 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 
 import '../models/reader_settings.dart';
-import 'storage_service.dart';
+import '../repositories/reader_repositories.dart';
 
 class FontService {
   FontService(this._storage);
 
-  final StorageService _storage;
+  final ImportedFontStore _storage;
 
   static final Set<String> _loadedFamilies = <String>{};
   static final Map<String, Future<void>> _loadingFamilies =
