@@ -34,6 +34,10 @@ migrate_working_dir/
 /dist/
 /coverage/
 
+# Local tool settings and Android build reports (Windows and WSL).
+/.claude/settings.local.json
+/android/build/
+
 # Symbolication related
 app.*.symbols
 
