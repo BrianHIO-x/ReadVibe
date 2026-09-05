@@ -37,5 +37,5 @@ ReadVibe 是 Flutter 编写的 Android 本地阅读器。本文件适用于整�
 ## 文档入口
 
 - [项目介绍](README.md)
-- [阅读与书架操作](docs/UI_OPTIMIZATION.md)
-- [Windows 目录说明](windows/README.md)
+- [阅读与书架操作](docs/USAGE.md)
+- [项目文件详解](docs/ARCHITECTURE.md)
