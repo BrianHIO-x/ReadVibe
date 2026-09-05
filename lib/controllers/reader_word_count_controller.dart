@@ -17,7 +17,7 @@ class ReaderWordCountController {
     chapterWordCounts = ValueNotifier<List<int>?>(storedCounts);
   }
 
-  final ReaderRepository _repository;
+  final BookWordCountRepository _repository;
   late final ValueNotifier<int?> wordCount;
   late final ValueNotifier<List<int>?> chapterWordCounts;
 

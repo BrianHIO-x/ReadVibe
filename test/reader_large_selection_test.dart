@@ -33,7 +33,7 @@ class _MemoryReaderRepository implements ReaderRepository {
   @override
   Future<void> deleteBook(String bookId) async {}
   @override
-  Future<void> replaceChapter(Book book, Chapter chapter) async {}
+  Future<Book> replaceChapter(Book book, Chapter chapter) async => book;
   @override
   Future<File> saveImportedFont(String sourcePath, String fileName) =>
       throw UnsupportedError('unused');

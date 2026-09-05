@@ -21,7 +21,7 @@ class ChapterEditResult {
 class ChapterEditingController {
   ChapterEditingController(this._repository);
 
-  final ReaderRepository _repository;
+  final ChapterEditingRepository _repository;
 
   Future<ChapterEditResult> save({
     required Book sourceBook,
@@ -45,11 +45,11 @@ class ChapterEditingController {
       volumeTitle: sourceChapter.volumeTitle,
     );
 
-    WordCountService.invalidateBook(sourceBook.id);
-    await _repository.replaceChapter(sourceBook, replacement);
-
-    final chapters = List<Chapter>.of(sourceBook.chapters);
-    chapters[chapterIndex] = replacement;
+    final committedBook = await _repository.replaceChapter(
+      sourceBook,
+      replacement,
+    );
+    final chapters = committedBook.chapters;
     List<int>? chapterWordCounts;
     try {
       final editedCount = await WordCountService.countContent(
@@ -69,8 +69,7 @@ class ChapterEditingController {
     final wordCount = chapterWordCounts == null
         ? null
         : WordCountService.totalFromChapterCounts(chapterWordCounts);
-    final nextBook = sourceBook.copyWith(
-      chapters: List<Chapter>.unmodifiable(chapters),
+    final nextBook = committedBook.copyWith(
       wordCount: wordCount,
       chapterWordCounts: chapterWordCounts,
       clearWordCounts: chapterWordCounts == null,

@@ -31,8 +31,13 @@ class _EditorRepository implements ReaderRepository {
     Set<String> groups,
   ) async {}
   @override
-  Future<void> replaceChapter(Book book, Chapter chapter) async {
+  Future<Book> replaceChapter(Book book, Chapter chapter) async {
     saved = chapter;
+    return book.copyWith(
+      chapters: [chapter],
+      contentRevision: book.contentRevision + 1,
+      clearWordCounts: true,
+    );
   }
 
   @override

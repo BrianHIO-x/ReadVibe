@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme/app_spacing.dart';
+import '../models/book_content_revision.dart';
 import '../theme/app_theme.dart';
 import 'app_dialog.dart';
 
@@ -252,9 +253,11 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
       if (!mounted) return;
       setState(() {
         _saving = false;
-        _errorMessage = error is FormatException
-            ? error.message.toString()
-            : '保存失败，请检查存储空间后重试';
+        _errorMessage = switch (error) {
+          BookEditConflict() => error.message.toString(),
+          FormatException() => error.message.toString(),
+          _ => '保存失败，请检查存储空间后重试',
+        };
       });
     }
   }

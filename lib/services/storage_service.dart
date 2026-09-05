@@ -11,10 +11,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:crypto/crypto.dart';
 
 import '../models/book.dart';
+import '../models/book_content_revision.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
 import 'managed_book_resources.dart';
 import 'storage/chapter_payload_codec.dart';
+import 'storage/chapter_revision_cleanup.dart';
 import 'reader_preferences_store.dart';
 import 'txt_parser.dart';
 
@@ -29,6 +31,7 @@ const _kLegacyMigrationTimeout = Duration(milliseconds: 250);
 
 class _LazyChapterStore {
   final String chaptersDirectoryPath;
+  final int contentRevision;
   final List<String> fileNames;
   final List<int?> expectedBytes;
   final List<String?> expectedDigests;
@@ -36,6 +39,7 @@ class _LazyChapterStore {
 
   _LazyChapterStore({
     required this.chaptersDirectoryPath,
+    required this.contentRevision,
     required this.fileNames,
     required this.expectedBytes,
     required this.expectedDigests,
@@ -161,7 +165,7 @@ class StorageService
             }
             final chapters = await _loadChapters(id, prefs);
             if (chapters.isEmpty) return null;
-            return upgradeLegacyTxtBook(Book.fromJson(map, chapters));
+            return upgradeLegacyTxtBook(_bookWithStoredChapters(map, chapters));
           } on Object {
             // One damaged entry should not prevent the rest of the shelf loading.
             return null;
@@ -205,22 +209,30 @@ class StorageService
       }
       final chapters = await _loadChapters(bookId, prefs);
       if (chapters.isEmpty) return null;
-      final storedBook = Book.fromJson(metadata.first, chapters);
-      final readableBook = upgradeLegacyTxtBook(storedBook);
+      final storedBook = _bookWithStoredChapters(metadata.first, chapters);
+      var readableBook = upgradeLegacyTxtBook(storedBook);
       if (!identical(readableBook, storedBook)) {
         try {
           final storedProgress = await getProgress(bookId);
+          final remappedProgress = storedProgress == null
+              ? null
+              : _remapProgressAfterReparse(
+                  storedProgress,
+                  storedBook.chapters,
+                  readableBook.chapters,
+                );
           // Persist the upgraded directory so subsequent opens and shelf
           // summaries use the new parser result without repeating the work.
           await saveBook(readableBook);
-          if (storedProgress != null) {
-            await saveProgress(
-              _remapProgressAfterReparse(
-                storedProgress,
-                storedBook.chapters,
-                readableBook.chapters,
-              ),
-            );
+          final committedChapters = await _loadChapterDirectory(
+            await _chapterDirectory(bookId),
+          );
+          readableBook = _bookWithStoredChapters(
+            readableBook.toJson(),
+            committedChapters,
+          );
+          if (remappedProgress != null) {
+            await saveProgress(remappedProgress);
           }
         } on Object {
           // The reparsed in-memory copy is still safe to read this session.
@@ -317,20 +329,28 @@ class StorageService
     }
 
     await _enqueueLibraryMutation(() async {
-      // Save the large payload first. The shelf metadata is only committed
-      // after the chapter file is safely in place.
-      if (!book.isPdf) {
-        await _saveChapters(book.id, book.chapters);
-      }
       final prefs = await SharedPreferences.getInstance();
       final metadata = _readBookMetadata(prefs);
       final existingIndex = metadata.indexWhere(
         (item) => item['id'] == book.id,
       );
+      final revision = existingIndex < 0
+          ? book.contentRevision
+          : math.max(
+              book.contentRevision,
+              readContentRevision(metadata[existingIndex]['contentRevision']) +
+                  1,
+            );
+      final committedBook = book.copyWith(contentRevision: revision);
+      // Save the large payload first. The shelf metadata is only committed
+      // after the chapter file is safely in place.
+      if (!book.isPdf) {
+        await _saveChapters(book.id, book.chapters, contentRevision: revision);
+      }
       if (existingIndex >= 0) {
-        metadata[existingIndex] = book.toJson();
+        metadata[existingIndex] = committedBook.toJson();
       } else {
-        metadata.insert(0, book.toJson());
+        metadata.insert(0, committedBook.toJson());
       }
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
       _deletedBookIds.remove(book.id);
@@ -343,7 +363,7 @@ class StorageService
   /// manifest is the commit point, so a crash can leave only an unreferenced
   /// chapter file, never a manifest that points at a half-written payload.
   @override
-  Future<void> replaceChapter(Book sourceBook, Chapter replacement) async {
+  Future<Book> replaceChapter(Book sourceBook, Chapter replacement) async {
     if (sourceBook.isPdf ||
         sourceBook.id.isEmpty ||
         replacement.index < 0 ||
@@ -356,122 +376,158 @@ class StorageService
       throw StateError('书籍不存在或已删除');
     }
 
-    final directory = await _chapterDirectory(sourceBook.id);
-    await _enqueueChapterWrite(directory.path, () async {
-      if (!await directory.exists()) {
-        final chapters = List<Chapter>.of(sourceBook.chapters);
-        chapters[replacement.index] = replacement;
-        await _writeChapterDirectory(directory, chapters);
-        return;
-      }
-
-      final manifestFile = await _resolveChapterManifestFile(directory);
-      if (manifestFile == null) {
-        throw const FormatException('章节清单缺失或损坏');
-      }
-      final rawManifest = await manifestFile.readAsString(encoding: utf8);
-      final manifest = await _decodeChapterManifestInBackground(rawManifest);
-      final rawEntries = manifest['chapters'];
-      if (manifest['version'] != 2 ||
-          rawEntries is! List ||
-          manifest['chapterCount'] is! num ||
-          (manifest['chapterCount'] as num).toInt() != rawEntries.length ||
-          rawEntries.length != sourceBook.chapterCount) {
-        throw const FormatException('章节清单版本或数量不一致');
-      }
-
-      final entries = rawEntries
-          .map((entry) {
-            if (entry is! Map) {
-              throw const FormatException('章节清单条目格式错误');
-            }
-            return Map<String, dynamic>.from(entry);
-          })
-          .toList(growable: false);
-      final oldFileName = entries[replacement.index]['file'];
-      if (oldFileName is! String || !_isStoredChapterFileName(oldFileName)) {
-        throw const FormatException('章节清单条目格式错误');
-      }
-
-      final payload = await _encodeEditedChapter(replacement);
-      final payloadBytes = utf8.encode(payload);
-      final revision = DateTime.now().microsecondsSinceEpoch;
-      final fileName =
-          '${replacement.index.toString().padLeft(6, '0')}-$revision.json';
-      final chaptersDirectory = Directory(p.join(directory.path, 'chapters'));
-      if (!await chaptersDirectory.exists()) {
-        throw const FormatException('章节目录不存在');
-      }
-      final targetFile = File(p.join(chaptersDirectory.path, fileName));
-      await targetFile.writeAsString(payload, encoding: utf8, flush: true);
-
-      entries[replacement.index] = <String, dynamic>{
-        'file': fileName,
-        'bytes': payloadBytes.length,
-        'sha256': sha256.convert(payloadBytes).toString(),
-        'title': replacement.title,
-        if (replacement.volumeTitle != null)
-          'volumeTitle': replacement.volumeTitle,
-        'hasRichContent': replacement.hasRichEpubContent,
-        'richBlockCount': replacement.epubBlockCount,
-        'hasSemanticHeading': replacement.hasSemanticHeading,
-      };
-      final committedManifest = <String, dynamic>{
-        ...manifest,
-        'version': 2,
-        'chapterCount': entries.length,
-        'chapters': entries,
-      };
-      final liveManifest = File(p.join(directory.path, 'manifest.json'));
-      final temporaryManifest = File('${liveManifest.path}.edit.tmp');
-      final backupManifest = File('${liveManifest.path}.edit.bak');
-      await temporaryManifest.writeAsString(
-        jsonEncode(committedManifest),
-        encoding: utf8,
-        flush: true,
-      );
-      if (await backupManifest.exists()) await backupManifest.delete();
-      if (await liveManifest.exists()) {
-        await liveManifest.rename(backupManifest.path);
-      } else if (manifestFile.path != liveManifest.path) {
-        await manifestFile.rename(backupManifest.path);
-      }
-      try {
-        await temporaryManifest.rename(liveManifest.path);
-      } on Object {
-        if (await backupManifest.exists() && !await liveManifest.exists()) {
-          await backupManifest.rename(liveManifest.path);
-        }
-        if (await targetFile.exists()) await targetFile.delete();
-        rethrow;
-      }
-
-      try {
-        if (await backupManifest.exists()) await backupManifest.delete();
-        final oldFile = File(p.join(chaptersDirectory.path, oldFileName));
-        if (oldFile.path != targetFile.path && await oldFile.exists()) {
-          await oldFile.delete();
-        }
-      } on FileSystemException {
-        // The new manifest is authoritative. Stale private files are harmless
-        // because no manifest references them.
-      }
-    });
-
-    // The old statistics describe the pre-edit payload. Clear them in the
-    // same public operation so a process restart between editing and recount
-    // never presents stale values as authoritative.
-    await _enqueueLibraryMutation(() async {
+    return _enqueueLibraryMutation(() async {
       final prefs = await SharedPreferences.getInstance();
       final metadata = _readBookMetadata(prefs);
       final index = metadata.indexWhere((book) => book['id'] == sourceBook.id);
       if (index < 0 || _deletedBookIds.contains(sourceBook.id)) {
         throw StateError('书籍不存在或已删除');
       }
+      final directory = await _chapterDirectory(sourceBook.id);
+      final storedRevision =
+          await _readStoredContentRevision(directory) ??
+          readContentRevision(metadata[index]['contentRevision']);
+      if (!_matchesBookRevision({
+        ...metadata[index],
+        'contentRevision': storedRevision,
+      }, sourceBook)) {
+        throw BookEditConflict();
+      }
+      final nextRevision = storedRevision + 1;
+      // Invalidate derived metadata before committing the new manifest. If the
+      // process stops between files, old counts can never claim to be current.
       metadata[index].remove('wordCount');
       metadata[index].remove('chapterWordCounts');
       await _setString(prefs, _kBooksKey, jsonEncode(metadata));
-      await prefs.remove('$_kChapterPrefix${sourceBook.id}');
+      await _enqueueChapterWrite(directory.path, () async {
+        if (!await directory.exists()) {
+          final chapters = List<Chapter>.of(sourceBook.chapters);
+          chapters[replacement.index] = replacement;
+          await _writeChapterDirectory(
+            directory,
+            chapters,
+            contentRevision: nextRevision,
+          );
+          return;
+        }
+
+        final manifestFile = await _resolveChapterManifestFile(directory);
+        if (manifestFile == null) {
+          throw const FormatException('章节清单缺失或损坏');
+        }
+        final rawManifest = await manifestFile.readAsString(encoding: utf8);
+        final manifest = await _decodeChapterManifestInBackground(rawManifest);
+        final rawEntries = manifest['chapters'];
+        if (manifest['version'] != 2 ||
+            rawEntries is! List ||
+            manifest['chapterCount'] is! num ||
+            (manifest['chapterCount'] as num).toInt() != rawEntries.length ||
+            rawEntries.length != sourceBook.chapterCount) {
+          throw const FormatException('章节清单版本或数量不一致');
+        }
+
+        final entries = rawEntries
+            .map((entry) {
+              if (entry is! Map) {
+                throw const FormatException('章节清单条目格式错误');
+              }
+              return Map<String, dynamic>.from(entry);
+            })
+            .toList(growable: false);
+        final oldFileName = entries[replacement.index]['file'];
+        if (oldFileName is! String || !_isStoredChapterFileName(oldFileName)) {
+          throw const FormatException('章节清单条目格式错误');
+        }
+
+        final payload = await _encodeEditedChapter(replacement);
+        final payloadBytes = utf8.encode(payload);
+        final revision = DateTime.now().microsecondsSinceEpoch;
+        final fileName =
+            '${replacement.index.toString().padLeft(6, '0')}-$revision.json';
+        final chaptersDirectory = Directory(p.join(directory.path, 'chapters'));
+        if (!await chaptersDirectory.exists()) {
+          throw const FormatException('章节目录不存在');
+        }
+        final targetFile = File(p.join(chaptersDirectory.path, fileName));
+        await targetFile.writeAsString(payload, encoding: utf8, flush: true);
+
+        entries[replacement.index] = <String, dynamic>{
+          'file': fileName,
+          'bytes': payloadBytes.length,
+          'sha256': sha256.convert(payloadBytes).toString(),
+          'title': replacement.title,
+          if (replacement.volumeTitle != null)
+            'volumeTitle': replacement.volumeTitle,
+          'hasRichContent': replacement.hasRichEpubContent,
+          'richBlockCount': replacement.epubBlockCount,
+          'hasSemanticHeading': replacement.hasSemanticHeading,
+        };
+        final committedManifest = <String, dynamic>{
+          ...manifest,
+          'version': 2,
+          'contentRevision': nextRevision,
+          'chapterCount': entries.length,
+          'chapters': entries,
+        };
+        final liveManifest = File(p.join(directory.path, 'manifest.json'));
+        final temporaryManifest = File('${liveManifest.path}.edit.tmp');
+        final backupManifest = File('${liveManifest.path}.edit.bak');
+        await temporaryManifest.writeAsString(
+          jsonEncode(committedManifest),
+          encoding: utf8,
+          flush: true,
+        );
+        if (await liveManifest.exists()) {
+          if (await backupManifest.exists()) await backupManifest.delete();
+          await liveManifest.rename(backupManifest.path);
+        } else if (manifestFile.path != backupManifest.path) {
+          // The selected recovery file may itself be the staged path that we
+          // just replaced. Preserve the original decoded manifest for rollback.
+          await backupManifest.writeAsString(
+            rawManifest,
+            encoding: utf8,
+            flush: true,
+          );
+        }
+        try {
+          await temporaryManifest.rename(liveManifest.path);
+        } on Object {
+          if (await backupManifest.exists() && !await liveManifest.exists()) {
+            await backupManifest.rename(liveManifest.path);
+          }
+          if (await targetFile.exists()) await targetFile.delete();
+          rethrow;
+        }
+
+        try {
+          if (await backupManifest.exists()) await backupManifest.delete();
+          // Keep the previous immutable payload for active reader/search snapshots.
+          // Its grace period starts at replacement, not at the original import.
+          final oldFile = File(p.join(chaptersDirectory.path, oldFileName));
+          if (await oldFile.exists()) {
+            await oldFile.setLastModified(DateTime.now());
+          }
+        } on FileSystemException {
+          // The new manifest is authoritative. Stale private files are harmless
+          // because no manifest references them.
+        }
+      });
+      final chapters = List<Chapter>.of(sourceBook.chapters);
+      chapters[replacement.index] = replacement;
+      final committedBook = Book.fromJson(metadata[index], chapters).copyWith(
+        contentRevision: nextRevision,
+        chapters: List<Chapter>.unmodifiable(chapters),
+        clearWordCounts: true,
+      );
+      metadata[index]['contentRevision'] = nextRevision;
+      try {
+        await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+        await prefs.remove('$_kChapterPrefix${sourceBook.id}');
+      } on Object {
+        // The manifest already committed. Reopening reconciles its revision;
+        // summary metadata and counts can be rebuilt without losing the edit.
+      }
+      return committedBook;
     });
   }
 
@@ -566,7 +622,18 @@ class StorageService
       final current = metadata[index];
       // Do not let a count from an older parse overwrite a newly re-imported
       // or migrated directory that happens to reuse the same book ID.
-      if (!_matchesBookRevision(current, sourceBook)) return;
+      final directory = await _chapterDirectory(sourceBook.id);
+      final revision =
+          await _readStoredContentRevision(directory) ??
+          readContentRevision(current['contentRevision']);
+      if (_deletedBookIds.contains(sourceBook.id) ||
+          !_matchesBookRevision({
+            ...current,
+            'contentRevision': revision,
+          }, sourceBook)) {
+        return;
+      }
+      current['contentRevision'] = revision;
       current['chapterWordCounts'] = safeCounts;
       var total = 0;
       for (final count in safeCounts) {
@@ -796,6 +863,21 @@ class StorageService
       }
     }
 
+    for (final book in metadata) {
+      final id = book['id'];
+      if (id is! String ||
+          id.isEmpty ||
+          book['format'] == BookFormat.pdf.name) {
+        continue;
+      }
+      final directory = await _chapterDirectory(id);
+      removedFiles += await _enqueueLibraryMutation(
+        () => _enqueueChapterWrite(
+          directory.path,
+          () => collectObsoleteChapterPayloads(directory, cutoff),
+        ),
+      );
+    }
     return StorageCleanupResult(
       removedFiles: removedFiles,
       removedDirectories: removedDirectories,
@@ -855,7 +937,10 @@ class StorageService
         // file. Opening the book must not wait indefinitely for platform
         // storage channels, so the legacy payload remains available if the
         // migration cannot finish quickly.
-        await _saveChapters(bookId, chapters).timeout(_kLegacyMigrationTimeout);
+        await _migrateLegacyChapters(
+          bookId,
+          chapters,
+        ).timeout(_kLegacyMigrationTimeout);
         await prefs.remove(legacyKey);
       } on Object {
         // Reading must win over migration. If file storage is unavailable, keep
@@ -880,7 +965,11 @@ class StorageService
         if (candidate.path != directory.path) {
           final recovered = _materializeChapters(chapters);
           try {
-            await _saveChapters(bookId, recovered).timeout(_kChapterIoTimeout);
+            await _saveChapters(
+              bookId,
+              recovered,
+              contentRevision: _chapterContentRevision(chapters) ?? 0,
+            ).timeout(_kChapterIoTimeout);
             return await _loadChapterDirectory(
               directory,
             ).timeout(_kChapterIoTimeout);
@@ -914,13 +1003,16 @@ class StorageService
         ).timeout(_kChapterIoTimeout);
         if (candidate.path != file.path) {
           try {
-            await _saveChapters(bookId, chapters).timeout(_kChapterIoTimeout);
+            await _migrateLegacyChapters(
+              bookId,
+              chapters,
+            ).timeout(_kChapterIoTimeout);
           } on Object {
             // The recovered in-memory copy is still readable for this session.
           }
         }
         unawaited(
-          _saveChapters(
+          _migrateLegacyChapters(
             bookId,
             chapters,
           ).catchError((Object _, StackTrace _) {}),
@@ -934,10 +1026,26 @@ class StorageService
     return [];
   }
 
-  Future<void> _saveChapters(String bookId, List<Chapter> chapters) async {
+  Future<void> _migrateLegacyChapters(String bookId, List<Chapter> chapters) =>
+      _enqueueLibraryMutation(() async {
+        if (_deletedBookIds.contains(bookId)) return;
+        final directory = await _chapterDirectory(bookId);
+        if (await _resolveChapterManifestFile(directory) != null) return;
+        await _saveChapters(bookId, chapters);
+      });
+
+  Future<void> _saveChapters(
+    String bookId,
+    List<Chapter> chapters, {
+    int contentRevision = 0,
+  }) async {
     final directory = await _chapterDirectory(bookId);
     return _enqueueChapterWrite(directory.path, () async {
-      await _writeChapterDirectory(directory, chapters);
+      await _writeChapterDirectory(
+        directory,
+        chapters,
+        contentRevision: contentRevision,
+      );
       final legacyFile = await _chapterFile(bookId);
       for (final candidate in <File>[
         legacyFile,
@@ -1029,6 +1137,7 @@ class StorageService
     }
     final store = _LazyChapterStore(
       chaptersDirectoryPath: chaptersDirectory.path,
+      contentRevision: readContentRevision(manifest['contentRevision']),
       fileNames: fileNames,
       expectedBytes: expectedBytes,
       expectedDigests: expectedDigests,
@@ -1050,8 +1159,9 @@ class StorageService
 
   Future<void> _writeChapterDirectory(
     Directory directory,
-    List<Chapter> chapters,
-  ) async {
+    List<Chapter> chapters, {
+    int contentRevision = 0,
+  }) async {
     final temporary = Directory('${directory.path}.tmp');
     final backup = Directory('${directory.path}.bak');
     if (await temporary.exists()) await temporary.delete(recursive: true);
@@ -1089,6 +1199,7 @@ class StorageService
     await File(p.join(temporary.path, 'manifest.json')).writeAsString(
       jsonEncode(<String, dynamic>{
         'version': 2,
+        'contentRevision': contentRevision,
         'chapterCount': chapters.length,
         'chapters': manifestEntries,
       }),
@@ -1218,7 +1329,7 @@ class StorageService
     return Directory(p.join(books.path, _safeBookId(bookId)));
   }
 
-  static Future<void> _enqueueLibraryMutation(Future<void> Function() action) {
+  static Future<T> _enqueueLibraryMutation<T>(Future<T> Function() action) {
     final operation = _libraryMutationQueue.then((_) => action());
     _libraryMutationQueue = operation.then<void>(
       (_) {},
@@ -1227,9 +1338,9 @@ class StorageService
     return operation;
   }
 
-  static Future<void> _enqueueChapterWrite(
+  static Future<T> _enqueueChapterWrite<T>(
     String path,
-    Future<void> Function() action,
+    Future<T> Function() action,
   ) {
     final previous = _chapterWriteQueues[path] ?? Future<void>.value();
     final operation = previous.then((_) => action());
@@ -1267,7 +1378,10 @@ bool _matchesBookRevision(Map<String, dynamic> metadata, Book sourceBook) {
       currentParserVersion.toInt() == sourceBook.txtParserVersion &&
       currentChapterCount is num &&
       currentChapterCount.toInt() == sourceBook.chapterCount &&
-      currentFormat == sourceBook.format.name;
+      currentFormat == sourceBook.format.name &&
+      readContentRevision(metadata['contentRevision']) ==
+          sourceBook.contentRevision &&
+      metadata['importDate'] == sourceBook.importDate.toIso8601String();
 }
 
 String _safeBookId(String bookId) =>
@@ -1404,12 +1518,9 @@ Future<bool> _chapterDirectoryLooksPlausible(
 bool _isStoredChapterFileName(String value) =>
     RegExp(r'^\d{6,}(?:-[A-Za-z0-9_-]+)?\.json$').hasMatch(value);
 
-/// Recovers the tiny manifest swap used by chapter editing.
-///
-/// The chapter payload is written first, therefore a staged manifest is safe
-/// to promote. If staging never completed, the previous manifest remains the
-/// fallback. Returning a candidate even when rename is unavailable keeps the
-/// book readable on restrictive filesystems.
+/// Selects a readable manifest without modifying an in-progress writer's files.
+/// A committed backup is preferred over staged content when the live file is
+/// absent. The next edit completes its swap using that recovery snapshot.
 Future<File?> _resolveChapterManifestFile(Directory directory) async {
   final live = File(p.join(directory.path, 'manifest.json'));
   if (await live.exists()) return live;
@@ -1420,11 +1531,9 @@ Future<File?> _resolveChapterManifestFile(Directory directory) async {
   // promoting the staged manifest there would race the writer's commit.
   for (final candidate in <File>[backup, staged]) {
     if (!await candidate.exists()) continue;
-    try {
-      return await candidate.rename(live.path);
-    } on FileSystemException {
-      return candidate;
-    }
+    // Reading must not rename files while an editor is between the backup
+    // and commit renames. The next writer can safely promote this candidate.
+    return candidate;
   }
   return null;
 }
@@ -1507,3 +1616,29 @@ Future<Map<String, dynamic>> _decodeChapterManifestInBackground(String raw) =>
 
 Future<String> _encodeEditedChapter(Chapter chapter) =>
     Isolate.run(() => jsonEncode(encodeChapterPayload(chapter)));
+
+int? _chapterContentRevision(List<Chapter> chapters) {
+  final first = chapters.firstOrNull;
+  return first is _LazyChapter ? first.store.contentRevision : null;
+}
+
+Book _bookWithStoredChapters(
+  Map<String, dynamic> metadata,
+  List<Chapter> chapters,
+) {
+  final book = Book.fromJson(metadata, chapters);
+  final revision = _chapterContentRevision(chapters) ?? book.contentRevision;
+  return book.copyWith(
+    contentRevision: revision,
+    clearWordCounts: revision != book.contentRevision,
+  );
+}
+
+Future<int?> _readStoredContentRevision(Directory directory) async {
+  final manifest = await _resolveChapterManifestFile(directory);
+  if (manifest == null) return null;
+  final data = await _decodeChapterManifestInBackground(
+    await manifest.readAsString(encoding: utf8),
+  );
+  return readContentRevision(data['contentRevision']);
+}

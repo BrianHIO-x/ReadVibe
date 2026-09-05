@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/search_match.dart';
+import '../controllers/document_search_controller.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_sheet.dart';
@@ -24,63 +25,39 @@ class BookSearchSheet<T extends SearchMatch> extends StatefulWidget {
 class _BookSearchSheetState<T extends SearchMatch>
     extends State<BookSearchSheet<T>> {
   final _controller = TextEditingController();
-  List<T> _results = [];
-  bool _searching = false;
-  bool _searched = false;
-  String? _errorMessage;
-  int _serial = 0;
+  late final DocumentSearchController<T> _searchState;
+  List<T> get _results => _searchState.results;
+  bool get _searching => _searchState.searching;
+  bool get _searched => _searchState.searched;
+  String? get _errorMessage => _searchState.failed ? '搜索失败，请重新输入关键词后再试' : null;
 
   @override
   void initState() {
     super.initState();
+    _searchState = DocumentSearchController<T>(
+      search: (query) => widget.onSearch(query),
+      onError: (error, stack) {
+        debugPrint('Full-text search failed: $error');
+        debugPrintStack(stackTrace: stack);
+      },
+    )..addListener(_onSearchStateChanged);
     _controller.addListener(_handleQueryChanged);
   }
 
+  void _onSearchStateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _handleQueryChanged() => _searchState.setQuery(_controller.text);
+
+  Future<void> _search() => _searchState.submit();
+
   @override
   void dispose() {
+    _searchState.removeListener(_onSearchStateChanged);
+    _searchState.dispose();
     _controller.dispose();
     super.dispose();
-  }
-
-  void _handleQueryChanged() {
-    // Typing a new keyword makes the previous "no matches" verdict stale.
-    if (!_searched && _errorMessage == null) return;
-    setState(() {
-      _searched = false;
-      _errorMessage = null;
-    });
-  }
-
-  Future<void> _search() async {
-    final query = _controller.text.trim();
-    // A hardware keyboard can submit more than once while the previous isolate
-    // scan is still running.  Do not queue duplicate whole-book scans for the
-    // same visible search panel.
-    if (query.isEmpty || _searching) return;
-    final serial = ++_serial;
-    setState(() {
-      _searching = true;
-      _errorMessage = null;
-    });
-    try {
-      final results = await widget.onSearch(query);
-      if (!mounted || serial != _serial) return;
-      setState(() {
-        _results = results;
-        _searching = false;
-        _searched = true;
-      });
-    } on Object catch (error, stackTrace) {
-      debugPrint('Full-text search failed: $error');
-      debugPrintStack(stackTrace: stackTrace);
-      if (!mounted || serial != _serial) return;
-      setState(() {
-        _results = [];
-        _searching = false;
-        _searched = true;
-        _errorMessage = '搜索失败，请重新输入关键词后再试';
-      });
-    }
   }
 
   /// Uses the exact source range returned by the search worker. This remains

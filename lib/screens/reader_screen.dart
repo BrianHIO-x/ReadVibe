@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -14,7 +13,6 @@ import '../theme/app_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
 import '../models/book.dart';
-import '../models/reading_paragraph.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/font_service.dart';
@@ -34,6 +32,7 @@ import '../controllers/reader_search_controller.dart';
 import '../controllers/reader_selection_controller.dart';
 import '../controllers/reader_word_count_controller.dart';
 import 'reader/reader_epub_layout.dart';
+import 'reader/reader_layout_cache.dart';
 import 'reader/reader_pagination_support.dart';
 import 'reader/reader_selection_support.dart';
 import 'reader/reader_selectable_block.dart';
@@ -153,14 +152,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     offset: 0,
     progress: 0,
   );
-  final LinkedHashMap<Chapter, List<String>> _paragraphCache =
-      LinkedHashMap<Chapter, List<String>>();
-  int _paragraphCacheCharacters = 0;
-  final LinkedHashMap<Chapter, double> _simulationContentExtentCache =
-      LinkedHashMap<Chapter, double>();
-  SimulationLayoutSignature? _simulationContentExtentSignature;
-  SimulationLayoutSignature? _simulationLineExtentSignature;
-  double? _simulationLineExtentCache;
+  final ReaderLayoutCache _layoutCache = ReaderLayoutCache();
   double _readerViewportWidth = 0;
   double _readerViewportHeight = 0;
   EdgeInsets _readerViewPadding = EdgeInsets.zero;
@@ -910,6 +902,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     _selectionController.dispose();
     _searchController.dispose();
+    _layoutCache.clear();
     _scrollController.removeListener(_scheduleProgressSave);
     _scrollController.dispose();
     final adjacentControllers = _adjacentScrollControllers.values.toSet();
@@ -1055,38 +1048,8 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Chapter get _currentChapter => _book.chapters[_chapterIndex];
 
-  List<String> _paragraphsFor(Chapter chapter) {
-    final cached = _paragraphCache.remove(chapter);
-    if (cached != null) {
-      _paragraphCache[chapter] = cached;
-      return cached;
-    }
-    final paragraphs = readingParagraphs(
-      chapter,
-    ).map((paragraph) => paragraph.displayText).toList(growable: false);
-    final characters = paragraphs.fold<int>(
-      0,
-      (sum, paragraph) => sum + paragraph.length,
-    );
-    const maxCachedCharacters = 12 * 1024 * 1024;
-    if (characters > maxCachedCharacters) {
-      _paragraphCache.clear();
-      _paragraphCacheCharacters = 0;
-    } else {
-      while ((_paragraphCache.length >= 5 ||
-              _paragraphCacheCharacters + characters > maxCachedCharacters) &&
-          _paragraphCache.isNotEmpty) {
-        final removed = _paragraphCache.remove(_paragraphCache.keys.first)!;
-        _paragraphCacheCharacters -= removed.fold<int>(
-          0,
-          (sum, paragraph) => sum + paragraph.length,
-        );
-      }
-    }
-    _paragraphCache[chapter] = paragraphs;
-    _paragraphCacheCharacters += characters;
-    return paragraphs;
-  }
+  List<String> _paragraphsFor(Chapter chapter) =>
+      _layoutCache.paragraphs(chapter);
 
   int _paragraphPrefixLength(Chapter chapter, int paragraphIndex) {
     if (!chapter.hasRichEpubContent) return _paragraphIndent.length;
@@ -1273,19 +1236,13 @@ class _ReaderScreenState extends State<ReaderScreen>
       ? _resolvedSimulationLineExtent(settings)
       : settings.fontSize * settings.lineHeight;
 
-  double _resolvedSimulationLineExtent(ReaderSettings settings) {
-    final signature = SimulationLayoutSignature(
-      contentWidth: 0,
-      settings: settings,
-    );
-    final cached = _simulationLineExtentCache;
-    if (cached != null &&
-        cached.isFinite &&
-        cached > 0 &&
-        _simulationLineExtentSignature?.matches(signature) == true) {
-      return cached;
-    }
+  double _resolvedSimulationLineExtent(ReaderSettings settings) =>
+      _layoutCache.lineExtent(
+        SimulationLayoutSignature(contentWidth: 0, settings: settings),
+        () => _measureSimulationLineExtent(settings),
+      );
 
+  double _measureSimulationLineExtent(ReaderSettings settings) {
     final nominalExtent = settings.fontSize * settings.lineHeight;
     final painter = TextPainter(
       text: TextSpan(
@@ -1318,8 +1275,6 @@ class _ReaderScreenState extends State<ReaderScreen>
       final resolved = measuredExtent.isFinite && measuredExtent > 0
           ? measuredExtent
           : nominalExtent;
-      _simulationLineExtentSignature = signature;
-      _simulationLineExtentCache = resolved;
       return resolved;
     } finally {
       painter.dispose();
@@ -2986,10 +2941,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     if (!mounted) return;
 
-    _paragraphCache.clear();
-    _paragraphCacheCharacters = 0;
-    _simulationContentExtentCache.clear();
-    _simulationContentExtentSignature = null;
+    _layoutCache.clear();
     _discardPageTurnSnapshot();
     _discardReversePageTurnSnapshot();
     final previousController = _scrollController;
@@ -3812,20 +3764,27 @@ class _ReaderScreenState extends State<ReaderScreen>
     required List<EpubContentBlock> richBlocks,
     required double contentWidth,
   }) {
-    final signature = SimulationLayoutSignature(
-      contentWidth: contentWidth,
-      settings: _settings,
+    return _layoutCache.chapterExtent(
+      chapter,
+      SimulationLayoutSignature(
+        contentWidth: contentWidth,
+        settings: _settings,
+      ),
+      () => _measureSimulationChapterContentExtent(
+        chapter: chapter,
+        paragraphs: paragraphs,
+        richBlocks: richBlocks,
+        contentWidth: contentWidth,
+      ),
     );
-    if (_simulationContentExtentSignature?.matches(signature) != true) {
-      _simulationContentExtentSignature = signature;
-      _simulationContentExtentCache.clear();
-    }
-    final cached = _simulationContentExtentCache.remove(chapter);
-    if (cached != null) {
-      _simulationContentExtentCache[chapter] = cached;
-      return cached;
-    }
+  }
 
+  double _measureSimulationChapterContentExtent({
+    required Chapter chapter,
+    required List<String> paragraphs,
+    required List<EpubContentBlock> richBlocks,
+    required double contentWidth,
+  }) {
     final titleExtent = _bodyStartOffset(
       chapter,
       settings: _settings,
@@ -3846,7 +3805,6 @@ class _ReaderScreenState extends State<ReaderScreen>
                   width: contentWidth,
                 ),
           );
-      _cacheSimulationContentExtent(chapter, extent);
       return extent;
     }
 
@@ -3871,17 +3829,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (index < paragraphs.length - 1) bodyExtent += paragraphGap;
     }
     final extent = titleExtent + bodyExtent;
-    _cacheSimulationContentExtent(chapter, extent);
     return extent;
-  }
-
-  void _cacheSimulationContentExtent(Chapter chapter, double extent) {
-    _simulationContentExtentCache[chapter] = extent;
-    while (_simulationContentExtentCache.length > 5) {
-      _simulationContentExtentCache.remove(
-        _simulationContentExtentCache.keys.first,
-      );
-    }
   }
 
   Widget _buildChapterPage({

@@ -79,8 +79,19 @@ abstract interface class LibraryRepository
   Future<void> saveSettings(ReaderSettings settings);
 }
 
+abstract interface class BookWordCountRepository {
+  Future<void> saveWordCounts(Book sourceBook, List<int> chapterWordCounts);
+}
+
+abstract interface class ChapterEditingRepository
+    implements BookWordCountRepository {
+  /// Commits against sourceBook's content revision and returns the new snapshot.
+  Future<Book> replaceChapter(Book sourceBook, Chapter replacement);
+}
+
 /// Operations used by the reflowable novel reader.
-abstract interface class ReaderRepository implements ImportedFontStore {
+abstract interface class ReaderRepository
+    implements ImportedFontStore, ChapterEditingRepository {
   Future<ReadingProgress?> getProgress(String bookId);
 
   Future<void> saveProgress(ReadingProgress progress);
@@ -92,10 +103,6 @@ abstract interface class ReaderRepository implements ImportedFontStore {
   Future<Set<String>> getCollapsedTocGroups(String bookId);
 
   Future<void> saveCollapsedTocGroups(String bookId, Set<String> groupIds);
-
-  Future<void> replaceChapter(Book sourceBook, Chapter replacement);
-
-  Future<void> saveWordCounts(Book sourceBook, List<int> chapterWordCounts);
 
   Future<void> deleteBook(String bookId);
 }

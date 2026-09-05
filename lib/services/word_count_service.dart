@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:isolate';
 
 import '../models/book.dart';
@@ -9,11 +10,11 @@ import '../models/book.dart';
 /// counted once, so supplementary-plane characters are not double-counted as
 /// two UTF-16 code units.
 class WordCountService {
-  static final Map<String, List<int>> _chapterCountCache =
-      <String, List<int>>{};
+  static final LinkedHashMap<String, List<int>> _chapterCountCache =
+      LinkedHashMap<String, List<int>>();
+  static int _cachedChapters = 0;
   static final Map<String, Future<List<int>>> _chapterCountsInFlight =
       <String, Future<List<int>>>{};
-  static final Map<String, int> _bookCountGenerations = <String, int>{};
 
   /// Counts each chapter body independently without blocking the UI isolate.
   ///
@@ -26,10 +27,12 @@ class WordCountService {
       return Future<List<int>>.value(stored);
     }
 
-    final generation = _bookCountGenerations[book.id] ?? 0;
-    final cacheKey = '${_chapterCacheKey(book)}:$generation';
-    final cached = _chapterCountCache[cacheKey];
-    if (cached != null) return Future<List<int>>.value(cached);
+    final cacheKey = _chapterCacheKey(book);
+    final cached = _chapterCountCache.remove(cacheKey);
+    if (cached != null) {
+      _chapterCountCache[cacheKey] = cached;
+      return Future<List<int>>.value(cached);
+    }
 
     final existing = _chapterCountsInFlight[cacheKey];
     if (existing != null) return existing;
@@ -38,7 +41,17 @@ class WordCountService {
     operation = Isolate.run(() => _countBookChapterBodies(book))
         .then((counts) {
           final immutableCounts = List<int>.unmodifiable(counts);
-          _chapterCountCache[cacheKey] = immutableCounts;
+          if (immutableCounts.length <= 100000) {
+            while (_chapterCountCache.isNotEmpty &&
+                (_chapterCountCache.length >= 16 ||
+                    _cachedChapters + immutableCounts.length > 100000)) {
+              _cachedChapters -= _chapterCountCache
+                  .remove(_chapterCountCache.keys.first)!
+                  .length;
+            }
+            _chapterCountCache[cacheKey] = immutableCounts;
+            _cachedChapters += immutableCounts.length;
+          }
           return immutableCounts;
         })
         .whenComplete(() {
@@ -53,18 +66,6 @@ class WordCountService {
   /// Counts a single edited chapter without rescanning the rest of the book.
   static Future<int> countContent(String content) =>
       Isolate.run(() => _countVisibleRunesIn(content));
-
-  /// Drops cached results after a local chapter edit.
-  ///
-  /// The persisted source revision does not change when the user edits
-  /// ReadVibe's private copy, so the old cache key must be invalidated
-  /// explicitly.
-  static void invalidateBook(String bookId) {
-    _bookCountGenerations[bookId] = (_bookCountGenerations[bookId] ?? 0) + 1;
-    final prefix = '$bookId:';
-    _chapterCountCache.removeWhere((key, _) => key.startsWith(prefix));
-    _chapterCountsInFlight.removeWhere((key, _) => key.startsWith(prefix));
-  }
 
   /// Derives the whole-book count from the one authoritative chapter scan.
   /// Values are saturated to the same range accepted by persisted metadata.
@@ -81,7 +82,7 @@ class WordCountService {
 }
 
 String _chapterCacheKey(Book book) =>
-    '${book.id}:${book.fileSize}:${book.txtParserVersion}:${book.chapters.length}';
+    '${book.id}:${book.importDate.microsecondsSinceEpoch}:${book.contentRevision}:${book.fileSize}:${book.txtParserVersion}:${book.chapters.length}';
 
 List<int> _countBookChapterBodies(Book book) => List<int>.unmodifiable(
   book.chapters.map((chapter) => _countVisibleRunesIn(chapter.content)),

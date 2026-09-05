@@ -3,6 +3,8 @@
 // storage layer to override content getters with bounded lazy chapter proxies.
 // ignore_for_file: prefer_initializing_formals
 
+import 'book_content_revision.dart';
+
 const currentTxtParserVersion = 3;
 
 final _volumeChapterTitlePattern = RegExp(
@@ -178,6 +180,7 @@ class Book {
   final DateTime importDate;
   final int fileSize;
   final int txtParserVersion;
+  final int contentRevision;
   final int? wordCount;
   final List<int>? chapterWordCounts;
   final String? sourcePath;
@@ -195,6 +198,7 @@ class Book {
     required this.importDate,
     this.fileSize = 0,
     this.txtParserVersion = currentTxtParserVersion,
+    this.contentRevision = 0,
     this.wordCount,
     this.chapterWordCounts,
     this.sourcePath,
@@ -217,6 +221,7 @@ class Book {
     'importDate': importDate.toIso8601String(),
     'fileSize': fileSize,
     'txtParserVersion': txtParserVersion,
+    'contentRevision': contentRevision,
     if (wordCount != null) 'wordCount': wordCount,
     if (chapterWordCounts != null && chapterWordCounts!.length == chapterCount)
       'chapterWordCounts': chapterWordCounts,
@@ -232,6 +237,7 @@ class Book {
     String? title,
     String? author,
     List<Chapter>? chapters,
+    int? contentRevision,
     int? wordCount,
     List<int>? chapterWordCounts,
     String? sourcePath,
@@ -251,6 +257,7 @@ class Book {
       importDate: importDate,
       fileSize: fileSize,
       txtParserVersion: txtParserVersion,
+      contentRevision: contentRevision ?? this.contentRevision,
       wordCount: clearWordCounts ? null : wordCount ?? this.wordCount,
       chapterWordCounts: clearWordCounts
           ? null
@@ -351,6 +358,7 @@ class Book {
       importDate: importDate,
       fileSize: fileSize,
       txtParserVersion: txtParserVersion,
+      contentRevision: readContentRevision(json['contentRevision']),
       wordCount: wordCount,
       chapterWordCounts: chapterWordCounts,
       sourcePath: sourcePath,
