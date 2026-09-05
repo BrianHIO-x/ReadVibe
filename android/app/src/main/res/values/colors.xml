@@ -2,4 +2,7 @@
 <resources>
     <!-- Warm cream background used for the launch screen, matching AppTheme.background -->
     <color name="launch_background">#FAF7F2</color>
+    <!-- Adaptive launcher icon background, matching AppTheme.accent and GROUND in
+         tool/draw_launcher_icon.py -->
+    <color name="launcher_background">#B3543A</color>
 </resources>
