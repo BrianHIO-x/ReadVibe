@@ -75,7 +75,7 @@ Future<Book> parseWordDocument(
     }
     final title = rawDocument?['title'];
     final author = rawDocument?['author'];
-    return Isolate.run(
+    return await Isolate.run(
       () => buildBookFromText(
         content: content,
         fileName: fileName,

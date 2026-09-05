@@ -18,6 +18,11 @@ jobs:
       - name: Install Flutter
         uses: subosito/flutter-action@v2.23.0
         with:
+          # Pinned to the SDK this project is developed against (see .metadata).
+          # An unpinned stable channel moves ahead of the local SDK and fails
+          # Analyze on diagnostics the developer cannot reproduce. Bump this
+          # together with a local `flutter upgrade`.
+          flutter-version: 3.44.4
           channel: stable
           cache: true
       - name: Resolve dependencies
@@ -36,6 +41,8 @@ jobs:
           keytool -genkeypair -v -keystore android/ci-release.jks -storepass readvibe-ci -keypass readvibe-ci -alias readvibe-ci -keyalg RSA -keysize 2048 -validity 2 -dname "CN=ReadVibe CI"
           printf '%s\n' 'storeFile=ci-release.jks' 'storePassword=readvibe-ci' 'keyAlias=readvibe-ci' 'keyPassword=readvibe-ci' > android/key.properties
       - name: Build Android arm64 release smoke APK
-        run: flutter build apk --release --split-per-abi --target-platform android-arm64 --build-name 0.6.16 --build-number 62 --no-pub
+        # Version name comes from pubspec.yaml. This smoke APK is never published,
+        # so it keeps Flutter's default build number rather than the release one.
+        run: flutter build apk --release --split-per-abi --target-platform android-arm64 --no-pub
       - name: Verify release contents and size budget
         run: python3 tool/check_release_package.py build/app/outputs/flutter-apk/app-arm64-v8a-release.apk --mapping build/app/outputs/mapping/release/mapping.txt
