@@ -39,7 +39,7 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
     setState(() {
       _busy = true;
       _error = null;
-      _status = _downloaded == null ? '正在连接下载线路…' : '正在检查安装包…';
+      _status = _downloaded == null ? '正在测速下载线路…' : '正在检查安装包…';
     });
     try {
       _downloaded ??= await _service.download(widget.info, (progress) {
@@ -82,6 +82,19 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
     }
   }
 
+  /// Percentage, megabytes and the live rate, so a line that has slowed to a
+  /// crawl is visible instead of only being felt.
+  String _progressLabel(UpdateDownloadProgress progress) {
+    final received = (progress.received / (1024 * 1024)).toStringAsFixed(1);
+    final total = (widget.info.apkSize / (1024 * 1024)).toStringAsFixed(1);
+    final percent = (progress.fraction * 100).toStringAsFixed(0);
+    final rate = progress.bytesPerSecond;
+    final speed = rate > 0
+        ? ' · ${(rate / (1024 * 1024)).toStringAsFixed(2)} MB/s'
+        : '';
+    return '$percent% · $received / $total MB$speed';
+  }
+
   @override
   void dispose() {
     _service.cancel();
@@ -122,11 +135,15 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
                 ),
               if (_progress != null && _busy && _downloaded == null) ...[
                 const SizedBox(height: AppSpacing.md),
-                LinearProgressIndicator(value: _progress!.fraction),
-                const SizedBox(height: AppSpacing.sm),
-                Text(
-                  '${(_progress!.fraction * 100).toStringAsFixed(0)}% · ${(_progress!.received / (1024 * 1024)).toStringAsFixed(1)} / ${(widget.info.apkSize / (1024 * 1024)).toStringAsFixed(1)} MB',
+                // The probe keeps no bytes, so a percentage would be misleading
+                // while it runs.
+                LinearProgressIndicator(
+                  value: _progress!.probing ? null : _progress!.fraction,
                 ),
+                if (!_progress!.probing) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(_progressLabel(_progress!)),
+                ],
               ],
               if (_status != null) ...[
                 const SizedBox(height: AppSpacing.md),

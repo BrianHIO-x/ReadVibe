@@ -30,7 +30,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `pubspec.yaml` | 项目清单。声明包名 `readvibe`、版本 `0.6.19+65`（`+` 后为 Android 内部构建号）、Dart 约束，以及全部运行依赖（file_picker、archive、shared_preferences、path_provider、path、fast_gbk、dart3_big5、dart_mobi、crypto、html、xml、wakelock_plus、package_info_plus）与开发依赖（flutter_test、flutter_lints）。 |
+| `pubspec.yaml` | 项目清单。声明包名 `readvibe`、版本 `0.6.20+66`（`+` 后为 Android 内部构建号）、Dart 约束，以及全部运行依赖（file_picker、archive、shared_preferences、path_provider、path、fast_gbk、dart3_big5、dart_mobi、crypto、html、xml、wakelock_plus、package_info_plus）与开发依赖（flutter_test、flutter_lints）。 |
 | `pubspec.lock` | 依赖解析结果快照，锁定每个依赖包的确切版本，保证构建可复现。 |
 | `analysis_options.yaml` | Dart 静态分析配置。启用 `flutter_lints` 推荐规则集，未额外增删规则。 |
 | `AGENTS.md` | AI 协作约定。描述项目入口目录、工作原则、版本递增规则与验证要求。 |
@@ -189,7 +189,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `incoming_file_service.dart` | 外部 ACTION_VIEW 文件接收。原生复制到缓存后经通道通知，静态处理器串行消费避免两个文件管理器启动竞态；结构化错误经回调上报。 |
 | `system_text_action_service.dart` | 系统文字动作服务。经 PackageManager 查询可接收翻译/搜索的应用，产品白名单圈定六个 AI 应用与 Edge/Chrome/系统浏览器；支持记住默认目标、清除默认与显式启动校验。 |
 | `update_service.dart` | 更新检查。依次请求 GitHub Releases 接口与镜像线路，任一线路取到正式版 JSON 即停止；三轮段比较版本号，解析 arm64 APK 资产并校验下载地址确实指向本仓库的发布路径，安装包摘要优先取资产自带的 `digest`，缺失时回退发布说明里的 `SHA-256：` 行；给出“有新版/已最新/检查失败”三态结果，同一时刻只保留一次在途检查。 |
-| `update_download_service.dart` | 安装包下载与安装。按直连、镜像的顺序逐条尝试下载线路，字节先写入会话目录内的 `.part` 文件，长度、ZIP 魔数与 SHA-256 全部通过才改名为正式 APK；失败即删除本次会话目录，两天前的旧会话在开始时清理；支持取消与进度回调，安装经 `app_update` 通道转交原生层。 |
+| `update_download_service.dart` | 安装包下载与安装。下载前并发向全部线路各取一段 512 KB 样本，按首包之后的实测吞吐排序，未应答的线路退到队尾保底，随后从最快的一条开始下载；下载中每秒统计一次速率，持续落后于下一条线路一半速度达六秒即换线，已落盘的字节通过 `Range` 续传接续，接近完成时不再换线；字节先写入会话目录内的 `.part` 文件，长度、ZIP 魔数与 SHA-256 全部通过才改名为正式 APK；跨线路续传只在存在摘要时启用，失败即删除本次会话目录，两天前的旧会话在开始时清理；支持取消与进度回调，安装经 `app_update` 通道转交原生层。 |
 | `storage/obsolete_search_cleanup.dart` | 独立小模块。删除旧版全文搜索在应用数据目录遗留的 `search/` 目录，含路径越界防护。 |
 | `storage/chapter_payload_codec.dart` | 章节载荷编解码。`encodeChapterPayload` 写入章节 JSON（富文本块含全部可见文本时不重复写纯文本），`decodeChapterPayload` 还原章节数据并为损坏的富文本重建兜底纯文本；禁止依赖 IO 与 Flutter，由架构测试锁定。 |
 | `storage/chapter_revision_cleanup.dart` | 过期章节载荷回收。在持有章节写队列时执行，正常清单与备份清单引用的载荷一律保留，清单损坏即放弃本次回收。 |
@@ -221,7 +221,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `global_settings_sheet.dart` | 全局设置侧栏（书架右上打开）。字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口与开源许可页入口；版本号由书架层传入。 |
 | `library_search_controls.dart` | 书架搜索与筛选用控件。`LibraryFilterButton` 弹出筛选菜单（当前项在菜单中打勾），菜单右缘与书架网格右边线对齐；`LibrarySearchControls` 组合圆角搜索框（可清除）与激活筛选 `InputChip`。 |
 | `reading_progress_bar.dart` | 阅读页顶部细进度条。矮 2dp 固定于最上端，`ValueListenableBuilder` 局部重建，任何阅读模式都随滚动推进，不随菜单开关隐藏。 |
-| `app_update_dialog.dart` | 新版本对话框。展示安装包体积与发布说明（限高滚动），一个按钮串起下载、校验与调起安装三步，下载中显示线路与百分比且可取消；下载成功后失败重试不再重复下载，安装权限缺失时提示去系统设置开启后直接重试。 |
+| `app_update_dialog.dart` | 新版本对话框。展示安装包体积与发布说明（限高滚动），一个按钮串起下载、校验与调起安装三步；测速阶段显示不定进度条，下载中显示线路、百分比与实时速率且可随时取消；下载成功后失败重试不再重复下载，安装权限缺失时提示去系统设置开启后直接重试。 |
 
 ### lib/screens/
 
