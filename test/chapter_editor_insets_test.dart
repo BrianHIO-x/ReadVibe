@@ -62,7 +62,7 @@ void main() {
         find.descendant(of: field, matching: find.byType(EditableText)),
       );
       final text = editable.widget.controller.text;
-      final top = tester.getTopLeft(find.text('编辑当前章节')).dy;
+      final top = tester.getTopLeft(find.byTooltip('关闭编辑器')).dy;
       for (final inset in [0.0, 300.0, 180.0, 0.0]) {
         keyboard(tester, inset);
         await tester.pump(const Duration(milliseconds: 200));
@@ -73,7 +73,7 @@ void main() {
         expect(viewport.bottom, closeTo(fieldRect.bottom, 0.1));
         expect(viewport.left, greaterThan(fieldRect.left + 10));
         expect(viewport.right, lessThan(fieldRect.right - 10));
-        expect(tester.getTopLeft(find.text('编辑当前章节')).dy, top);
+        expect(tester.getTopLeft(find.byTooltip('关闭编辑器')).dy, top);
         expect(editable.widget.controller.text, text);
       }
       await tester.pumpWidget(const SizedBox.shrink());

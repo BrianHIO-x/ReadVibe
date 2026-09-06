@@ -38,3 +38,35 @@ Iterable<ReadingParagraph> readingParagraphs(Chapter chapter) sync* {
     }
   }
 }
+
+/// Maps a reading-paragraph coordinate back onto [Chapter.content] so the
+/// chapter editor can open on the line the reader was looking at.
+///
+/// Reading paragraphs drop blank runs and strip indentation, so their indices
+/// do not line up with raw offsets. Walking the bodies in order and searching
+/// forward from the previous match keeps the mapping exact for plain chapters
+/// and best-effort for rich EPUB ones, where the flattened text still carries
+/// the same bodies in the same order. Returns null when the paragraph cannot
+/// be located.
+int? contentOffsetForReadingParagraph(
+  Chapter chapter,
+  int paragraphIndex,
+  int bodyOffset,
+) {
+  if (paragraphIndex < 0 || bodyOffset < 0) return null;
+  final content = chapter.content;
+  if (content.isEmpty) return null;
+  var cursor = 0;
+  var index = 0;
+  for (final paragraph in readingParagraphs(chapter)) {
+    if (paragraph.body.isEmpty) continue;
+    final start = content.indexOf(paragraph.body, cursor);
+    if (start < 0) return null;
+    if (index == paragraphIndex) {
+      return (start + bodyOffset).clamp(0, content.length);
+    }
+    cursor = start + paragraph.body.length;
+    index++;
+  }
+  return null;
+}

@@ -34,15 +34,18 @@ class GlobalSettingsSheet extends StatelessWidget {
           right: Radius.circular(AppRadius.pill),
         ),
       ),
+      // The trailing gap lives on the scroll view instead of the panel, so the
+      // list keeps running underneath the gesture bar.
       padding: EdgeInsets.fromLTRB(
         AppSpacing.xl,
         MediaQuery.viewPaddingOf(context).top + AppSpacing.xl,
         AppSpacing.xl,
-        AppSpacing.xl,
+        0,
       ),
       child: SafeArea(
         top: false,
         right: false,
+        bottom: false,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -68,6 +71,9 @@ class GlobalSettingsSheet extends StatelessWidget {
             const SizedBox(height: AppSpacing.xl),
             Expanded(
               child: SingleChildScrollView(
+                padding: EdgeInsets.only(
+                  bottom: AppSpacing.xl + MediaQuery.paddingOf(context).bottom,
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -144,7 +150,7 @@ class GlobalSettingsSheet extends StatelessWidget {
                         ),
                       ),
                       subtitle: Text(
-                        '默认关闭；开启后，进入书架时会连接 GitHub Releases。',
+                        '默认关闭；开启后检查新版，连接失败时自动尝试备用线路。下载需手动确认。',
                         style: TextStyle(
                           color: colors.secondary,
                           fontSize: 12,

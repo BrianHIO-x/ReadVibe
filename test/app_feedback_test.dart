@@ -371,9 +371,9 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      expect(find.text('前往 GitHub 下载').hitTestable(), findsOneWidget);
+      expect(find.text('下载并安装').hitTestable(), findsOneWidget);
       await _capture(tester, 'update-narrow');
-      await tester.tap(find.text('以后再说'));
+      await tester.tap(find.text('关闭'));
       await tester.pumpAndSettle();
       await result;
       expect(tester.takeException(), isNull);

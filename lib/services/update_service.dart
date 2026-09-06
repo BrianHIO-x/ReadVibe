@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 /// Release metadata fetched from GitHub for a newer version.
@@ -38,11 +37,7 @@ class UpdateCheckResult {
   const UpdateCheckResult.error() : info = null, failed = true;
 }
 
-/// Silent update check against the project's GitHub Releases.
-///
-/// The app is sideloaded, so update checks compare GitHub Releases and hand
-/// the release page to the user's browser. ReadVibe itself never requests APK
-/// installation permission.
+/// Release checks are separate from downloading and Android installation.
 abstract interface class UpdateChecker {
   Future<UpdateCheckResult> checkForUpdate();
 
@@ -50,83 +45,130 @@ abstract interface class UpdateChecker {
 }
 
 class UpdateService implements UpdateChecker {
-  static const _channel = MethodChannel('com.readvibe.app/app_update');
+  UpdateService({
+    List<Uri>? feeds,
+    this.versionReader,
+    this.timeout = const Duration(seconds: 5),
+  }) : _feeds =
+           feeds ??
+           [Uri.parse(_apiUrl), Uri.parse('https://gh-proxy.com/$_apiUrl')];
+
   static const _apiUrl =
       'https://api.github.com/repos/BrianHIO-x/ReadVibe/releases/latest';
-  static const _timeout = Duration(seconds: 12);
+  final List<Uri> _feeds;
+  final Future<String> Function()? versionReader;
+  final Duration timeout;
+  Future<UpdateCheckResult>? _checking;
 
   @override
-  Future<String> currentVersion() async =>
-      (await PackageInfo.fromPlatform()).version;
+  Future<String> currentVersion() async => versionReader != null
+      ? await versionReader!()
+      : (await PackageInfo.fromPlatform()).version;
 
   /// Checks the release feed: a newer release when available, up-to-date
   /// when the feed answers with the current version, or an error when the
   /// feed cannot be reached or parsed.
   @override
-  Future<UpdateCheckResult> checkForUpdate() async {
+  Future<UpdateCheckResult> checkForUpdate() =>
+      _checking ??= _check().whenComplete(() => _checking = null);
+
+  Future<UpdateCheckResult> _check() async {
+    try {
+      final current = await currentVersion();
+      for (final feed in _feeds) {
+        try {
+          return parseRelease(await _readFeed(feed), current);
+        } on Object {
+          // A blocked/limited endpoint or an HTML proxy error is not "latest".
+        }
+      }
+    } on Object {
+      // Package metadata can also be unavailable.
+    }
+    return const UpdateCheckResult.error();
+  }
+
+  Future<Object?> _readFeed(Uri feed) async {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(Uri.parse(_apiUrl)).timeout(_timeout);
-      request.headers.set('Accept', 'application/vnd.github+json');
-      request.headers.set('User-Agent', 'ReadVibe-Android');
-      final response = await request.close().timeout(_timeout);
-      if (response.statusCode != 200) {
-        return const UpdateCheckResult.error();
-      }
-      final body = await utf8.decoder.bind(response).join().timeout(_timeout);
-      final json = jsonDecode(body);
-      if (json is! Map<String, dynamic>) return const UpdateCheckResult.error();
-
-      final latest = _versionFromTag(json['tag_name'] as String? ?? '');
-      if (latest == null) return const UpdateCheckResult.error();
-      final current = (await PackageInfo.fromPlatform()).version;
-      if (!isNewerVersion(latest, current)) {
-        return const UpdateCheckResult.upToDate();
-      }
-
-      final assets = json['assets'];
-      if (assets is! List) return const UpdateCheckResult.error();
-      final apks = assets
-          .whereType<Map<String, dynamic>>()
-          .where((a) => (a['name'] as String? ?? '').endsWith('.apk'))
-          .toList();
-      if (apks.isEmpty) return const UpdateCheckResult.error();
-      final asset = apks.firstWhere(
-        (a) => (a['name'] as String).contains('arm64-v8a'),
-        orElse: () => apks.first,
-      );
-      final url = asset['browser_download_url'] as String?;
-      if (url == null || url.isEmpty) return const UpdateCheckResult.error();
-
-      return UpdateCheckResult.available(
-        AppUpdateInfo(
-          version: latest,
-          notes: (json['body'] as String? ?? '').trim(),
-          apkUrl: url,
-          apkName: asset['name'] as String,
-          apkSize: (asset['size'] as num?)?.toInt() ?? 0,
-          releasePageUrl:
-              json['html_url'] as String? ??
-              'https://github.com/BrianHIO-x/ReadVibe/releases/latest',
-          sha256: sha256FromNotes(json['body'] as String? ?? ''),
-        ),
-      );
-    } on Object {
-      return const UpdateCheckResult.error();
+      return await (() async {
+        final request = await client.getUrl(feed);
+        request.headers.set('Accept', 'application/vnd.github+json');
+        request.headers.set('User-Agent', 'ReadVibe-Android');
+        request.headers.set('Cache-Control', 'no-cache');
+        final response = await request.close();
+        if (response.statusCode != 200) {
+          throw const FormatException('更新线路暂时不可用');
+        }
+        final bytes = <int>[];
+        await for (final chunk in response) {
+          bytes.addAll(chunk);
+          if (bytes.length > 1024 * 1024) throw const FormatException('版本信息过大');
+        }
+        return jsonDecode(utf8.decode(bytes));
+      })().timeout(timeout);
     } finally {
-      client.close();
+      client.close(force: true);
     }
   }
 
-  Future<bool> openReleasePage(AppUpdateInfo info) async {
-    try {
-      return await _channel.invokeMethod<bool>('openExternalUrl', {
-            'url': info.releasePageUrl,
-          }) ??
-          false;
-    } on Object {
-      return false;
+  static UpdateCheckResult parseRelease(Object? json, String current) {
+    if (json is! Map<String, dynamic> ||
+        json['draft'] == true ||
+        json['prerelease'] == true) {
+      throw const FormatException('无效的正式版本信息');
     }
+
+    final latest = _versionFromTag(json['tag_name'] as String? ?? '');
+    if (latest == null || _parseVersion(current) == null) {
+      throw const FormatException('版本号无效');
+    }
+    if (!isNewerVersion(latest, current)) {
+      return const UpdateCheckResult.upToDate();
+    }
+
+    final assets = json['assets'];
+    if (assets is! List) throw const FormatException('缺少安装包');
+    final apks = assets
+        .whereType<Map<String, dynamic>>()
+        .where((a) => (a['name'] as String? ?? '').endsWith('-arm64-v8a.apk'))
+        .toList();
+    if (apks.isEmpty) throw const FormatException('缺少 arm64 安装包');
+    final asset = apks.first;
+    final url = asset['browser_download_url'] as String?;
+    final uri = url == null ? null : Uri.tryParse(url);
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.host != 'github.com' ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment ||
+        !uri.path.startsWith('/BrianHIO-x/ReadVibe/releases/download/') ||
+        !uri.path.endsWith('/${asset['name']}')) {
+      throw const FormatException('安装包来源无效');
+    }
+    final size = (asset['size'] as num?)?.toInt() ?? 0;
+    if (size <= 0 || size > 200 * 1024 * 1024) {
+      throw const FormatException('安装包大小无效');
+    }
+    final digest = asset['digest'] as String? ?? '';
+    final hash =
+        RegExp(r'^sha256:([0-9a-fA-F]{64})$').firstMatch(digest)?.group(1) ??
+        sha256FromNotes(json['body'] as String? ?? '');
+
+    return UpdateCheckResult.available(
+      AppUpdateInfo(
+        version: latest,
+        notes: (json['body'] as String? ?? '').trim(),
+        apkUrl: url!,
+        apkName: asset['name'] as String,
+        apkSize: size,
+        releasePageUrl:
+            json['html_url'] as String? ??
+            'https://github.com/BrianHIO-x/ReadVibe/releases/latest',
+        sha256: hash,
+      ),
+    );
   }
 
   /// Compares two three-dotted public versions. Returns true when [remote]
@@ -156,6 +198,7 @@ class UpdateService implements UpdateChecker {
   }
 
   static List<int>? _parseVersion(String version) {
+    if (!RegExp(r'^\d+\.\d+\.\d+$').hasMatch(version.trim())) return null;
     final parts = version.trim().split('.');
     if (parts.length != 3) return null;
     final parsed = parts.map(int.tryParse).toList();

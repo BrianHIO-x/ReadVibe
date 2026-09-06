@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/library_filter.dart';
+import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_popup_menu.dart';
 
@@ -19,6 +20,10 @@ class LibraryFilterButton extends StatelessWidget {
     colors: colors,
     tooltip: '筛选书架',
     onSelected: onSelected,
+    // Lands the menu's right edge on the shelf grid's right edge instead of
+    // trailing the icon, so it lines up with the last column of covers.
+    menuRightInset:
+        MediaQuery.viewPaddingOf(context).right + AppSpacing.md,
     icon: Icon(
       filter == ShelfFilter.all
           ? Icons.filter_list_rounded

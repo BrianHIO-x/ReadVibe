@@ -71,6 +71,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
       colors: widget.colors,
       child: SafeArea(
         top: false,
+        bottom: false,
         child: Column(
           children: [
             Padding(
@@ -123,7 +124,14 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
             Expanded(
               child: CustomScrollView(
                 controller: widget.scrollController,
-                slivers: _buildDirectorySlivers(directory),
+                slivers: [
+                  ..._buildDirectorySlivers(directory),
+                  SliverToBoxAdapter(
+                    child: SizedBox(
+                      height: MediaQuery.paddingOf(context).bottom,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],

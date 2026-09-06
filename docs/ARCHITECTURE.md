@@ -30,7 +30,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `pubspec.yaml` | 项目清单。声明包名 `readvibe`、版本 `0.6.17`、Dart 约束，以及全部运行依赖（file_picker、archive、shared_preferences、path_provider、path、fast_gbk、dart3_big5、dart_mobi、crypto、html、xml、wakelock_plus、package_info_plus）与开发依赖（flutter_test、flutter_lints）。 |
+| `pubspec.yaml` | 项目清单。声明包名 `readvibe`、版本 `0.6.19+65`（`+` 后为 Android 内部构建号）、Dart 约束，以及全部运行依赖（file_picker、archive、shared_preferences、path_provider、path、fast_gbk、dart3_big5、dart_mobi、crypto、html、xml、wakelock_plus、package_info_plus）与开发依赖（flutter_test、flutter_lints）。 |
 | `pubspec.lock` | 依赖解析结果快照，锁定每个依赖包的确切版本，保证构建可复现。 |
 | `analysis_options.yaml` | Dart 静态分析配置。启用 `flutter_lints` 推荐规则集，未额外增删规则。 |
 | `AGENTS.md` | AI 协作约定。描述项目入口目录、工作原则、版本递增规则与验证要求。 |
@@ -74,14 +74,15 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `AndroidManifest.xml` | 主清单。仅声明 `INTERNET` 权限；MainActivity 以 `singleTop` 启动，注册 ACTION_VIEW intent-filter 接收八种电子书 MIME 类型实现外部“用其他应用打开”；`<queries>` 中显式列出允许的六个 AI 翻译应用与两个浏览器包名。 |
+| `AndroidManifest.xml` | 主清单。声明 `INTERNET` 与 `REQUEST_INSTALL_PACKAGES` 两项权限，后者供应用内安装更新包使用；注册不导出的 FileProvider（授权 `${applicationId}.updates`，范围见 `xml/update_paths.xml`）把下载好的安装包临时授权给系统安装程序；MainActivity 以 `singleTop` 启动，注册 ACTION_VIEW intent-filter 接收八种电子书 MIME 类型实现外部“用其他应用打开”；`<queries>` 中显式列出允许的六个 AI 翻译应用与两个浏览器包名。 |
 | `java/.../GeneratedPluginRegistrant.java` | Flutter 自动生成的插件注册类，勿手工编辑。 |
 
 ## android/app/src/main/kotlin/com/readvibe/app/（原生代码）
 
 | 文件 | 作用 |
 |---|---|
-| `MainActivity.kt` | 原生宿主 Activity。注册四个 MethodChannel：`incoming_file`（串行消费外部 ACTION_VIEW 文件并复制到应用缓存）、`system_text_actions`（查询并启动系统翻译/搜索目标）、`document_parser`（经单线程执行器调用 Apache POI 提取旧版 DOC 正文）、`app_update`（校验并打开 https 发布页）。内含 AI 与浏览器包名白名单，换用显式组件启动防劫持。 |
+| `MainActivity.kt` | 原生宿主 Activity。注册三个 MethodChannel：`incoming_file`（串行消费外部 ACTION_VIEW 文件并复制到应用缓存）、`system_text_actions`（查询并启动系统翻译/搜索目标）、`document_parser`（经单线程执行器调用 Apache POI 提取旧版 DOC 正文），更新安装通道交给 `AppUpdateHandler`。内含 AI 与浏览器包名白名单，换用显式组件启动防劫持。 |
+| `AppUpdateHandler.kt` | 更新安装通道 `app_update`。校验放在后台执行器：安装包须位于缓存内的更新目录、包名与版本名同更新信息一致、构建号高于已安装版本、签名与当前应用相同；通过后按需引导用户开启未知来源安装权限，或经 FileProvider 授权打开系统安装程序，校验期间重复调用返回 `UPDATE_BUSY`。 |
 | `BookExportHandler.kt` | 导出通道 `book_export`。把应用私有暂存文件写入用户经系统界面选定的位置；来源限定在导出缓存目录内，单次导出串行，重复调用返回 `EXPORT_BUSY`。 |
 | `BackgroundTaskRunner.kt` | 通用后台任务边界。把工作提交到 worker 执行器、把成功与异常回传到 UI 执行器，支持 isActive 开关在销毁后抑制排队任务与迟到回调。PDF 通道与单元测试共用。 |
 | `PdfChannelHandler.kt` | PDF 通道适配层。解析方法调用为不可变 `PdfRequest`，按操作类型分发到渲染或分析两个单线程池，`InvalidPasswordException` 统一映射为 `PDF_PASSWORD_REQUIRED` 错误码；自身不含文档逻辑。 |
@@ -100,6 +101,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `mipmap-*/ic_launcher.png` | 五档密度的传统图标，不透明方形。 |
 | `mipmap-anydpi-v26/ic_launcher.xml` | 自适应图标声明，组合 `@color/launcher_background` 与 `@drawable/launcher_foreground`。 |
 | `drawable/launcher_foreground.xml`、`drawable-nodpi/readvibe_mark.png` | 自适应图标前景，透明底书本位图，由 `tool/draw_launcher_icon.py` 生成。 |
+| `xml/update_paths.xml` | FileProvider 授权范围。只公开缓存目录下的 `readvibe_updates/`，使系统安装程序能读取应用自己下载的安装包，其余私有文件不受影响。 |
 
 ## android/app/src/debug/ 与 android/app/src/profile/
 
@@ -133,7 +135,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `main.dart` | 应用入口。初始化 Flutter 绑定并启动 `ReadVibeApp`；配置 MaterialApp 的亮暗主题、中文本地化代理与 `onGenerateRoute` 路由表：`/` 进书架，`/reader` 依据 `ReaderLaunchArgs`（或裸 `Book`）携带的封面快照与起始矩形构建书香开页过渡，PDF 书走 `PdfReaderScreen`，其余走 `ReaderScreen`。 |
+| `main.dart` | 应用入口。初始化 Flutter 绑定、切换到 `SystemUiMode.edgeToEdge` 让所有页面自绘到系统栏之下，随后启动 `ReadVibeApp`；配置 MaterialApp 的亮暗主题、中文本地化代理与 `onGenerateRoute` 路由表：`/` 进书架，`/reader` 依据 `ReaderLaunchArgs`（或裸 `Book`）携带的封面快照与起始矩形构建书香开页过渡，PDF 书走 `PdfReaderScreen`，其余走 `ReaderScreen`。 |
 
 ### lib/models/（纯数据模型，零框架依赖或仅 Material 枚举展示）
 
@@ -142,7 +144,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `book.dart` | 全部书籍相关模型。定义 `BookFormat`、`BookAvailability`（含丢失原因中文标签）、EPUB 富文本三件套 `EpubContentStyle`/`EpubTextRun`/`EpubContentBlock`、出版社样式安全对比度判断；`Chapter` 支持延迟加载代理与 EPUB 块计数存储；`Book` 持有元数据、字数摘要、封面路径与内嵌字体映射，提供 JSON 编解码与 `copyWith`。另暴露三组章节标题判定函数（卷标题、导语类、独立尾章类）与正则，供 TXT 解析与目录分组复用；`currentTxtParserVersion` 驱动旧书重新解析。 |
 | `book_content_revision.dart` | 正文修订号与冲突类型。`readContentRevision` 归一化持久化的修订号（旧书从零开始），`BookEditConflict` 表示保存时正文已被其他改动推进。 |
 | `reader_settings.dart` | 阅读设置与进度模型。`ReaderSettings`（schema v6）涵盖字号、行高、主题、粗细、字体（系统/内置宋体/导入）、页边距、段距、阅读模式与自动检查更新，含旧版本字段迁移与字体粗细针对内置静态宋体的特殊映射（w300/w600/w900 叠加同色阴影）；`ReadingProgress` 保存章节进度、偏移与逐章快照；`PdfReadingProgress` 与 `PdfDisplayTheme` 独立于章节体系，`toShelfProgress()` 供书架卡片复用。 |
-| `reading_paragraph.dart` | 阅读与搜索共用的段落投影。`readingParagraphs()` 统一纯文本与 EPUB 富文本两种章节为相同顺序的可见段落流；`ReadingParagraph` 携带正文与首行缩进前缀，`visibleParagraphBody()` 清理段首空隙。禁止依赖 IO 与 Flutter，由架构测试保证。 |
+| `reading_paragraph.dart` | 阅读与搜索共用的段落投影。`readingParagraphs()` 统一纯文本与 EPUB 富文本两种章节为相同顺序的可见段落流；`ReadingParagraph` 携带正文与首行缩进前缀，`visibleParagraphBody()` 清理段首空隙；`contentOffsetForReadingParagraph()` 按顺序回查段落正文，把阅读坐标折回 `Chapter.content` 的字符偏移，供编辑器定位阅读行。禁止依赖 IO 与 Flutter，由架构测试保证。 |
 | `search_match.dart` | 搜索结果展示契约。`SearchMatch` 接口约定标题、片段、命中文本与高亮区间，`BookSearchResult`（章节坐标）与 `PdfTextSearchResult`（页码坐标，可标 OCR）各自实现；`maxDocumentSearchResults = 500` 为统一上限，供搜索面板直接渲染。 |
 | `library_filter.dart` | 书架筛选枚举 `ShelfFilter`（全部/最近/未读/四种格式）及中文标签扩展。 |
 | `reader_launch_args.dart` | 书架开书时的路由参数。携带 `Book`、封面截图 `ui.Image` 与书卡在屏幕上的 `Rect`，供开页过渡做共享元素动画。 |
@@ -186,10 +188,11 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `font_service.dart` | 字体导入与加载。经 `ImportedFontStore` 保存所选字体并以时间戳命名家族注册到 Flutter 引擎，加载失败自动回退系统字体且不丢其他设置；静态去重防止重复注册与并发重复加载。 |
 | `incoming_file_service.dart` | 外部 ACTION_VIEW 文件接收。原生复制到缓存后经通道通知，静态处理器串行消费避免两个文件管理器启动竞态；结构化错误经回调上报。 |
 | `system_text_action_service.dart` | 系统文字动作服务。经 PackageManager 查询可接收翻译/搜索的应用，产品白名单圈定六个 AI 应用与 Edge/Chrome/系统浏览器；支持记住默认目标、清除默认与显式启动校验。 |
-| `update_service.dart` | 更新检查。请求本仓库 GitHub Releases 最新版 JSON，三轮段比较版本号，解析 arm64 APK 资产、发布说明与 `SHA-256：` 行；给出“有新版/已最新/检查失败”三态结果，另提供安全打开发布页的通道调用。 |
+| `update_service.dart` | 更新检查。依次请求 GitHub Releases 接口与镜像线路，任一线路取到正式版 JSON 即停止；三轮段比较版本号，解析 arm64 APK 资产并校验下载地址确实指向本仓库的发布路径，安装包摘要优先取资产自带的 `digest`，缺失时回退发布说明里的 `SHA-256：` 行；给出“有新版/已最新/检查失败”三态结果，同一时刻只保留一次在途检查。 |
+| `update_download_service.dart` | 安装包下载与安装。按直连、镜像的顺序逐条尝试下载线路，字节先写入会话目录内的 `.part` 文件，长度、ZIP 魔数与 SHA-256 全部通过才改名为正式 APK；失败即删除本次会话目录，两天前的旧会话在开始时清理；支持取消与进度回调，安装经 `app_update` 通道转交原生层。 |
 | `storage/obsolete_search_cleanup.dart` | 独立小模块。删除旧版全文搜索在应用数据目录遗留的 `search/` 目录，含路径越界防护。 |
-| `storage/chapter_payload_codec.dart` |
-| `storage/chapter_revision_cleanup.dart` | 过期章节载荷回收。在持有章节写队列时执行，正常清单与备份清单引用的载荷一律保留，清单损坏即放弃本次回收。 | 章节载荷编解码。`encodeChapterPayload` 写入章节 JSON（富文本块含全部可见文本时不重复写纯文本），`decodeChapterPayload` 还原章节数据并为损坏的富文本重建兜底纯文本；禁止依赖 IO 与 Flutter，由架构测试锁定。 |
+| `storage/chapter_payload_codec.dart` | 章节载荷编解码。`encodeChapterPayload` 写入章节 JSON（富文本块含全部可见文本时不重复写纯文本），`decodeChapterPayload` 还原章节数据并为损坏的富文本重建兜底纯文本；禁止依赖 IO 与 Flutter，由架构测试锁定。 |
+| `storage/chapter_revision_cleanup.dart` | 过期章节载荷回收。在持有章节写队列时执行，正常清单与备份清单引用的载荷一律保留，清单损坏即放弃本次回收。 |
 
 ### lib/theme/
 
@@ -206,25 +209,25 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 |---|---|
 | `app_toast.dart` | 应用统一轻提示。基于透明 SnackBar 自绘卡片（信息/成功/错误/加载四种图标与配色的时长），支持阅读纸色注入与宽屏居中限制，加载态 30 秒常驻、点击可消。 |
 | `app_dialog.dart` | 应用统一对话框。`showAppDialog` 捕获主题上下文并控制入场/退场时长与遮罩透明度；`AppDialog` 规范内边距与最大宽度；`AppDestructiveButton` 以错误色呈现破坏性操作（填充或描边两态）。 |
-| `app_sheet.dart` | 应用统一底部面板。`showAppSheet` 以 `ModalBottomSheetRoute` 承载可滚动面板并保留禁用动画降级；`AppSheetSurface` 定制 24dp 圆角纸面；`AppSheetHeader` 提供标题与关闭钮；`AppActionSheet` 为多子项动作列表。 |
-| `app_popup_menu.dart` | 主题化弹出菜单。`AppPopupMenuButton` 包装 PopupMenuButton，限定宽度并绘制选中态（勾选图标与强调底色）；`AppMenuEntry` 携带值、标签、图标与选中标记。 |
+| `app_sheet.dart` | 应用统一底部面板。`showAppSheet` 以 `ModalBottomSheetRoute` 承载可滚动面板并保留禁用动画降级；`AppSheetSurface` 定制 24dp 圆角纸面；`AppSheetHeader` 提供标题与关闭钮；`AppActionSheet` 为多子项动作列表；面板不再裁掉底部安全区，改由滚动内容自行留白，纸面一直铺到屏幕底缘。 |
+| `app_popup_menu.dart` | 主题化弹出菜单。`AppPopupMenuButton` 自行计算锚点矩形后调用 `showMenu`，限定宽度并绘制选中态（勾选图标与强调底色）；可选的 `menuRightInset` 把菜单右缘钉在距屏幕右边固定距离处，用于与下方内容列对齐；`AppMenuEntry` 携带值、标签、图标与选中标记。 |
 | `pressable_scale.dart` | 纯视觉按压缩放反馈。用 Listener 监听原始指针事件，不注册手势识别器，可包裹 InkWell/按钮而不劫持点击；禁用态自动复位。 |
 | `book_card.dart` | 书架书卡。封面区域复现背景书脊与渐变遮罩（三明治分层供开书动画采样），显示封面图或首字占位；以章节进度与章内进度折算整体百分比，PDF 显示页数口径；可用性受损时角标提示丢失原因；语义化拼接无障碍标签。 |
-| `chapter_list.dart` | 全屏目录面板。`_TocDirectory` 把章节组织为两级卷目录（卷标题聚合、导语类与卷间散章分区），无卷则退化为平铺列表；卷头为 pinned 固定头可折叠并回传展开状态；行尾显示逐章字数（监听 `chapterWordCounts`）；打开时按当前章定位可见行并保持卷头可见。 |
-| `chapter_editor_sheet.dart` | 章节编辑器。全屏编辑当前章标题与正文；深度处理 Android 系统栏：键盘弹出时恢复编辑区、路由非当前或退后台时暂停，并以 1.1 秒延时重试恢复；富文本章节保存前弹确认（本章转纯文本）；脏内容关闭时询问放弃；保存失败原样展示错误。 |
+| `chapter_list.dart` | 全屏目录面板。列表底部按系统手势条高度补白，章节行可滚动至手势条之下。`_TocDirectory` 把章节组织为两级卷目录（卷标题聚合、导语类与卷间散章分区），无卷则退化为平铺列表；卷头为 pinned 固定头可折叠并回传展开状态；行尾显示逐章字数（监听 `chapterWordCounts`）；打开时按当前章定位可见行并保持卷头可见。 |
+| `chapter_editor_sheet.dart` | 章节编辑器。顶栏由关闭键、章节标题输入框、查找替换开关与保存按钮组成；正文框不自动聚焦，打开时按 `initialAnchorOffset` 把阅读所在行钉到视口顶部（读取 `RenderEditable` 的光标矩形，天然对齐整行）；查找替换面板在当前章内定位匹配，`_FindHighlightController` 直接在文本跨度上着色，因此未聚焦也能看到命中，支持上一个、下一个、单次替换与全部替换（上限 500 处）；深度处理 Android 系统栏：键盘弹出时恢复编辑区、路由非当前或退后台时暂停，并以 1.1 秒延时重试恢复；富文本章节保存前弹确认（本章转纯文本）；脏内容关闭时询问放弃；保存失败原样展示错误。 |
 | `book_search_sheet.dart` | 书内搜索面板。泛型绑定 `SearchMatch`，防重复提交与过期回包（串号丢弃）；按命中区间绘制加粗高亮片段；结果为空、尚未搜索或出错分态展示，达上限提示缩小关键词。 |
 | `reader_settings_sheet.dart` | 阅读设置面板。字号、行高、字体（组合 `FontSettingsSection`）、粗细、页边距、段距、阅读模式与翻页效果、主题全部用自绘滑块式分段控件（高亮块以 `TweenAnimationBuilder` 平移切换）；`_RollingModeDescription` 用于阅读模式说明的上下滚动切换；仿真模式才显示翻页效果选项。 |
 | `font_settings_section.dart` | 字体选择区。系统/宋体/导入三选一卡片加导入按钮，导入卡副标题显示字体名并在无导入字体时禁用，选中卡片微放大并描边强调。 |
 | `global_settings_sheet.dart` | 全局设置侧栏（书架右上打开）。字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口与开源许可页入口；版本号由书架层传入。 |
-| `library_search_controls.dart` | 书架搜索与筛选用控件。`LibraryFilterButton` 弹出筛选菜单（当前项在菜单中打勾）；`LibrarySearchControls` 组合圆角搜索框（可清除）与激活筛选 `InputChip`。 |
+| `library_search_controls.dart` | 书架搜索与筛选用控件。`LibraryFilterButton` 弹出筛选菜单（当前项在菜单中打勾），菜单右缘与书架网格右边线对齐；`LibrarySearchControls` 组合圆角搜索框（可清除）与激活筛选 `InputChip`。 |
 | `reading_progress_bar.dart` | 阅读页顶部细进度条。矮 2dp 固定于最上端，`ValueListenableBuilder` 局部重建，任何阅读模式都随滚动推进，不随菜单开关隐藏。 |
-| `app_update_dialog.dart` | 新版本对话框。展示发布说明（22 行限高滚动）与 SHA-256，按钮调 `UpdateService.openReleasePage` 打开发布页，打开失败给出提示并可重试。 |
+| `app_update_dialog.dart` | 新版本对话框。展示安装包体积与发布说明（限高滚动），一个按钮串起下载、校验与调起安装三步，下载中显示线路与百分比且可取消；下载成功后失败重试不再重复下载，安装权限缺失时提示去系统设置开启后直接重试。 |
 
 ### lib/screens/
 
 | 文件 | 作用 |
 |---|---|
-| `library_screen.dart` | 书架页。经三个可注入依赖（仓库、更新器、导出器）初始化门面服务；负责书籍装载与串号保护、文件选择导入、外部来书导入、开书（含封面截屏快照与书香开页路由）、长按动作面板（改名/排序/删除/导出）、拖动排序网格与焦点自动滚动、搜索与筛选、维护调度、更新检查（3 秒后台静默检查、 dismissed 三天静默）与全局设置侧栏、四种空态（无书/无结果/导入中/打开中）与入场动画。 |
+| `library_screen.dart` | 书架页。书架网格与拖动排序区在底部留出系统手势条高度，内容滚动到手势条之下。经三个可注入依赖（仓库、更新器、导出器）初始化门面服务；负责书籍装载与串号保护、文件选择导入、外部来书导入、开书（含封面截屏快照与书香开页路由）、长按动作面板（改名/排序/删除/导出）、拖动排序网格与焦点自动滚动、搜索与筛选、维护调度、更新检查（3 秒后台静默检查、 dismissed 三天静默）与全局设置侧栏、四种空态（无书/无结果/导入中/打开中）与入场动画。 |
 | `reader_screen.dart` | 文字阅读页（核心）。三种阅读模式：分章（横滑切章、可编辑）、滚动（跨章连续）、仿真（整页分页、仿真/平滑翻页）。职责涵盖：设置装载与防抖持久化（键盘瞬时内嵌不触发重排）、阅读进度记录与恢复（文字锚点与偏移多通道）、目录/搜索/编辑/设置四面板联动、翻页拖拽手势与速度惯性、相邻页与相邻章预热渲染、顶部进度条与沉浸式系统栏、字体加载回退、Epub 排版委托与保活保留选区等。状态编排分散于五个 controller，滚动控制器重建与预加载缓存集中在本 State。 |
 | `pdf_reader_screen.dart` | PDF 阅读页。加载进度、书签、笔记、显示主题与内嵌批注五源合并；`PageView` 翻页配双指缩放（缩放页横向拖动锁定为平移）、进度滑杆、跳页对话框、书签笔记列表、大纲（缩进层级）、双通道搜索（文件文本或逐页 OCR，OCR 结果做空白规范化）、逐页识别弹窗、显示主题切换与源文件丢失兜底删除；渲染任务按 `页:宽度` 去重并限在途 18 个。 |
 
@@ -267,7 +270,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `incoming_file_service_test.dart` | ACTION_VIEW 排队文件被串行消费。 |
 | `library_export_test.dart` | 筛选保持输入稳定且导出用最新存储内容；书架信息与删除确认跟随所选主题。 |
 | `library_maintenance_controller_test.dart` | 扫描合并与被替换书结果剔除；销毁抑制在途扫描；定时维护随宿主取消。 |
-| `library_search_controls_test.dart` | 各筛选下输入宽度与主题；筛选菜单主题化圆面。 |
+| `library_search_controls_test.dart` | 各筛选下输入宽度与主题；筛选菜单主题化圆面与右缘对齐位置。 |
 | `managed_book_resources_test.dart` | PDF 缓存先关再删源；删除不出私有目录白名单；平台清理失败不复活已删资源。 |
 | `mobi_parser_test.dart` | Kindle 超限先拒；无效容器不产生空书。 |
 | `parser_sanity_test.dart` | 章节切分综合用例：卷与导语标题识别、形似标题的散文不误切、相邻重复编号标题合并。 |

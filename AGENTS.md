@@ -24,9 +24,13 @@ ReadVibe 是 Flutter 编写的 Android 本地阅读器。本文件适用于整�
 
 ## 配置与验证
 
-每次 Bug 修复或功能更新，公开版本按 `0.6.X` 递增，Android 内部构建号同步递增。版本与构建配置保持一致。
+每次 Bug 修复或功能更新，公开版本按 `0.6.X` 递增，`pubspec.yaml` 中 `+` 之后的 Android 内部构建号同步递增；两者都只在该文件里维护，构建命令不再用参数覆盖。
+
+发布说明中的 `SHA-256：` 行须取自实际上传的 APK。应用校验安装包时优先采用资产自带的摘要，该行是旧发布缺少摘要时的唯一依据。
 
 正式 arm64 包通过 `tool/check_release_package.py` 检查体积预算、必需离线资源和内置完整字库。
+
+校验通过的正式包一律从 `build/app/outputs/flutter-apk/` 复制进仓库根目录的 `dist/`，按 `ReadVibe-Android-v<公开版本>-arm64-v8a.apk` 命名，历史版本一并保留。该目录是本机的发布包存档，不纳入版本控制。
 
 版本及 Dart 约束见 [pubspec.yaml](pubspec.yaml)，Android 构建及签名要求见 [应用构建配置](android/app/build.gradle.kts)，自动检查流程见 [工作流](.github/workflows/flutter.yml)。
 

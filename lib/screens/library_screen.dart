@@ -81,6 +81,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   Timer? _automaticUpdateTimer;
   late final LibraryMaintenanceController _maintenance;
   bool _automaticUpdateAttempted = false;
+  bool _manualUpdateChecking = false;
+  bool _updateDialogVisible = false;
   String _applicationVersion = '—';
   final _librarySearchController = TextEditingController();
   final _librarySearchFocus = FocusNode();
@@ -170,7 +172,13 @@ class _LibraryScreenState extends State<LibraryScreen>
       if (!mounted) return;
       final result = await _updateChecker.checkForUpdate();
       final info = result.info;
-      if (!mounted || !_settings.automaticUpdateChecks || info == null) return;
+      if (!mounted ||
+          !_settings.automaticUpdateChecks ||
+          info == null ||
+          _manualUpdateChecking ||
+          _updateDialogVisible) {
+        return;
+      }
       final prefs = await SharedPreferences.getInstance();
       final dismissedKey = 'update_dismissed_${info.version}';
       final dismissedAt = prefs.getInt(dismissedKey) ?? 0;
@@ -188,32 +196,50 @@ class _LibraryScreenState extends State<LibraryScreen>
   /// new version, up to date, or unreachable — and ignores the three-day
   /// dismiss window because the user explicitly asked.
   Future<void> _checkUpdateManually() async {
-    AppToast.loading(context, '正在检查更新…', colors: _feedbackColors);
-    final result = await _updateChecker.checkForUpdate();
-    if (!mounted) return;
-    AppToast.hide(context);
-    final info = result.info;
-    if (info != null) {
-      await _showUpdateDialog(info);
-      return;
+    if (_manualUpdateChecking || _updateDialogVisible) return;
+    _manualUpdateChecking = true;
+    try {
+      AppToast.loading(context, '正在检查更新…', colors: _feedbackColors);
+      final result = await _updateChecker.checkForUpdate();
+      if (!mounted) return;
+      AppToast.hide(context);
+      final info = result.info;
+      if (info != null) {
+        await _showUpdateDialog(info);
+        return;
+      }
+      if (result.failed) {
+        _showError('更新线路暂时不可用，请检查网络后重试');
+        return;
+      }
+      _showMessage('当前已是最新版本');
+    } on Object {
+      if (mounted) {
+        AppToast.hide(context);
+        _showError('检查更新失败，请稍后重试');
+      }
+    } finally {
+      _manualUpdateChecking = false;
     }
-    if (result.failed) {
-      _showError('检查更新失败，请检查网络后重试');
-      return;
-    }
-    _showMessage('当前已是最新版本');
   }
 
-  Future<void> _showUpdateDialog(AppUpdateInfo info) {
-    final colors = AppTheme.getReaderTheme(
-      _settings.theme,
-      systemBrightness: MediaQuery.platformBrightnessOf(context),
-    );
-    return showAppDialog<void>(
-      context: context,
-      colors: colors,
-      builder: (_) => AppUpdateDialog(info: info, colors: colors),
-    );
+  Future<void> _showUpdateDialog(AppUpdateInfo info) async {
+    if (_updateDialogVisible) return;
+    _updateDialogVisible = true;
+    try {
+      final colors = AppTheme.getReaderTheme(
+        _settings.theme,
+        systemBrightness: MediaQuery.platformBrightnessOf(context),
+      );
+      await showAppDialog<void>(
+        context: context,
+        colors: colors,
+        barrierDismissible: false,
+        builder: (_) => AppUpdateDialog(info: info, colors: colors),
+      );
+    } finally {
+      _updateDialogVisible = false;
+    }
   }
 
   void _handleGridScroll() {
@@ -1154,6 +1180,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           onPointerUp: _handleShelfPointerUp,
           onPointerCancel: _handleShelfPointerCancel,
           child: SafeArea(
+            bottom: false,
             child: Column(
               children: [
                 // Header — gains a subtle drop shadow once the grid below has
@@ -1523,7 +1550,12 @@ class _LibraryScreenState extends State<LibraryScreen>
       color: colors.accent,
       child: GridView.builder(
         controller: _gridScrollController,
-        padding: const EdgeInsets.all(AppSpacing.md),
+        padding: EdgeInsets.fromLTRB(
+          AppSpacing.md,
+          AppSpacing.md,
+          AppSpacing.md,
+          AppSpacing.md + MediaQuery.paddingOf(context).bottom,
+        ),
         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
           crossAxisCount: 3,
           childAspectRatio: 0.52,
@@ -1609,11 +1641,11 @@ class _LibraryScreenState extends State<LibraryScreen>
           key: const ValueKey('reorder-grid'),
           controller: _reorderScrollController,
           physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(
+          padding: EdgeInsets.fromLTRB(
             horizontalPadding,
             0,
             horizontalPadding,
-            horizontalPadding,
+            horizontalPadding + MediaQuery.paddingOf(context).bottom,
           ),
           child: SizedBox(
             width: gridWidth,

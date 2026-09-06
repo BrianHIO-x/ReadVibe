@@ -102,6 +102,7 @@ class _BookSearchSheetState<T extends SearchMatch>
       colors: widget.colors,
       child: SafeArea(
         top: false,
+        bottom: false,
         child: Column(
           children: [
             const AppSheetHeader(title: '全文搜索'),
@@ -170,7 +171,12 @@ class _BookSearchSheetState<T extends SearchMatch>
                             ),
                           )
                         : ListView.separated(
-                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            padding: EdgeInsets.fromLTRB(
+                              0,
+                              8,
+                              0,
+                              8 + MediaQuery.paddingOf(context).bottom,
+                            ),
                             itemCount: _results.length,
                             separatorBuilder: (_, _) => Divider(
                               height: 1,

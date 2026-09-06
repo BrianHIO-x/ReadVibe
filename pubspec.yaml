@@ -5,8 +5,8 @@ description: "ReadVibe - a private, offline TXT, EPUB, MOBI/AZW, PDF, DOCX, and 
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
 # Public versions in this project always use three dotted numbers. Android's
-# internal upgrade code is supplied separately with --build-number and must
-# never be appended to the public version or APK filename.
+# internal upgrade code follows + below; Flutter separates it from the public
+# versionName. Never append it to the displayed version or APK filename.
 # In Android, build-name is used as versionName. With split-per-abi, Flutter
 # adds 2000 to the arm64 base build-number to produce the APK versionCode.
 # Read more about Android versioning at https://developer.android.com/studio/publish/versioning
@@ -15,7 +15,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.6.17
+version: 0.6.19+65
 
 environment:
   sdk: ^3.12.2

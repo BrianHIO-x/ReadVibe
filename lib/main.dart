@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'theme/app_theme.dart';
 import 'theme/app_motion.dart';
@@ -10,6 +11,9 @@ import 'models/reader_launch_args.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // Draw behind the status and navigation bars everywhere, so every screen can
+  // run its own surface under the gesture bar instead of leaving a blank strip.
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   runApp(const ReadVibeApp());
 }
 

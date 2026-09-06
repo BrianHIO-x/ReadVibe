@@ -141,7 +141,7 @@ void main() {
         tester.getTopLeft(find.byTooltip('关闭编辑器')).dy,
         greaterThanOrEqualTo(54),
       );
-      final titleY = tester.getTopLeft(find.text('编辑当前章节')).dy;
+      final titleY = tester.getTopLeft(find.byTooltip('关闭编辑器')).dy;
       final saveY = tester.getTopLeft(find.text('保存')).dy;
       final titleFieldY = tester.getTopLeft(find.byType(TextField).at(0)).dy;
       final body = tester
@@ -156,7 +156,7 @@ void main() {
         );
         for (var frame = 0; frame < 12; frame++) {
           await tester.pump(const Duration(milliseconds: 16));
-          expect(tester.getTopLeft(find.text('编辑当前章节')).dy, titleY);
+          expect(tester.getTopLeft(find.byTooltip('关闭编辑器')).dy, titleY);
           expect(tester.getTopLeft(find.text('保存')).dy, saveY);
           expect(
             tester.getTopLeft(find.byType(TextField).at(0)).dy,

@@ -85,21 +85,30 @@ void main() {
           ),
         ),
       );
-      final button = tester.widget<PopupMenuButton<ShelfFilter>>(
-        find.byType(PopupMenuButton<ShelfFilter>),
-      );
-      expect(button.color, colors.headerBg);
-      expect(button.surfaceTintColor, Colors.transparent);
-      expect(
-        (button.shape as RoundedRectangleBorder).side.color,
-        colors.border,
-      );
       await tester.tap(find.byTooltip('筛选书架'));
       await tester.pumpAndSettle();
       expect(
         find.byType(PopupMenuItem<ShelfFilter>),
         findsNWidgets(ShelfFilter.values.length),
       );
+      final surface = tester
+          .widgetList<Material>(
+            find.ancestor(
+              of: find.byType(PopupMenuItem<ShelfFilter>).first,
+              matching: find.byType(Material),
+            ),
+          )
+          .firstWhere((material) => material.shape is RoundedRectangleBorder);
+      expect(surface.color, colors.headerBg);
+      expect(surface.surfaceTintColor, Colors.transparent);
+      expect(
+        (surface.shape! as RoundedRectangleBorder).side.color,
+        colors.border,
+      );
+      final menuRight = tester
+          .getRect(find.byType(PopupMenuItem<ShelfFilter>).first)
+          .right;
+      expect(menuRight, closeTo(800 - 12, 8));
       await tester.tap(find.text('TXT'));
       await tester.pumpAndSettle();
       expect(selected, ShelfFilter.txt);

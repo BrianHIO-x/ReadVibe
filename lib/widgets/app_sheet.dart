@@ -115,8 +115,11 @@ class AppActionSheet extends StatelessWidget {
     colors: colors,
     child: SafeArea(
       top: false,
+      bottom: false,
       child: SingleChildScrollView(
-        padding: const EdgeInsets.only(bottom: 16),
+        padding: EdgeInsets.only(
+          bottom: 16 + MediaQuery.paddingOf(context).bottom,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,

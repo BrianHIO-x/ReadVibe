@@ -14,6 +14,7 @@ import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
 import '../models/book.dart';
 import '../models/reader_settings.dart';
+import '../models/reading_paragraph.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/font_service.dart';
 import '../services/book_search_service.dart';
@@ -1067,7 +1068,13 @@ class _ReaderScreenState extends State<ReaderScreen>
         current.readingMode != next.readingMode;
   }
 
-  ReadingTextAnchor? _captureReadingTextAnchor(ScrollSnapshot snapshot) {
+  /// [topBias] shifts the probe down the page before the anchor is resolved.
+  /// The reader almost always clips its first line, so passing half a line lets
+  /// callers anchor on the first line that is actually whole on screen.
+  ReadingTextAnchor? _captureReadingTextAnchor(
+    ScrollSnapshot snapshot, {
+    double topBias = 0,
+  }) {
     if (_readerViewportWidth <= 0 || _book.chapters.isEmpty) return null;
     final paragraphs = _paragraphsFor(_currentChapter);
     if (paragraphs.isEmpty) return null;
@@ -1085,13 +1092,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_currentChapter.hasRichEpubContent) {
       return _captureRichEpubTextAnchor(
         chapter: _currentChapter,
-        bodyOffset: snapshot.offset - bodyStart,
+        bodyOffset: snapshot.offset - bodyStart + topBias,
         settings: settings,
         mode: settings.readingMode,
         width: width,
       );
     }
-    final bodyY = math.max(0.0, snapshot.offset - bodyStart);
+    final bodyY = math.max(0.0, snapshot.offset - bodyStart + topBias);
     final paragraphGap =
         settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
         ? _resolvedSimulationOrNaturalLineExtent(settings, settings.readingMode)
@@ -2866,6 +2873,27 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _showChapterEditor() => unawaited(_presentChapterEditor());
 
+  /// Character offset in [chapter] that the editor should open on. The reader
+  /// usually shows a sliced line at the very top, so the probe is nudged half a
+  /// line down and lands on the first line the reader can actually read.
+  int? _editorAnchorOffset(Chapter chapter, ScrollSnapshot snapshot) {
+    final lineExtent = _resolvedSimulationOrNaturalLineExtent(
+      _settings,
+      _settings.readingMode,
+    );
+    final anchor = _captureReadingTextAnchor(
+      snapshot,
+      topBias: lineExtent / 2,
+    );
+    if (anchor == null || anchor.chapterIndex != _chapterIndex) return null;
+    final prefix = _paragraphPrefixLength(chapter, anchor.paragraphIndex);
+    return contentOffsetForReadingParagraph(
+      chapter,
+      anchor.paragraphIndex,
+      math.max(0, anchor.characterOffset - prefix),
+    );
+  }
+
   Future<void> _presentChapterEditor() async {
     if (!mounted || _readerModalOpen) return;
     if (_settings.readingMode != ReaderReadingMode.chapter) {
@@ -2875,6 +2903,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final chapter = _currentChapter;
     final snapshot = _currentScrollSnapshot();
     final textAnchor = _captureReadingTextAnchor(snapshot);
+    final editorAnchorOffset = _editorAnchorOffset(chapter, snapshot);
     final progress = _recordCurrentChapterPosition(snapshot);
     _enqueueProgressSave(progress);
     final themeColors = AppTheme.getReaderTheme(
@@ -2893,6 +2922,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             initialContent: chapter.content,
             hasRichContent: chapter.hasRichEpubContent,
             colors: themeColors,
+            initialAnchorOffset: editorAnchorOffset,
             onSave: (title, content) async {
               await _applyChapterEdit(
                 title: title,

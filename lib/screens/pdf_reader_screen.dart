@@ -275,6 +275,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
         colors: colors,
         child: SafeArea(
           top: false,
+          bottom: false,
           child: SizedBox(
             height: math.min(
               MediaQuery.sizeOf(sheetContext).height * 0.65,
@@ -293,6 +294,9 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                           ),
                         )
                       : ListView.builder(
+                          padding: EdgeInsets.only(
+                            bottom: MediaQuery.paddingOf(sheetContext).bottom,
+                          ),
                           itemCount: pages.length,
                           itemBuilder: (context, index) {
                             final page = pages[index];
@@ -564,6 +568,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
         colors: colors,
         child: SafeArea(
           top: false,
+          bottom: false,
           child: FractionallySizedBox(
             heightFactor: 0.75,
             child: Column(
@@ -595,6 +600,9 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                         );
                       }
                       return ListView.builder(
+                        padding: EdgeInsets.only(
+                          bottom: MediaQuery.paddingOf(sheetContext).bottom,
+                        ),
                         itemCount: entries.length,
                         itemBuilder: (context, index) {
                           final entry = entries[index];

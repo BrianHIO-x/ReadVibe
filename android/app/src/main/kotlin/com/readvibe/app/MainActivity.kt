@@ -19,7 +19,6 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val TEXT_ACTION_CHANNEL = "com.readvibe.app/system_text_actions"
         private const val DOCUMENT_PARSER_CHANNEL = "com.readvibe.app/document_parser"
-        private const val APP_UPDATE_CHANNEL = "com.readvibe.app/app_update"
         private const val INCOMING_FILE_CHANNEL = "com.readvibe.app/incoming_file"
         private const val ACTION_TRANSLATE = "android.intent.action.TRANSLATE"
         private val AI_PACKAGE_ALLOWLIST = setOf(
@@ -38,6 +37,7 @@ class MainActivity : FlutterActivity() {
 
     private var bookExporter: BookExportHandler? = null
     private var pdfHandler: PdfChannelHandler? = null
+    private var updateHandler: AppUpdateHandler? = null
 
     private val documentExecutor = Executors.newSingleThreadExecutor()
     private val incomingFileExecutor = Executors.newSingleThreadExecutor()
@@ -48,6 +48,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         bookExporter = BookExportHandler(this, flutterEngine.dartExecutor.binaryMessenger)
         pdfHandler = PdfChannelHandler(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
+        updateHandler = AppUpdateHandler(this, flutterEngine.dartExecutor.binaryMessenger)
         incomingFileChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             INCOMING_FILE_CHANNEL,
@@ -153,35 +154,6 @@ class MainActivity : FlutterActivity() {
                         )
                     }
                 }
-            }
-        }
-
-        MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            APP_UPDATE_CHANNEL,
-        ).setMethodCallHandler { call, result ->
-            try {
-                when (call.method) {
-                    "openExternalUrl" -> {
-                        val rawUrl = call.argument<String>("url")
-                        val uri = rawUrl?.let(Uri::parse)
-                        if (uri == null || uri.scheme !in setOf("https", "http")) {
-                            result.success(false)
-                            return@setMethodCallHandler
-                        }
-                        val intent = Intent(Intent.ACTION_VIEW, uri)
-                        if (intent.resolveActivity(packageManager) == null) {
-                            result.success(false)
-                            return@setMethodCallHandler
-                        }
-                        startActivity(intent)
-                        result.success(true)
-                    }
-
-                    else -> result.notImplemented()
-                }
-            } catch (error: Exception) {
-                result.error("APP_UPDATE_FAILED", error.message, null)
             }
         }
 
@@ -430,6 +402,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        updateHandler?.dispose()
+        updateHandler = null
         bookExporter?.dispose()
         bookExporter = null
         documentExecutor.shutdownNow()
