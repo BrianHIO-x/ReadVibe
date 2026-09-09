@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 import '../models/reader_settings.dart';
 import 'app_spacing.dart';
 
-/// Claude-inspired warm minimalist design system
+/// Warm minimalist design system
 class AppTheme {
   // ── Color palette ─────────────────────────────────────
 
