@@ -69,6 +69,7 @@ void main() {
               'isPasswordProtected' => true,
               'unlockPdf' => 12,
               'recognizePageText' => '离线识别文字',
+              'extractPageText' => '文字层原文',
               _ => null,
             };
           });
@@ -88,6 +89,13 @@ void main() {
         ),
         '离线识别文字',
       );
+      expect(
+        await PdfRendererService.extractPageText(
+          filePath: '/book.pdf',
+          pageIndex: 3,
+        ),
+        '文字层原文',
+      );
       await PdfRendererService.syncTextNote(
         filePath: '/book.pdf',
         pageIndex: 3,
@@ -101,6 +109,7 @@ void main() {
           'isPasswordProtected',
           'unlockPdf',
           'recognizePageText',
+          'extractPageText',
           'syncTextNote',
         ]),
       );

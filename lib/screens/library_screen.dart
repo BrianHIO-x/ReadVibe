@@ -15,6 +15,7 @@ import '../services/book_import_coordinator.dart';
 import '../services/book_export_service.dart';
 import '../models/library_filter.dart';
 import '../widgets/library_search_controls.dart';
+import '../services/chinese_text.dart';
 import '../services/storage_service.dart';
 import '../controllers/library_maintenance_controller.dart';
 import '../services/update_service.dart';
@@ -93,6 +94,10 @@ class _LibraryScreenState extends State<LibraryScreen>
   late final AnimationController _emptyIconController;
 
   final _gridScrollController = ScrollController();
+  static const _minShelfColumns = 3;
+  static const _maxShelfColumns = 8;
+  static const _shelfCardAspectRatio = 0.52;
+
   final _reorderScrollController = ScrollController();
   bool _gridScrolled = false;
   Offset? _shelfPointerStart;
@@ -268,13 +273,17 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   List<Book> get _visibleBooks {
-    final query = _librarySearchController.text.trim().toLowerCase();
+    // Fold before matching so a title typed with full-width punctuation or
+    // digits still finds the book that stored the half-width form.
+    final query = foldFullWidth(
+      _librarySearchController.text,
+    ).trim().toLowerCase();
     final filtered = _books
         .where((book) {
           final matchesQuery =
               query.isEmpty ||
-              book.title.toLowerCase().contains(query) ||
-              book.author.toLowerCase().contains(query) ||
+              foldFullWidth(book.title).toLowerCase().contains(query) ||
+              foldFullWidth(book.author).toLowerCase().contains(query) ||
               book.format.name.toLowerCase().contains(query);
           if (!matchesQuery) return false;
           return switch (_shelfFilter) {
@@ -748,6 +757,8 @@ class _LibraryScreenState extends State<LibraryScreen>
                           Navigator.of(context).pop();
                           await _checkUpdateManually();
                         },
+                        onMeasureStorage: _storage.measureStorageUsage,
+                        onClearCaches: _storage.clearTemporaryCaches,
                         applicationVersion: _applicationVersion,
                       ),
                     );
@@ -1556,9 +1567,9 @@ class _LibraryScreenState extends State<LibraryScreen>
           AppSpacing.md,
           AppSpacing.md + MediaQuery.paddingOf(context).bottom,
         ),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 3,
-          childAspectRatio: 0.52,
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: _shelfMetrics(MediaQuery.sizeOf(context).width).columns,
+          childAspectRatio: _shelfCardAspectRatio,
           crossAxisSpacing: AppSpacing.xs,
           mainAxisSpacing: AppSpacing.sm,
         ),
@@ -1616,22 +1627,47 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
+  /// Shelf geometry for a given width.
+  ///
+  /// A fixed three-column shelf turned a landscape phone or a tablet into three
+  /// enormous covers. Columns are derived from a target card width instead, so
+  /// a book card stays the same physical size and the shelf simply holds more
+  /// of them as the window grows.
+  static ({int columns, double cardWidth, double cardHeight}) _shelfMetrics(
+    double availableWidth,
+  ) {
+    const maxCardWidth = 148.0;
+    const gap = AppSpacing.xs;
+    final gridWidth = math.max(0.0, availableWidth - AppSpacing.md * 2);
+    final fitted = gridWidth <= 0
+        ? _minShelfColumns
+        : ((gridWidth + gap) / (maxCardWidth + gap)).ceil();
+    final columns = fitted.clamp(_minShelfColumns, _maxShelfColumns);
+    final cardWidth = math.max(
+      0.0,
+      (gridWidth - gap * (columns - 1)) / columns,
+    );
+    return (
+      columns: columns,
+      cardWidth: cardWidth,
+      cardHeight: cardWidth / _shelfCardAspectRatio,
+    );
+  }
+
   Widget _buildReorderBookGrid(ReaderThemeColors colors) {
     return LayoutBuilder(
       builder: (context, constraints) {
         const horizontalPadding = AppSpacing.md;
-        const columnCount = 3;
         const horizontalGap = AppSpacing.xs;
         const verticalGap = AppSpacing.sm;
+        final metrics = _shelfMetrics(constraints.maxWidth);
+        final columnCount = metrics.columns;
         final gridWidth = math.max(
           0.0,
           constraints.maxWidth - horizontalPadding * 2,
         );
-        final cardWidth = math.max(
-          0.0,
-          (gridWidth - horizontalGap * (columnCount - 1)) / columnCount,
-        );
-        final cardHeight = cardWidth / 0.52;
+        final cardWidth = metrics.cardWidth;
+        final cardHeight = metrics.cardHeight;
         final rowCount = (_books.length / columnCount).ceil();
         final contentHeight = rowCount == 0
             ? 0.0
@@ -1658,6 +1694,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                   _buildReorderBookItem(
                     book: _books[index],
                     index: index,
+                    columnCount: columnCount,
                     cardWidth: cardWidth,
                     cardHeight: cardHeight,
                     horizontalGap: horizontalGap,
@@ -1675,13 +1712,13 @@ class _LibraryScreenState extends State<LibraryScreen>
   Widget _buildReorderBookItem({
     required Book book,
     required int index,
+    required int columnCount,
     required double cardWidth,
     required double cardHeight,
     required double horizontalGap,
     required double verticalGap,
     required ReaderThemeColors colors,
   }) {
-    const columnCount = 3;
     final column = index % columnCount;
     final row = index ~/ columnCount;
     final left = column * (cardWidth + horizontalGap);

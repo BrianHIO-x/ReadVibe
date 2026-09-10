@@ -14,7 +14,8 @@ internal enum class PdfOperation(
     PASSWORD_CHECK("isPasswordProtected", analysis = true),
     UNLOCK("unlockPdf", mutatesDocument = true),
     NOTE("syncTextNote", mutatesDocument = true),
-    OCR("recognizePageText", analysis = true);
+    OCR("recognizePageText", analysis = true),
+    PAGE_TEXT("extractPageText", analysis = true);
 
     companion object {
         fun fromMethod(method: String): PdfOperation? = entries.firstOrNull { it.method == method }

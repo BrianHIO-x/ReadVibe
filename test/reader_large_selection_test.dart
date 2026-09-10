@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:readvibe/models/book.dart';
+import 'package:readvibe/models/reader_bookmark.dart';
 import 'package:readvibe/models/reader_settings.dart';
 import 'package:readvibe/repositories/reader_repositories.dart';
 import 'package:readvibe/screens/reader/reader_selection_edge_scroller.dart';
@@ -30,6 +31,14 @@ class _MemoryReaderRepository implements ReaderRepository {
   ) async {}
   @override
   Future<void> saveWordCounts(Book book, List<int> counts) async {}
+  @override
+  Future<List<ReaderBookmark>> getBookmarks(String bookId) async =>
+      const <ReaderBookmark>[];
+  @override
+  Future<void> saveBookmarks(
+    String bookId,
+    List<ReaderBookmark> bookmarks,
+  ) async {}
   @override
   Future<void> deleteBook(String bookId) async {}
   @override

@@ -41,10 +41,15 @@ void main() {
   test(
     'manifest revision wins after interruption before metadata commit',
     () async {
-      final prefs = await SharedPreferences.getInstance();
-      final before = prefs.getString('readvibe_books')!;
+      // Simulates a crash after the chapter manifest was committed but before
+      // the shelf record that points at it reached disk.
+      final library = File(
+        p.join((await storage.getAppDataDirectory()).path, 'library.json'),
+      );
+      final before = await library.readAsString();
       final edited = await storage.replaceChapter(book, next);
-      await prefs.setString('readvibe_books', before);
+      await library.writeAsString(before, flush: true);
+      StorageService.resetLibraryCache();
       final loaded = (await storage.getBook(book.id))!;
       expect(loaded.contentRevision, edited.contentRevision);
       expect(loaded.wordCount, isNull);

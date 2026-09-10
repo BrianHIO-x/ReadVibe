@@ -62,9 +62,9 @@ class BookImportCoordinator {
         );
       }
 
-      await _storage.saveBook(importedBook);
+      final committed = await _storage.saveBook(importedBook);
       metadataSaved = true;
-      return importedBook;
+      return committed;
     } on Object {
       if (!metadataSaved && importedBook != null) {
         try {

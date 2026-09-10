@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 import 'package:flutter/services.dart';
 
 import '../models/book.dart';
+import 'book_id.dart';
 import '../repositories/reader_repositories.dart';
 import 'pdf_renderer_service.dart';
 
@@ -20,7 +21,7 @@ Future<Book> importPdf(
     throw const FormatException('PDF 文件为空或无法读取');
   }
   final now = DateTime.now();
-  final id = 'pdf_${now.microsecondsSinceEpoch}';
+  final id = nextBookId('pdf', now: now);
   final managedFile = await storage.saveImportedPdf(sourcePath, id);
   try {
     late final int pageCount;

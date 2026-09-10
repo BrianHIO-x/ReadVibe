@@ -50,6 +50,12 @@ abstract interface class PdfRendererGateway {
     required int pageIndex,
   });
 
+  /// The page's embedded text layer. Empty for a scan, which needs OCR.
+  Future<String> extractPageText({
+    required String filePath,
+    required int pageIndex,
+  });
+
   Future<String> renderPage({
     required String filePath,
     required int pageIndex,
@@ -102,6 +108,15 @@ class PlatformPdfRendererGateway implements PdfRendererGateway {
     required String filePath,
     required int pageIndex,
   }) => PdfRendererService.recognizePageText(
+    filePath: filePath,
+    pageIndex: pageIndex,
+  );
+
+  @override
+  Future<String> extractPageText({
+    required String filePath,
+    required int pageIndex,
+  }) => PdfRendererService.extractPageText(
     filePath: filePath,
     pageIndex: pageIndex,
   );
@@ -209,6 +224,17 @@ class PdfRendererService {
     required int pageIndex,
   }) async {
     return await _channel.invokeMethod<String>('recognizePageText', {
+          'filePath': filePath,
+          'pageIndex': pageIndex,
+        }) ??
+        '';
+  }
+
+  static Future<String> extractPageText({
+    required String filePath,
+    required int pageIndex,
+  }) async {
+    return await _channel.invokeMethod<String>('extractPageText', {
           'filePath': filePath,
           'pageIndex': pageIndex,
         }) ??

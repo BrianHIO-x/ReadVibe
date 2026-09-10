@@ -1,3 +1,4 @@
+import '../services/resource_presence.dart';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -49,7 +50,7 @@ class BookCard extends StatelessWidget {
         ? Colors.black.withValues(alpha: 0.22)
         : palette.text.withValues(alpha: 0.18);
     final coverPath = book.coverImagePath;
-    final hasCoverImage = coverPath != null && File(coverPath).existsSync();
+    final hasCoverImage = importedResourceExists(coverPath);
     final totalChapters = book.chapterCount;
     final totalUnits = book.isPdf ? (book.pageCount ?? 0) : totalChapters;
     final currentChapter = totalUnits > 0
@@ -158,7 +159,7 @@ class BookCard extends StatelessWidget {
                                   AppRadius.md,
                                 ),
                                 child: Image.file(
-                                  File(coverPath),
+                                  File(coverPath!),
                                   fit: BoxFit.cover,
                                   filterQuality: FilterQuality.medium,
                                   errorBuilder: (_, _, _) =>

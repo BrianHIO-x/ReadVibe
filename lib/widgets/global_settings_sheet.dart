@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/reader_settings.dart';
+import '../repositories/reader_repositories.dart';
 import '../services/system_text_action_service.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
@@ -13,6 +16,8 @@ class GlobalSettingsSheet extends StatelessWidget {
   final ValueChanged<ReaderSettings> onChange;
   final Future<void> Function() onImportFont;
   final Future<void> Function() onCheckUpdate;
+  final Future<StorageUsageReport> Function() onMeasureStorage;
+  final Future<int> Function() onClearCaches;
   final String applicationVersion;
 
   const GlobalSettingsSheet({
@@ -22,6 +27,8 @@ class GlobalSettingsSheet extends StatelessWidget {
     required this.onChange,
     required this.onImportFont,
     required this.onCheckUpdate,
+    required this.onMeasureStorage,
+    required this.onClearCaches,
     required this.applicationVersion,
   });
 
@@ -176,6 +183,12 @@ class GlobalSettingsSheet extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: AppSpacing.xl),
+                    StorageUsageSection(
+                      colors: colors,
+                      onMeasure: onMeasureStorage,
+                      onClearCaches: onClearCaches,
+                    ),
+                    const SizedBox(height: AppSpacing.xl),
                     Text(
                       '关于',
                       style: TextStyle(
@@ -208,4 +221,197 @@ class GlobalSettingsSheet extends StatelessWidget {
       ),
     );
   }
+}
+
+
+/// Shows what ReadVibe occupies and offers the one reclaim that is always safe.
+///
+/// Measuring walks the private directories, so the section loads its own data
+/// and reports progress instead of blocking the panel that contains it.
+class StorageUsageSection extends StatefulWidget {
+  const StorageUsageSection({
+    super.key,
+    required this.colors,
+    required this.onMeasure,
+    required this.onClearCaches,
+  });
+
+  final ReaderThemeColors colors;
+  final Future<StorageUsageReport> Function() onMeasure;
+  final Future<int> Function() onClearCaches;
+
+  @override
+  State<StorageUsageSection> createState() => _StorageUsageSectionState();
+}
+
+class _StorageUsageSectionState extends State<StorageUsageSection> {
+  StorageUsageReport? _report;
+  bool _measuring = true;
+  bool _clearing = false;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_measure());
+  }
+
+  Future<void> _measure() async {
+    if (mounted) setState(() => _measuring = true);
+    try {
+      final report = await widget.onMeasure();
+      if (!mounted) return;
+      setState(() {
+        _report = report;
+        _failed = false;
+      });
+    } on Object catch (error, stack) {
+      debugPrint('Failed to measure storage usage: $error');
+      debugPrintStack(stackTrace: stack);
+      if (mounted) setState(() => _failed = true);
+    } finally {
+      if (mounted) setState(() => _measuring = false);
+    }
+  }
+
+  Future<void> _clear() async {
+    if (_clearing) return;
+    setState(() => _clearing = true);
+    var freed = 0;
+    var failed = false;
+    try {
+      freed = await widget.onClearCaches();
+    } on Object catch (error, stack) {
+      failed = true;
+      debugPrint('Failed to clear caches: $error');
+      debugPrintStack(stackTrace: stack);
+    } finally {
+      if (mounted) setState(() => _clearing = false);
+    }
+    if (!mounted) return;
+    if (failed) {
+      AppToast.error(context, '清理缓存失败，请稍后重试', colors: widget.colors);
+    } else {
+      AppToast.success(
+        context,
+        freed > 0 ? '已释放 ${formatStorageBytes(freed)} 缓存' : '没有可清理的缓存',
+        colors: widget.colors,
+      );
+    }
+    await _measure();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = widget.colors;
+    final report = _report;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '存储空间',
+          style: TextStyle(
+            color: colors.text,
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: AppSpacing.sm),
+        if (report == null)
+          Text(
+            _failed ? '无法统计占用，请稍后重试' : '正在统计占用…',
+            style: TextStyle(
+              color: _failed ? colors.accent : colors.secondary,
+              fontSize: 12,
+              height: 1.5,
+            ),
+          )
+        else ...[
+          Text(
+            '${report.bookCount} 本书共占用 '
+            '${formatStorageBytes(report.totalBytes)}。'
+            '缓存可以随时清理，重新打开 PDF 会自动重建。',
+            style: TextStyle(
+              color: colors.secondary,
+              fontSize: 12,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          _row('书籍正文', report.bookPayloadBytes),
+          _row('EPUB 图片与字体', report.epubResourceBytes),
+          _row('Word 图片', report.wordResourceBytes),
+          _row('PDF 副本', report.pdfCopyBytes),
+          _row('导入字体', report.fontBytes),
+          _row('可清理缓存', report.cacheBytes, emphasized: true),
+        ],
+        const SizedBox(height: AppSpacing.sm),
+        Row(
+          children: [
+            OutlinedButton.icon(
+              onPressed: _clearing || _measuring ? null : _clear,
+              icon: _clearing
+                  ? const SizedBox.square(
+                      dimension: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.cleaning_services_outlined, size: 18),
+              label: Text(_clearing ? '清理中…' : '清理缓存'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: colors.accent,
+                side: BorderSide(color: colors.border),
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            TextButton(
+              onPressed: _measuring || _clearing ? null : _measure,
+              child: Text(_measuring ? '统计中…' : '重新统计'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _row(String label, int bytes, {bool emphasized = false}) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: emphasized ? widget.colors.text : widget.colors.secondary,
+              fontSize: 13,
+              fontWeight: emphasized ? FontWeight.w600 : FontWeight.w400,
+            ),
+          ),
+        ),
+        Text(
+          formatStorageBytes(bytes),
+          style: TextStyle(
+            color: emphasized ? widget.colors.accent : widget.colors.secondary,
+            fontSize: 13,
+            fontWeight: emphasized ? FontWeight.w600 : FontWeight.w400,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+/// Formats a byte count the way a storage panel reads best: whole numbers for
+/// small sizes, one decimal once the unit is large enough for it to matter.
+String formatStorageBytes(int bytes) {
+  if (bytes <= 0) return '0 B';
+  const units = <String>['B', 'KB', 'MB', 'GB', 'TB'];
+  var value = bytes.toDouble();
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  final digits = unit == 0 || value >= 100 ? 0 : 1;
+  return '${value.toStringAsFixed(digits)} ${units[unit]}';
 }

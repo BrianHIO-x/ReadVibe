@@ -5,6 +5,7 @@ import 'dart:isolate';
 import '../models/book.dart';
 import '../models/search_match.dart';
 import '../models/reading_paragraph.dart';
+import 'chinese_text.dart';
 
 export '../models/search_match.dart' show BookSearchResult;
 
@@ -111,8 +112,13 @@ class BookSearchService {
     return results;
   }
 
+  /// Folding runs before lowercasing so a full-width `Ａ` and an ASCII `a`
+  /// reach the same token. Both sides stay one rune wide, which keeps the
+  /// highlight mapping below able to work in rune steps.
   static String _normalizeForSearch(String value) {
-    return value.toLowerCase().replaceAll(_searchWhitespacePattern, ' ').trim();
+    return foldFullWidth(
+      value,
+    ).toLowerCase().replaceAll(_searchWhitespacePattern, ' ').trim();
   }
 
   /// Converts a match offset in normalized text back to UTF-16 offsets in the
@@ -161,7 +167,7 @@ class BookSearchService {
         whitespaceStart = null;
       }
       accountToken(
-        String.fromCharCode(rune).toLowerCase(),
+        String.fromCharCode(foldFullWidthRune(rune)).toLowerCase(),
         sourceOffset,
         runeEnd,
       );

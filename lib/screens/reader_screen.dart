@@ -13,6 +13,7 @@ import '../theme/app_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
 import '../models/book.dart';
+import '../models/reader_bookmark.dart';
 import '../models/reader_settings.dart';
 import '../models/reading_paragraph.dart';
 import '../repositories/reader_repositories.dart';
@@ -22,6 +23,7 @@ import '../services/storage_service.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/chapter_list.dart';
+import '../widgets/reader_bookmark_sheet.dart';
 import '../widgets/chapter_editor_sheet.dart';
 import '../widgets/book_search_sheet.dart';
 import '../widgets/reader_settings_sheet.dart';
@@ -112,6 +114,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   double _viewPaddingTop = 0;
   ReadingProgress? _currentProgress;
   Set<String> _collapsedTocGroupIds = <String>{};
+  List<ReaderBookmark> _bookmarks = const <ReaderBookmark>[];
+  // Resolving the reading anchor lays out every paragraph above the viewport,
+  // so the toggle icon reads this cached flag instead of probing each build.
+  // It is refreshed when the chrome appears and whenever a mark is committed.
+  bool _currentPositionBookmarked = false;
   double? _pendingScrollOffset;
   double? _pendingScrollProgress;
   ReadingTextAnchor? _pendingScrollTextAnchor;
@@ -162,6 +169,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   ReaderEpubLayout get _epubLayout => ReaderEpubLayout(
     textScaler: _readerTextScaler,
     resolveSimulationLineExtent: _resolvedSimulationLineExtent,
+    onOpenLink: _handleEpubLink,
   );
 
   @override
@@ -441,6 +449,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       _collapsedTocGroupIds = Set<String>.from(results[2] as Set<String>);
     } on Object catch (error, stackTrace) {
       debugPrint('Failed to load reader state: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
+    // Marks are auxiliary. Loading them separately keeps a bookmark failure
+    // from discarding the settings and reading position fetched above.
+    try {
+      _bookmarks = await _storage.getBookmarks(_book.id);
+    } on Object catch (error, stackTrace) {
+      debugPrint('Failed to load reader bookmarks: $error');
       debugPrintStack(stackTrace: stackTrace);
     }
 
@@ -2108,6 +2124,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     // the chrome is visible, so the state must already reflect the toggle.
     setState(() => _showOverlay = willShow);
     if (willShow) {
+      _refreshCurrentBookmarkState();
       _showStatusBar();
     } else {
       _hideStatusBarForReader();
@@ -2732,6 +2749,430 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+
+  // ── Bookmarks and notes ─────────────────────────────
+  //
+  // A mark stores the same (chapter, paragraph, character) anchor the reader
+  // uses to restore a position, so it survives font, margin and reading-mode
+  // changes. Jumping reuses the search-result path for exactly that reason.
+
+  ReaderThemeColors get _readerThemeColors => AppTheme.getReaderTheme(
+    _settings.theme,
+    systemBrightness: MediaQuery.platformBrightnessOf(context),
+  );
+
+  /// Body text around [anchor], used as the bookmark list preview.
+  String _excerptForAnchor(ReadingTextAnchor anchor) {
+    if (anchor.chapterIndex < 0 ||
+        anchor.chapterIndex >= _book.chapters.length) {
+      return '';
+    }
+    final paragraphs = _paragraphsFor(_book.chapters[anchor.chapterIndex]);
+    if (anchor.paragraphIndex < 0 ||
+        anchor.paragraphIndex >= paragraphs.length) {
+      return '';
+    }
+    final paragraph = paragraphs[anchor.paragraphIndex];
+    final start = anchor.characterOffset.clamp(0, paragraph.length);
+    return clampBookmarkText(
+      paragraph.substring(start),
+      maxReaderBookmarkExcerpt,
+    );
+  }
+
+  ReaderBookmark? _bookmarkForAnchor(ReadingTextAnchor anchor) {
+    for (final mark in _bookmarks) {
+      if (mark.chapterIndex == anchor.chapterIndex &&
+          mark.paragraphIndex == anchor.paragraphIndex) {
+        return mark;
+      }
+    }
+    return null;
+  }
+
+  ReaderBookmark _buildBookmark(ReadingTextAnchor anchor, {String note = ''}) {
+    final chapter = _book.chapters[anchor.chapterIndex];
+    return ReaderBookmark(
+      id:
+          '${anchor.chapterIndex}:${anchor.paragraphIndex}:'
+          '${DateTime.now().microsecondsSinceEpoch}',
+      chapterIndex: anchor.chapterIndex,
+      chapterTitle: clampBookmarkText(chapter.title, 120),
+      paragraphIndex: anchor.paragraphIndex,
+      characterOffset: anchor.characterOffset,
+      excerpt: _excerptForAnchor(anchor),
+      note: clampBookmarkText(note, maxReaderBookmarkNote),
+      chapterProgress: _lastScrollSnapshot.progress.clamp(0.0, 1.0),
+      createdAt: DateTime.now(),
+    );
+  }
+
+  void _commitBookmarks(List<ReaderBookmark> updated, {bool? currentMarked}) {
+    final sorted = sortedReaderBookmarks(updated);
+    setState(() {
+      _bookmarks = sorted;
+      if (currentMarked != null) _currentPositionBookmarked = currentMarked;
+    });
+    unawaited(
+      _storage.saveBookmarks(_book.id, sorted).catchError((
+        Object error,
+        StackTrace stack,
+      ) {
+        debugPrint('Failed to save reader bookmarks: $error');
+        debugPrintStack(stackTrace: stack);
+      }),
+    );
+  }
+
+  /// The anchor a bookmark action should use. The reader clips its first line,
+  /// so the probe is nudged half a line down and lands on the first line that
+  /// is actually whole on screen — the same rule the chapter editor uses.
+  ReadingTextAnchor? _bookmarkAnchor() {
+    if (_book.chapters.isEmpty) return null;
+    final lineExtent = _resolvedSimulationOrNaturalLineExtent(
+      _settings,
+      _settings.readingMode,
+    );
+    return _captureReadingTextAnchor(
+      _currentScrollSnapshot(),
+      topBias: lineExtent / 2,
+    );
+  }
+
+  void _toggleBookmark() {
+    final anchor = _bookmarkAnchor();
+    if (anchor == null) {
+      _showReaderMessage('正文还没有排版完成，请稍后再试');
+      return;
+    }
+    final existing = _bookmarkForAnchor(anchor);
+    if (existing != null) {
+      _commitBookmarks(
+        _bookmarks.where((mark) => mark.id != existing.id).toList(),
+        currentMarked: false,
+      );
+      _showReaderMessage(existing.hasNote ? '已删除书签和笔记' : '已删除书签');
+      return;
+    }
+    if (_bookmarks.length >= maxReaderBookmarksPerBook) {
+      _showReaderMessage('这本书的书签已达 $maxReaderBookmarksPerBook 条上限');
+      return;
+    }
+    _commitBookmarks([
+      ..._bookmarks,
+      _buildBookmark(anchor),
+    ], currentMarked: true);
+    _showReaderMessage('已添加书签');
+  }
+
+  /// Entry point for the selection toolbar. The selected text becomes the
+  /// excerpt so the note reads back against the sentence it was written for.
+  Future<void> _addNoteForSelection(String selectedText) async {
+    if (!mounted || _readerModalOpen) return;
+    final anchor = _bookmarkAnchor();
+    if (anchor == null) {
+      _showReaderMessage('正文还没有排版完成，请稍后再试');
+      return;
+    }
+    if (_bookmarks.length >= maxReaderBookmarksPerBook) {
+      _showReaderMessage('这本书的书签已达 $maxReaderBookmarksPerBook 条上限');
+      return;
+    }
+    final excerpt = clampBookmarkText(selectedText, maxReaderBookmarkExcerpt);
+    final colors = _readerThemeColors;
+    _beginReaderModal();
+    String? note;
+    try {
+      note = await showReaderNoteDialog(
+        context: context,
+        colors: colors,
+        title: '添加笔记',
+        excerpt: excerpt,
+      );
+    } finally {
+      _endReaderModal();
+    }
+    if (note == null || !mounted) return;
+    final mark = _buildBookmark(anchor, note: note);
+    _commitBookmarks([
+      ..._bookmarks,
+      excerpt.isEmpty ? mark : mark.copyWith(excerpt: excerpt),
+    ], currentMarked: true);
+    _showReaderMessage(note.trim().isEmpty ? '已添加书签' : '已保存笔记');
+  }
+
+  Future<void> _editBookmarkNote(ReaderBookmark mark) async {
+    if (!mounted) return;
+    final colors = _readerThemeColors;
+    final note = await showReaderNoteDialog(
+      context: context,
+      colors: colors,
+      title: mark.hasNote ? '编辑笔记' : '添加笔记',
+      excerpt: mark.excerpt,
+      initialNote: mark.note,
+    );
+    if (note == null || !mounted) return;
+    _commitBookmarks([
+      for (final entry in _bookmarks)
+        if (entry.id == mark.id) entry.copyWith(note: note.trim()) else entry,
+    ]);
+  }
+
+  void _deleteBookmark(ReaderBookmark mark) {
+    _commitBookmarks(_bookmarks.where((entry) => entry.id != mark.id).toList());
+    _refreshCurrentBookmarkState();
+  }
+
+  /// Recomputes the toggle icon's state. The empty-list short circuit keeps the
+  /// common case free of any text layout.
+  void _refreshCurrentBookmarkState() {
+    var marked = false;
+    if (_bookmarks.isNotEmpty) {
+      final anchor = _bookmarkAnchor();
+      marked = anchor != null && _bookmarkForAnchor(anchor) != null;
+    }
+    if (marked == _currentPositionBookmarked || !mounted) return;
+    setState(() => _currentPositionBookmarked = marked);
+  }
+
+  void _showBookmarks() => unawaited(_presentBookmarks());
+
+  Future<void> _presentBookmarks() async {
+    if (!mounted || _readerModalOpen) return;
+    final themeColors = _readerThemeColors;
+    _beginReaderModal();
+    ReaderBookmark? selected;
+    try {
+      await showAppSheet<void>(
+        context: context,
+        colors: themeColors,
+        sheetAnimationStyle: AnimationStyle(
+          duration: AppMotion.sheet,
+          reverseDuration: AppMotion.normal,
+        ),
+        builder: (sheetContext) => DraggableScrollableSheet(
+          initialChildSize: 0.75,
+          maxChildSize: 0.95,
+          minChildSize: 0.3,
+          builder: (_, scrollController) => StatefulBuilder(
+            builder: (_, setSheetState) => ReaderBookmarkSheet(
+              bookmarks: _bookmarks,
+              colors: themeColors,
+              scrollController: scrollController,
+              onSelect: (mark) {
+                selected = mark;
+                Navigator.of(sheetContext).pop();
+              },
+              onEditNote: (mark) async {
+                await _editBookmarkNote(mark);
+                setSheetState(() {});
+              },
+              onDelete: (mark) {
+                _deleteBookmark(mark);
+                setSheetState(() {});
+              },
+            ),
+          ),
+        ),
+      );
+    } finally {
+      _endReaderModal();
+    }
+
+    // Route and keyboard disposal complete before the reader builds a new
+    // controller for the mark's anchor, matching the search-result path.
+    final target = selected;
+    if (target == null || !mounted) return;
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    _openBookmark(target);
+  }
+
+  void _openBookmark(ReaderBookmark mark) {
+    if (mark.chapterIndex < 0 || mark.chapterIndex >= _book.chapters.length) {
+      _showReaderMessage('这条书签指向的章节已不存在');
+      return;
+    }
+    final anchor = ReadingTextAnchor(
+      chapterIndex: mark.chapterIndex,
+      paragraphIndex: mark.paragraphIndex,
+      characterOffset: mark.characterOffset,
+    );
+    if (!_readingModeReloading) {
+      setState(() => _readingModeReloading = true);
+    }
+    if (_settings.readingMode == ReaderReadingMode.continuous) {
+      _switchContinuousChapter(mark.chapterIndex, startAtTop: true);
+      _requestContinuousRestore(0, textAnchor: anchor);
+    } else {
+      _switchChapter(mark.chapterIndex, startAtTop: true);
+      _requestScrollRestore(
+        offset: 0,
+        progress: 0,
+        preferProgress: false,
+        textAnchor: anchor,
+      );
+    }
+  }
+
+  // ── EPUB internal links ─────────────────────────────
+  //
+  // A publisher's footnote marker points at a note that is usually a short
+  // block, either later in the same document or in a shared notes file.
+  // Showing that block in place keeps the reading position; anything longer is
+  // a real cross-reference and navigates.
+
+  /// Longest target still treated as a footnote rather than a destination.
+  static const _footnotePreviewLimit = 600;
+
+  void _handleEpubLink(EpubLinkTarget target) =>
+      unawaited(_openEpubLink(target));
+
+  Future<void> _openEpubLink(EpubLinkTarget target) async {
+    if (!mounted || _readerModalOpen) return;
+    if (target.chapterIndex < 0 ||
+        target.chapterIndex >= _book.chapters.length) {
+      _showReaderMessage('这个链接指向的位置不在本书内');
+      return;
+    }
+    final note = target.hasBlock ? _epubLinkPreview(target) : null;
+    if (note == null) {
+      _jumpToEpubLink(target);
+      return;
+    }
+    var jump = false;
+    final themeColors = _readerThemeColors;
+    _beginReaderModal();
+    try {
+      await showAppSheet<void>(
+        context: context,
+        colors: themeColors,
+        builder: (sheetContext) => AppSheetSurface(
+          colors: themeColors,
+          child: SafeArea(
+            top: false,
+            bottom: false,
+            child: SingleChildScrollView(
+              padding: EdgeInsets.only(
+                bottom: AppSpacing.lg + MediaQuery.paddingOf(sheetContext).bottom,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  AppSheetHeader(
+                    title: '注释',
+                    subtitle: _book.chapters[target.chapterIndex].title,
+                  ),
+                  Divider(height: 1, color: themeColors.border),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+                    child: Text(
+                      note,
+                      style: TextStyle(
+                        color: themeColors.text,
+                        fontSize: 15,
+                        height: 1.7,
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton.icon(
+                        onPressed: () {
+                          jump = true;
+                          Navigator.of(sheetContext).pop();
+                        },
+                        icon: const Icon(Icons.north_east_rounded, size: 18),
+                        label: const Text('跳转到该位置'),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    } finally {
+      _endReaderModal();
+    }
+    if (!jump || !mounted) return;
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    _jumpToEpubLink(target);
+  }
+
+  /// Text of a link target short enough to read without leaving the page.
+  /// Returns null when the target is missing, empty or long enough to be a
+  /// destination in its own right.
+  String? _epubLinkPreview(EpubLinkTarget target) {
+    final List<EpubContentBlock> blocks;
+    try {
+      blocks = _book.chapters[target.chapterIndex].epubBlocks;
+    } on Object catch (error, stackTrace) {
+      debugPrint('Failed to read an EPUB link target: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      return null;
+    }
+    if (target.blockIndex < 0 || target.blockIndex >= blocks.length) return null;
+    final block = blocks[target.blockIndex];
+    if (!block.isText) return null;
+    final text = block.text.trim();
+    if (text.isEmpty || text.length > _footnotePreviewLimit) return null;
+    return text;
+  }
+
+  void _jumpToEpubLink(EpubLinkTarget target) {
+    final anchor = target.hasBlock
+        ? ReadingTextAnchor(
+            chapterIndex: target.chapterIndex,
+            paragraphIndex: _readingParagraphForBlock(
+              target.chapterIndex,
+              target.blockIndex,
+            ),
+            characterOffset: 0,
+          )
+        : null;
+    if (!_readingModeReloading) {
+      setState(() => _readingModeReloading = true);
+    }
+    if (_settings.readingMode == ReaderReadingMode.continuous) {
+      _switchContinuousChapter(target.chapterIndex, startAtTop: true);
+      if (anchor != null) _requestContinuousRestore(0, textAnchor: anchor);
+    } else {
+      _switchChapter(target.chapterIndex, startAtTop: true);
+      if (anchor != null) {
+        _requestScrollRestore(
+          offset: 0,
+          progress: 0,
+          preferProgress: false,
+          textAnchor: anchor,
+        );
+      }
+    }
+  }
+
+  /// Maps a rich block index onto the reading-paragraph index the anchor
+  /// system uses. Empty and image blocks are not visible paragraphs, so the
+  /// two sequences drift apart inside an illustrated chapter.
+  int _readingParagraphForBlock(int chapterIndex, int blockIndex) {
+    final List<EpubContentBlock> blocks;
+    try {
+      blocks = _book.chapters[chapterIndex].epubBlocks;
+    } on Object {
+      return 0;
+    }
+    var paragraph = 0;
+    for (var index = 0; index < blocks.length && index < blockIndex; index++) {
+      final block = blocks[index];
+      if (block.isText && block.text.trim().isNotEmpty) paragraph++;
+    }
+    return paragraph;
+  }
+
   void _showSettings() => unawaited(_presentSettings());
 
   Future<void> _presentSettings() async {
@@ -3311,9 +3752,22 @@ class _ReaderScreenState extends State<ReaderScreen>
                                 ],
                               ),
                             ),
-                            const SizedBox(
-                              width: 48,
-                            ), // Balance the back button
+                            // Same 48 dp the back button occupies, so the
+                            // centered chapter title keeps its position.
+                            IconButton(
+                              onPressed: _toggleBookmark,
+                              tooltip: _currentPositionBookmarked
+                                  ? '删除此处书签'
+                                  : '在此处添加书签',
+                              icon: Icon(
+                                _currentPositionBookmarked
+                                    ? Icons.bookmark_rounded
+                                    : Icons.bookmark_border_rounded,
+                                color: _currentPositionBookmarked
+                                    ? themeColors.accent
+                                    : themeColors.secondary,
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -3374,6 +3828,15 @@ class _ReaderScreenState extends State<ReaderScreen>
                               label: '搜索',
                               subtitle: '全文',
                               onTap: _showSearch,
+                              color: themeColors.secondary,
+                            ),
+                            _bottomBarButton(
+                              icon: Icons.bookmarks_outlined,
+                              label: '书签',
+                              subtitle: _bookmarks.isEmpty
+                                  ? '未添加'
+                                  : '${_bookmarks.length}',
+                              onTap: _showBookmarks,
                               color: themeColors.secondary,
                             ),
                             if (_settings.readingMode ==
@@ -3638,6 +4101,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           selectionDragging: _selectionController.dragging,
           onReaderModalOpened: _beginReaderModal,
           onReaderModalClosed: _endReaderModal,
+          onAddNote: _addNoteForSelection,
           edgeScrollController: _scrollController,
           edgeScrollEnabled: !_readerModalOpen,
           child: CustomScrollView(
@@ -4049,6 +4513,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       selectionDragging: _selectionController.dragging,
       onReaderModalOpened: _beginReaderModal,
       onReaderModalClosed: _endReaderModal,
+      onAddNote: _addNoteForSelection,
       edgeScrollController:
           !simulationPage && identical(controller, _scrollController)
           ? controller

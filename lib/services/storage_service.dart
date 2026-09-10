@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -12,8 +13,10 @@ import 'package:crypto/crypto.dart';
 
 import '../models/book.dart';
 import '../models/book_content_revision.dart';
+import '../models/reader_bookmark.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
+import 'book_id.dart';
 import 'managed_book_resources.dart';
 import 'storage/chapter_payload_codec.dart';
 import 'storage/chapter_revision_cleanup.dart';
@@ -23,6 +26,7 @@ import 'txt_parser.dart';
 export '../repositories/reader_repositories.dart' show StorageCleanupResult;
 
 const _kBooksKey = 'readvibe_books';
+const _kLibraryFileName = 'library.json';
 const _kChapterPrefix = 'readvibe_chapters_';
 // Large novels can exceed 10 MB. A two-second deadline was too aggressive on
 // slower phones and could make a valid saved book appear unreadable.
@@ -36,6 +40,15 @@ class _LazyChapterStore {
   final List<int?> expectedBytes;
   final List<String?> expectedDigests;
   final LinkedHashMap<int, Chapter> _cache = LinkedHashMap<int, Chapter>();
+
+  /// Chapters whose digest already matched during this session.
+  ///
+  /// A chapter file is immutable for a given content revision, so verifying it
+  /// twice cannot discover anything the first check missed. Remembering the
+  /// result matters because this runs on the UI isolate: a book that has no
+  /// detected chapters becomes one very large payload, and re-hashing it on
+  /// every cache miss stalls the frame that asked for it.
+  final Set<int> _verified = <int>{};
 
   _LazyChapterStore({
     required this.chaptersDirectoryPath,
@@ -55,18 +68,27 @@ class _LazyChapterStore {
       throw const FormatException('章节索引超出范围');
     }
     final file = File(p.join(chaptersDirectoryPath, fileNames[index]));
-    final expected = expectedBytes[index];
-    if (!file.existsSync() ||
-        (expected != null && file.lengthSync() != expected)) {
+    if (!file.existsSync()) {
       throw FormatException('章节 ${index + 1} 文件缺失或不完整');
     }
-    final raw = file.readAsStringSync(encoding: utf8);
-    final expectedDigest = expectedDigests[index];
-    if (expectedDigest != null &&
-        sha256.convert(utf8.encode(raw)).toString() != expectedDigest) {
-      throw FormatException('章节 ${index + 1} 校验失败');
+    // Read the bytes once. Decoding first and re-encoding the string to hash
+    // it walked the whole payload twice and held both copies at the same time.
+    final bytes = file.readAsBytesSync();
+    final expected = expectedBytes[index];
+    if (expected != null && bytes.length != expected) {
+      throw FormatException('章节 ${index + 1} 文件缺失或不完整');
     }
-    final chapter = decodeChapterPayload(jsonDecode(raw), index);
+    final expectedDigest = expectedDigests[index];
+    if (expectedDigest != null && !_verified.contains(index)) {
+      if (sha256.convert(bytes).toString() != expectedDigest) {
+        throw FormatException('章节 ${index + 1} 校验失败');
+      }
+      _verified.add(index);
+    }
+    final chapter = decodeChapterPayload(
+      jsonDecode(utf8.decode(bytes)),
+      index,
+    );
     _cache[index] = chapter;
     while (_cache.length > 8) {
       _cache.remove(_cache.keys.first);
@@ -137,6 +159,17 @@ class StorageService
       _providedResources ?? ManagedBookResources(this);
   Future<Directory>? _appDataDirectory;
 
+  /// Decoded shelf metadata per data root.
+  ///
+  /// Android keeps every preference in one XML document and rewrites all of it
+  /// on each commit, so holding the shelf there made every reading-position
+  /// save re-serialize the whole library. The records now live in their own
+  /// file, and this cache keeps repeated shelf reads from decoding it again.
+  /// It is static because several StorageService instances address the same
+  /// storage, and keyed by root so tests with separate directories stay apart.
+  static final Map<String, List<Map<String, dynamic>>> _libraryCache =
+      <String, List<Map<String, dynamic>>>{};
+
   static Future<void> _libraryMutationQueue = Future<void>.value();
   static final Map<String, Future<void>> _chapterWriteQueues =
       <String, Future<void>>{};
@@ -148,7 +181,7 @@ class StorageService
 
   Future<List<Book>> getBooks() async {
     final prefs = await SharedPreferences.getInstance();
-    final metadata = _readBookMetadata(prefs);
+    final metadata = await _readBookMetadata();
     final books = <Book>[];
 
     // A small batch keeps shelf startup responsive without reading every large
@@ -181,9 +214,8 @@ class StorageService
   /// opened, keeping startup time and resident memory stable as the shelf grows.
   @override
   Future<List<Book>> getBookSummaries() async {
-    final prefs = await SharedPreferences.getInstance();
     final summaries = <Book>[];
-    for (final map in _readBookMetadata(prefs)) {
+    for (final map in await _readBookMetadata()) {
       try {
         summaries.add(Book.fromJson(map, const <Chapter>[]));
       } on Object {
@@ -196,9 +228,9 @@ class StorageService
   @override
   Future<Book?> getBook(String bookId) async {
     final prefs = await SharedPreferences.getInstance();
-    final metadata = _readBookMetadata(
-      prefs,
-    ).where((map) => map['id'] == bookId);
+    final metadata = (await _readBookMetadata()).where(
+      (map) => map['id'] == bookId,
+    );
     if (metadata.isEmpty) return null;
     try {
       if (metadata.first['format'] == BookFormat.pdf.name) {
@@ -317,7 +349,7 @@ class StorageService
   }
 
   @override
-  Future<void> saveBook(Book book) async {
+  Future<Book> saveBook(Book book) async {
     if (book.isPdf &&
         (book.sourcePath == null ||
             book.pageCount == null ||
@@ -328,9 +360,9 @@ class StorageService
       throw const FormatException('书籍没有可保存的章节');
     }
 
+    late Book committed;
     await _enqueueLibraryMutation(() async {
-      final prefs = await SharedPreferences.getInstance();
-      final metadata = _readBookMetadata(prefs);
+      final metadata = await _readBookMetadata();
       final existingIndex = metadata.indexWhere(
         (item) => item['id'] == book.id,
       );
@@ -341,7 +373,19 @@ class StorageService
               readContentRevision(metadata[existingIndex]['contentRevision']) +
                   1,
             );
-      final committedBook = book.copyWith(contentRevision: revision);
+      // Importing the same file again is deliberate and keeps its own entry.
+      // Only the shelf label is numbered, so two copies stay tellable apart
+      // while their ids, payloads and reader state remain independent.
+      final displayTitle = existingIndex >= 0
+          ? book.title
+          : uniqueLibraryTitle(book.title, <String>{
+              for (final item in metadata)
+                if (item['title'] is String) item['title'] as String,
+            });
+      final committedBook = book.copyWith(
+        contentRevision: revision,
+        title: displayTitle == book.title ? null : displayTitle,
+      );
       // Save the large payload first. The shelf metadata is only committed
       // after the chapter file is safely in place.
       if (!book.isPdf) {
@@ -352,9 +396,11 @@ class StorageService
       } else {
         metadata.insert(0, committedBook.toJson());
       }
-      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+      await _writeBookMetadata(metadata);
       _deletedBookIds.remove(book.id);
+      committed = committedBook;
     });
+    return committed;
   }
 
   /// Replaces one chapter without decoding or rewriting the rest of the book.
@@ -378,7 +424,7 @@ class StorageService
 
     return _enqueueLibraryMutation(() async {
       final prefs = await SharedPreferences.getInstance();
-      final metadata = _readBookMetadata(prefs);
+      final metadata = await _readBookMetadata();
       final index = metadata.indexWhere((book) => book['id'] == sourceBook.id);
       if (index < 0 || _deletedBookIds.contains(sourceBook.id)) {
         throw StateError('书籍不存在或已删除');
@@ -398,7 +444,7 @@ class StorageService
       // process stops between files, old counts can never claim to be current.
       metadata[index].remove('wordCount');
       metadata[index].remove('chapterWordCounts');
-      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+      await _writeBookMetadata(metadata);
       await _enqueueChapterWrite(directory.path, () async {
         if (!await directory.exists()) {
           final chapters = List<Chapter>.of(sourceBook.chapters);
@@ -521,7 +567,7 @@ class StorageService
       );
       metadata[index]['contentRevision'] = nextRevision;
       try {
-        await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+        await _writeBookMetadata(metadata);
         await prefs.remove('$_kChapterPrefix${sourceBook.id}');
       } on Object {
         // The manifest already committed. Reopening reconciles its revision;
@@ -554,15 +600,14 @@ class StorageService
     }
 
     await _enqueueLibraryMutation(() async {
-      final prefs = await SharedPreferences.getInstance();
-      final metadata = _readBookMetadata(prefs);
+      final metadata = await _readBookMetadata();
       final index = metadata.indexWhere((book) => book['id'] == bookId);
       if (index < 0) throw StateError('书籍不存在或已删除');
       metadata[index]['title'] = normalizedTitle;
       if (normalizedAuthor != null) {
         metadata[index]['author'] = normalizedAuthor;
       }
-      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+      await _writeBookMetadata(metadata);
     });
   }
 
@@ -578,8 +623,7 @@ class StorageService
     if (requested.isEmpty) return;
 
     await _enqueueLibraryMutation(() async {
-      final prefs = await SharedPreferences.getInstance();
-      final metadata = _readBookMetadata(prefs);
+      final metadata = await _readBookMetadata();
       final byId = <String, Map<String, dynamic>>{
         for (final book in metadata) book['id'] as String: book,
       };
@@ -593,7 +637,7 @@ class StorageService
         final remaining = byId.remove(id);
         if (remaining != null) reordered.add(remaining);
       }
-      await _setString(prefs, _kBooksKey, jsonEncode(reordered));
+      await _writeBookMetadata(reordered);
     });
   }
 
@@ -614,8 +658,7 @@ class StorageService
       for (final count in chapterWordCounts) count.clamp(0, 0x7fffffffffffffff),
     ];
     await _enqueueLibraryMutation(() async {
-      final prefs = await SharedPreferences.getInstance();
-      final metadata = _readBookMetadata(prefs);
+      final metadata = await _readBookMetadata();
       final index = metadata.indexWhere((book) => book['id'] == sourceBook.id);
       if (index < 0) return;
 
@@ -640,7 +683,7 @@ class StorageService
         total = (total + count).clamp(0, 0x7fffffffffffffff);
       }
       current['wordCount'] = total;
-      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+      await _writeBookMetadata(metadata);
     });
   }
 
@@ -650,12 +693,12 @@ class StorageService
     _deletedBookIds.add(bookId);
     await _enqueueLibraryMutation(() async {
       final prefs = await SharedPreferences.getInstance();
-      final metadata = _readBookMetadata(prefs);
+      final metadata = await _readBookMetadata();
       final removedMetadata = metadata
           .where((book) => book['id'] == bookId)
           .firstOrNull;
       metadata.removeWhere((book) => book['id'] == bookId);
-      await _setString(prefs, _kBooksKey, jsonEncode(metadata));
+      await _writeBookMetadata(metadata);
       await _readerPreferences.clearBookState(bookId);
       await prefs.remove('$_kChapterPrefix$bookId');
 
@@ -700,6 +743,71 @@ class StorageService
   /// metadata. A grace period protects imports that wrote their files but have
   /// not committed metadata yet, as well as recoverable interrupted writes.
   @override
+  @override
+  Future<StorageUsageReport> measureStorageUsage() async {
+    final root = (await getAppDataDirectory()).absolute.path;
+    final caches = await _cacheDirectoryPaths();
+    final bookCount = (await _readBookMetadata()).length;
+    // Walking a shelf of large books touches thousands of files. Keep that off
+    // the UI isolate so the settings panel stays responsive while it measures.
+    final sizes = await Isolate.run(
+      () => _measureDirectories(<String>[
+        p.join(root, 'books'),
+        p.join(root, 'epub'),
+        p.join(root, 'word'),
+        p.join(root, 'pdf'),
+        p.join(root, 'fonts'),
+        ...caches,
+      ]),
+    );
+    return StorageUsageReport(
+      bookPayloadBytes: sizes[0],
+      epubResourceBytes: sizes[1],
+      wordResourceBytes: sizes[2],
+      pdfCopyBytes: sizes[3],
+      fontBytes: sizes[4],
+      cacheBytes: sizes.skip(5).fold(0, (sum, value) => sum + value),
+      bookCount: bookCount,
+    );
+  }
+
+  @override
+  Future<int> clearTemporaryCaches() async {
+    final caches = await _cacheDirectoryPaths();
+    return Isolate.run(() {
+      var freed = 0;
+      for (final path in caches) {
+        final directory = Directory(path);
+        if (!directory.existsSync()) continue;
+        freed += _measureDirectory(directory);
+        try {
+          directory.deleteSync(recursive: true);
+        } on FileSystemException {
+          // A file the platform still holds open is retried by a later sweep.
+        }
+      }
+      return freed;
+    });
+  }
+
+  /// Regenerable caches ReadVibe owns inside the platform cache directory.
+  /// Each one is rebuilt on demand: rendered PDF pages, recognized page text
+  /// and a partially downloaded installer.
+  Future<List<String>> _cacheDirectoryPaths() async {
+    final Directory temporary;
+    try {
+      temporary = await getTemporaryDirectory();
+    } on Object {
+      return const <String>[];
+    }
+    return <String>[
+      p.join(temporary.path, 'readvibe_pdf_pages'),
+      p.join(temporary.path, 'readvibe_pdf_ocr'),
+      p.join(temporary.path, 'readvibe_updates'),
+    ];
+  }
+
+  @override
   Future<StorageCleanupResult> collectOrphanedData({
     Duration gracePeriod = const Duration(hours: 24),
     DateTime? referenceTime,
@@ -707,8 +815,7 @@ class StorageService
     if (gracePeriod.isNegative) {
       throw ArgumentError.value(gracePeriod, 'gracePeriod', '不能为负数');
     }
-    final prefs = await SharedPreferences.getInstance();
-    final metadata = _readBookMetadataForCleanup(prefs);
+    final metadata = await _readBookMetadataForCleanup();
     // A malformed shelf record is not proof that every private payload is an
     // orphan. Preserve all data and retry after the metadata issue is resolved.
     if (metadata == null) {
@@ -884,32 +991,112 @@ class StorageService
     );
   }
 
-  List<Map<String, dynamic>> _readBookMetadata(SharedPreferences prefs) {
-    final raw = prefs.getString(_kBooksKey);
-    if (raw == null) return <Map<String, dynamic>>[];
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! List) return <Map<String, dynamic>>[];
-      return decoded
-          .whereType<Map>()
-          .map(Map<String, dynamic>.from)
-          .where(
-            (map) => map['id'] is String && (map['id'] as String).isNotEmpty,
-          )
-          .toList();
-    } on Object {
-      return <Map<String, dynamic>>[];
+  /// Forgets the cached shelf records so the next read comes from disk.
+  ///
+  /// Nothing inside the app replaces the library file behind this class, so
+  /// this exists for tests that simulate an interrupted commit and for a
+  /// restore performed outside ReadVibe.
+  @visibleForTesting
+  static void resetLibraryCache() => _libraryCache.clear();
+
+  Future<File> _libraryFile() async =>
+      File(p.join((await getAppDataDirectory()).path, _kLibraryFileName));
+
+  /// Shelf records as stored, or null when the file exists but cannot be read
+  /// as a list. Callers that delete data treat null as "no evidence".
+  Future<List<Object?>?> _readLibraryRecords() async {
+    final live = await _libraryFile();
+    final backup = File('${live.path}.bak');
+    for (final candidate in <File>[live, backup]) {
+      if (!await candidate.exists()) continue;
+      try {
+        final decoded = jsonDecode(await candidate.readAsString(encoding: utf8));
+        if (decoded is List) return decoded;
+        return null;
+      } on Object {
+        // Fall through to the backup, then to the legacy preference key.
+      }
     }
+    if (await live.exists() || await backup.exists()) return null;
+    return _adoptLegacyLibraryRecords();
   }
 
-  List<Map<String, dynamic>>? _readBookMetadataForCleanup(
-    SharedPreferences prefs,
-  ) {
+  /// One-time move of the shelf out of SharedPreferences. The preference key is
+  /// only dropped once the file it replaced is safely on disk.
+  Future<List<Object?>?> _adoptLegacyLibraryRecords() async {
+    final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_kBooksKey);
-    if (raw == null) return <Map<String, dynamic>>[];
+    if (raw == null) return const <Object?>[];
+    List<Object?> records;
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! List) return null;
+      records = decoded;
+    } on Object {
+      return null;
+    }
+    try {
+      await _writeLibraryFile(raw);
+      await prefs.remove(_kBooksKey);
+    } on Object {
+      // Keep serving the legacy value; the next read retries the migration.
+    }
+    return records;
+  }
+
+  Future<void> _writeLibraryFile(String encoded) async {
+    final live = await _libraryFile();
+    final temporary = File('${live.path}.tmp');
+    final backup = File('${live.path}.bak');
+    await live.parent.create(recursive: true);
+    await temporary.writeAsString(encoded, encoding: utf8, flush: true);
+    if (await live.exists()) {
+      if (await backup.exists()) await backup.delete();
+      await live.rename(backup.path);
+    }
+    try {
+      await temporary.rename(live.path);
+    } on Object {
+      if (await backup.exists() && !await live.exists()) {
+        await backup.rename(live.path);
+      }
+      rethrow;
+    }
+    if (await backup.exists()) await backup.delete();
+  }
+
+  Future<List<Map<String, dynamic>>> _readBookMetadata() async {
+    final root = (await getAppDataDirectory()).path;
+    final cached = _libraryCache[root];
+    if (cached != null) return _copyMetadata(cached);
+    final records = await _readLibraryRecords();
+    if (records == null) return <Map<String, dynamic>>[];
+    final metadata = records
+        .whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .where((map) => map['id'] is String && (map['id'] as String).isNotEmpty)
+        .toList();
+    _libraryCache[root] = _copyMetadata(metadata);
+    return metadata;
+  }
+
+  Future<void> _writeBookMetadata(List<Map<String, dynamic>> metadata) async {
+    await _writeLibraryFile(jsonEncode(metadata));
+    _libraryCache[(await getAppDataDirectory()).path] = _copyMetadata(metadata);
+  }
+
+  /// Callers edit the records they are given, so every read hands out its own
+  /// maps and the cache keeps a private copy.
+  static List<Map<String, dynamic>> _copyMetadata(
+    List<Map<String, dynamic>> source,
+  ) => <Map<String, dynamic>>[
+    for (final record in source) Map<String, dynamic>.from(record),
+  ];
+
+  Future<List<Map<String, dynamic>>?> _readBookMetadataForCleanup() async {
+    try {
+      final decoded = await _readLibraryRecords();
+      if (decoded == null) return null;
       final metadata = <Map<String, dynamic>>[];
       for (final value in decoded) {
         if (value is! Map) return null;
@@ -1285,6 +1472,14 @@ class StorageService
       _readerPreferences.saveCollapsedTocGroups(bookId, groupIds);
 
   @override
+  Future<List<ReaderBookmark>> getBookmarks(String bookId) =>
+      _readerPreferences.getBookmarks(bookId);
+
+  @override
+  Future<void> saveBookmarks(String bookId, List<ReaderBookmark> bookmarks) =>
+      _readerPreferences.saveBookmarks(bookId, bookmarks);
+
+  @override
   Future<ReaderSettings> getSettings() => _readerPreferences.getSettings();
 
   @override
@@ -1357,14 +1552,6 @@ class StorageService
     });
   }
 
-  static Future<void> _setString(
-    SharedPreferences prefs,
-    String key,
-    String value,
-  ) async {
-    final saved = await prefs.setString(key, value);
-    if (!saved) throw FileSystemException('无法保存本地数据', key);
-  }
 }
 
 bool _matchesBookRevision(Map<String, dynamic> metadata, Book sourceBook) {
@@ -1641,4 +1828,32 @@ Future<int?> _readStoredContentRevision(Directory directory) async {
     await manifest.readAsString(encoding: utf8),
   );
   return readContentRevision(data['contentRevision']);
+}
+
+
+/// Total bytes of each directory, in the order given. A missing directory
+/// contributes zero rather than failing the whole measurement.
+List<int> _measureDirectories(List<String> paths) => <int>[
+  for (final path in paths) _measureDirectory(Directory(path)),
+];
+
+int _measureDirectory(Directory directory) {
+  if (!directory.existsSync()) return 0;
+  var total = 0;
+  try {
+    for (final entity in directory.listSync(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (entity is! File) continue;
+      try {
+        total += entity.lengthSync();
+      } on FileSystemException {
+        // A file removed mid-walk simply does not count toward the total.
+      }
+    }
+  } on FileSystemException {
+    // An unreadable directory reports what was measured before the failure.
+  }
+  return total;
 }

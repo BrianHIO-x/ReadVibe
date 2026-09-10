@@ -70,7 +70,11 @@ List<EpubContentBlock> _epubBlocksFromJson(Object? raw) {
         final text = run['text'];
         if (text is! String || text.isEmpty) continue;
         runs.add(
-          EpubTextRun(text: text, style: _epubStyleFromJson(run['style'])),
+          EpubTextRun(
+            text: text,
+            style: _epubStyleFromJson(run['style']),
+            link: _epubLinkFromJson(run['link']),
+          ),
         );
       }
     }
@@ -87,10 +91,38 @@ List<EpubContentBlock> _epubBlocksFromJson(Object? raw) {
         imageWidth: _jsonDouble(map['imageWidth']),
         imageHeight: _jsonDouble(map['imageHeight']),
         style: style,
+        anchorIds: _anchorIdsFromJson(map['anchorIds']),
       ),
     );
   }
   return List<EpubContentBlock>.unmodifiable(blocks);
+}
+
+/// Anchor ids are pure navigation data. A damaged entry is dropped so a link
+/// can still resolve to the chapter instead of failing the whole payload.
+List<String> _anchorIdsFromJson(Object? raw) {
+  if (raw is! List) return const <String>[];
+  final ids = <String>[];
+  for (final value in raw) {
+    if (value is! String) continue;
+    final id = value.trim();
+    if (id.isEmpty || id.length > 256) continue;
+    ids.add(id);
+  }
+  return List<String>.unmodifiable(ids);
+}
+
+EpubLinkTarget? _epubLinkFromJson(Object? raw) {
+  if (raw is! Map) return null;
+  final chapter = raw['chapter'];
+  if (chapter is! num || !chapter.isFinite || chapter < 0) return null;
+  final block = raw['block'];
+  return EpubLinkTarget(
+    chapterIndex: chapter.toInt(),
+    blockIndex: block is num && block.isFinite && block >= 0
+        ? block.toInt()
+        : -1,
+  );
 }
 
 Map<String, dynamic> _epubBlockToJson(EpubContentBlock block) => {
@@ -98,8 +130,15 @@ Map<String, dynamic> _epubBlockToJson(EpubContentBlock block) => {
   if (block.text.isNotEmpty) 'text': block.text,
   if (block.runs.isNotEmpty)
     'runs': block.runs
-        .map((run) => {'text': run.text, 'style': _epubStyleToJson(run.style)})
+        .map(
+          (run) => {
+            'text': run.text,
+            'style': _epubStyleToJson(run.style),
+            if (run.link != null) 'link': _epubLinkToJson(run.link!),
+          },
+        )
         .toList(),
+  if (block.anchorIds.isNotEmpty) 'anchorIds': block.anchorIds,
   if (block.isHeading) 'isHeading': true,
   if (block.imagePath != null) 'imagePath': block.imagePath,
   if (block.altText != null && block.altText!.isNotEmpty)
@@ -162,6 +201,11 @@ Map<String, dynamic> _epubStyleToJson(EpubContentStyle style) => {
     'backgroundColorArgb': style.backgroundColorArgb,
   if (style.backgroundImagePath != null)
     'backgroundImagePath': style.backgroundImagePath,
+};
+
+Map<String, dynamic> _epubLinkToJson(EpubLinkTarget link) => {
+  'chapter': link.chapterIndex,
+  if (link.hasBlock) 'block': link.blockIndex,
 };
 
 double? _jsonDouble(Object? value) {

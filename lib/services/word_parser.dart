@@ -9,6 +9,7 @@ import 'package:xml/xml.dart';
 import 'package:xml/xml_events.dart';
 
 import '../models/book.dart';
+import 'book_id.dart';
 import '../repositories/reader_repositories.dart';
 import 'txt_parser.dart';
 
@@ -43,7 +44,7 @@ Future<Book> parseWordDocument(
   final extension = fileName.toLowerCase();
   if (extension.endsWith('.docx')) {
     final now = DateTime.now();
-    final bookId = 'docx_${now.microsecondsSinceEpoch}';
+    final bookId = nextBookId('docx', now: now);
     final root = await storage.getAppDataDirectory();
     final resourceDirectory = Directory(p.join(root.path, 'word', bookId));
     try {

@@ -20,6 +20,7 @@ import '../widgets/app_dialog.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/app_popup_menu.dart';
+import '../widgets/pdf_page_text_sheet.dart';
 
 class PdfReaderScreen extends StatefulWidget {
   final Book book;
@@ -485,38 +486,58 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
 
-  Future<void> _recognizeCurrentPage() async {
+  /// Opens the current page's text for selection.
+  ///
+  /// The embedded layer is tried first because it is exact and instant. Only a
+  /// page without one falls back to recognition, so a born-digital PDF never
+  /// pays for OCR just to let the reader copy a sentence.
+  Future<void> _showCurrentPageText({bool forceOcr = false}) async {
     final sourcePath = _sourcePath;
     if (sourcePath == null) return;
     _autoHideTimer?.cancel();
+    final pageIndex = _currentPage;
     var text = '';
-    try {
-      text = await _renderer.recognizePageText(
-        filePath: sourcePath,
-        pageIndex: _currentPage,
-      );
-    } on Object catch (error, stackTrace) {
-      debugPrint('Failed to OCR PDF page: $error');
-      debugPrintStack(stackTrace: stackTrace);
+    var source = PdfPageTextSource.textLayer;
+    if (!forceOcr) {
+      try {
+        text = await _renderer.extractPageText(
+          filePath: sourcePath,
+          pageIndex: pageIndex,
+        );
+      } on Object catch (error, stackTrace) {
+        debugPrint('Failed to read the PDF page text layer: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      }
     }
     if (!mounted) return;
-    await showAppDialog<void>(
+    if (text.trim().isEmpty) {
+      source = PdfPageTextSource.ocr;
+      try {
+        text = await _renderer.recognizePageText(
+          filePath: sourcePath,
+          pageIndex: pageIndex,
+        );
+      } on Object catch (error, stackTrace) {
+        debugPrint('Failed to OCR PDF page: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      }
+    }
+    if (!mounted) return;
+    final colors = _overlayColors;
+    await showAppSheet<void>(
       context: context,
-      colors: _overlayColors,
-      builder: (dialogContext) => AppDialog(
-        title: Text('第 ${_currentPage + 1} 页识别文字'),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: text.isEmpty
-              ? const Text('这一页没有识别到文字。')
-              : SelectableText(text),
+      colors: colors,
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.75,
+        maxChildSize: 0.95,
+        minChildSize: 0.35,
+        builder: (_, scrollController) => PdfPageTextSheet(
+          pageNumber: pageIndex + 1,
+          text: text,
+          source: source,
+          colors: colors,
+          scrollController: scrollController,
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('关闭'),
-          ),
-        ],
       ),
     );
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
@@ -992,8 +1013,10 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                         switch (value) {
                           case 'theme':
                             unawaited(_showDisplayThemeSheet());
+                          case 'page-text':
+                            unawaited(_showCurrentPageText());
                           case 'ocr-page':
-                            unawaited(_recognizeCurrentPage());
+                            unawaited(_showCurrentPageText(forceOcr: true));
                           case 'ocr-search':
                             unawaited(_showPdfSearch(useOcr: true));
                         }
@@ -1003,6 +1026,11 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                           value: 'theme',
                           label: '显示主题',
                           icon: Icons.brightness_6_outlined,
+                        ),
+                        AppMenuEntry(
+                          value: 'page-text',
+                          label: '选择本页文字',
+                          icon: Icons.text_fields_rounded,
                         ),
                         AppMenuEntry(
                           value: 'ocr-page',

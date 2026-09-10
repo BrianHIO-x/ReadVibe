@@ -66,6 +66,7 @@ internal class PdfDocumentEngine(context: Context) {
                 null
             }
             PdfOperation.OCR -> recognizePdfPageText(filePath, pageIndex)
+            PdfOperation.PAGE_TEXT -> extractPdfPageText(filePath, pageIndex)
         }
     }
 
@@ -398,6 +399,17 @@ internal class PdfDocumentEngine(context: Context) {
             temporary.copyTo(source, overwrite = true)
         } finally {
             temporary.delete()
+        }
+    }
+
+    /** Returns the page's own text layer, empty for a scan that carries none. */
+    private fun extractPdfPageText(filePath: String, pageIndex: Int): String {
+        val source = File(filePath)
+        require(source.isFile && source.length() > 0) { "PDF 文件为空或无法读取" }
+        return synchronized(pdfTextLock) {
+            val session = getPdfTextSession(source)
+            require(pageIndex in 0 until session.document.numberOfPages) { "PDF 页码超出范围" }
+            session.pageText(pageIndex).trim()
         }
     }
 

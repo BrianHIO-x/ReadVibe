@@ -384,8 +384,10 @@ void main() {
       ..createSync(recursive: true);
     final orphan = File(p.join(books.path, 'b3JwaGFu.json'))
       ..writeAsStringSync('[]');
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('readvibe_books', '{damaged');
+    File(
+      p.join(root.path, 'library.json'),
+    ).writeAsStringSync('{damaged');
+    StorageService.resetLibraryCache();
 
     final result = await storage.collectOrphanedData(
       referenceTime: DateTime.now().add(const Duration(days: 2)),

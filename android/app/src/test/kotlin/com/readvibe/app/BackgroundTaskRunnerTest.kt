@@ -86,8 +86,10 @@ class BackgroundTaskRunnerTest {
         for (operation in PdfOperation.entries) assertSame(operation, PdfOperation.fromMethod(operation.method))
         assertNull(PdfOperation.fromMethod("unknown"))
         assertEquals(
+            // PAGE_TEXT reads the shared PDFBox text session, so it belongs on the
+            // analysis lane beside SEARCH rather than on the render lane.
             setOf(PdfOperation.SEARCH, PdfOperation.OUTLINE, PdfOperation.ANNOTATIONS,
-                PdfOperation.PASSWORD_CHECK, PdfOperation.OCR),
+                PdfOperation.PASSWORD_CHECK, PdfOperation.OCR, PdfOperation.PAGE_TEXT),
             PdfOperation.entries.filter { it.analysis }.toSet(),
         )
         assertEquals(

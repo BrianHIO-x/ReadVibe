@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/book.dart';
+import '../models/reader_bookmark.dart';
 import '../models/reader_settings.dart';
 
 const _settingsKey = 'readvibe_settings';
@@ -13,6 +14,7 @@ const _pdfBookmarksPrefix = 'readvibe_pdf_bookmarks_';
 const _pdfNotesPrefix = 'readvibe_pdf_notes_';
 const _pdfDisplayThemePrefix = 'readvibe_pdf_display_theme_';
 const _tocCollapsedPrefix = 'readvibe_toc_collapsed_';
+const _bookmarksPrefix = 'readvibe_bookmarks_';
 
 /// Owns the small reader-state records stored in SharedPreferences.
 ///
@@ -230,6 +232,49 @@ class ReaderPreferencesStore {
     await _setLatestString('$_pdfDisplayThemePrefix$bookId', theme.name);
   }
 
+  Future<List<ReaderBookmark>> getBookmarks(String bookId) async {
+    if (bookId.isEmpty || _isBookDeleted(bookId)) return const <ReaderBookmark>[];
+    final raw = (await SharedPreferences.getInstance()).getString(
+      '$_bookmarksPrefix$bookId',
+    );
+    if (raw == null) return const <ReaderBookmark>[];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const <ReaderBookmark>[];
+      final marks = <ReaderBookmark>[];
+      final seenIds = <String>{};
+      for (final entry in decoded.take(maxReaderBookmarksPerBook)) {
+        final mark = ReaderBookmark.fromJson(entry);
+        if (mark == null || !seenIds.add(mark.id)) continue;
+        marks.add(mark);
+      }
+      return sortedReaderBookmarks(marks);
+    } on Object {
+      return const <ReaderBookmark>[];
+    }
+  }
+
+  Future<void> saveBookmarks(
+    String bookId,
+    List<ReaderBookmark> bookmarks,
+  ) async {
+    if (bookId.isEmpty || _isBookDeleted(bookId)) return;
+    // Keep the newest marks when a book runs past the cap, then store them in
+    // reading order so a later read needs no second sort.
+    final capped = bookmarks.length <= maxReaderBookmarksPerBook
+        ? bookmarks
+        : (bookmarks.toList()
+                ..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
+              .take(maxReaderBookmarksPerBook)
+              .toList();
+    await _setLatestString(
+      '$_bookmarksPrefix$bookId',
+      jsonEncode([
+        for (final mark in sortedReaderBookmarks(capped)) mark.toJson(),
+      ]),
+    );
+  }
+
   Future<Set<String>> getCollapsedTocGroups(String bookId) async {
     if (bookId.isEmpty) return <String>{};
     final raw = (await SharedPreferences.getInstance()).getString(
@@ -314,6 +359,7 @@ class ReaderPreferencesStore {
       '$_pdfNotesPrefix$bookId',
       '$_pdfDisplayThemePrefix$bookId',
       '$_tocCollapsedPrefix$bookId',
+      '$_bookmarksPrefix$bookId',
     ];
     final versions = <String, int>{
       for (final key in keys) key: _invalidateWrite(key),

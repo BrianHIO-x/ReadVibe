@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import '../models/book.dart';
+import '../models/reader_bookmark.dart';
 import '../models/reader_settings.dart';
 
 /// Result of a low-priority private-storage consistency sweep.
@@ -14,6 +15,40 @@ class StorageCleanupResult {
   });
 
   int get removedEntries => removedFiles + removedDirectories;
+}
+
+/// Private-storage footprint, split the way a reader thinks about it.
+///
+/// Imported books are data the user would lose on deletion. Caches are
+/// regenerated on demand, so they are the only part safe to reclaim without
+/// asking about individual books.
+class StorageUsageReport {
+  final int bookPayloadBytes;
+  final int epubResourceBytes;
+  final int wordResourceBytes;
+  final int pdfCopyBytes;
+  final int fontBytes;
+  final int cacheBytes;
+  final int bookCount;
+
+  const StorageUsageReport({
+    this.bookPayloadBytes = 0,
+    this.epubResourceBytes = 0,
+    this.wordResourceBytes = 0,
+    this.pdfCopyBytes = 0,
+    this.fontBytes = 0,
+    this.cacheBytes = 0,
+    this.bookCount = 0,
+  });
+
+  int get libraryBytes =>
+      bookPayloadBytes +
+      epubResourceBytes +
+      wordResourceBytes +
+      pdfCopyBytes +
+      fontBytes;
+
+  int get totalBytes => libraryBytes + cacheBytes;
 }
 
 /// Narrow resource boundary used by EPUB, DOCX and legacy search cleanup.
@@ -32,7 +67,9 @@ abstract interface class ImportedPdfStore {
 /// Persistence required by the format-independent import coordinator.
 abstract interface class BookImportStore
     implements AppDataDirectoryProvider, ImportedPdfStore {
-  Future<void> saveBook(Book book);
+  /// Persists a newly imported book and returns the committed snapshot, whose
+  /// title may be numbered when the shelf already holds a book by that name.
+  Future<Book> saveBook(Book book);
 
   Future<void> discardImportedBook(Book book);
 }
@@ -49,6 +86,13 @@ abstract interface class LibraryMaintenanceRepository
     Duration gracePeriod = const Duration(hours: 24),
     DateTime? referenceTime,
   });
+
+  /// Measures what ReadVibe occupies on this device.
+  Future<StorageUsageReport> measureStorageUsage();
+
+  /// Deletes regenerable caches and returns how many bytes were reclaimed.
+  /// Imported books, reading state and edits are never touched.
+  Future<int> clearTemporaryCaches();
 }
 
 /// Operations used by the shelf. Reader- and PDF-only state is intentionally
@@ -103,6 +147,10 @@ abstract interface class ReaderRepository
   Future<Set<String>> getCollapsedTocGroups(String bookId);
 
   Future<void> saveCollapsedTocGroups(String bookId, Set<String> groupIds);
+
+  Future<List<ReaderBookmark>> getBookmarks(String bookId);
+
+  Future<void> saveBookmarks(String bookId, List<ReaderBookmark> bookmarks);
 
   Future<void> deleteBook(String bookId);
 }

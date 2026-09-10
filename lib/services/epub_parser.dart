@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 import 'package:xml/xml.dart';
 
 import '../models/book.dart';
+import 'book_id.dart';
 import '../repositories/reader_repositories.dart';
 
 /// Resource limits are grouped so the security boundaries can be exercised by
@@ -43,7 +44,7 @@ Future<Book> parseEpub(
   EpubParseLimits limits = _defaultEpubParseLimits,
 }) async {
   final now = DateTime.now();
-  final bookId = 'epub_${now.microsecondsSinceEpoch}';
+  final bookId = nextBookId('epub', now: now);
   final root = await storage.getAppDataDirectory();
   final resourceDirectory = Directory(p.join(root.path, 'epub', bookId));
   try {
@@ -180,6 +181,11 @@ Book _parseEpubSync(
   String? activeVolumeTitle;
   final cssDocumentCache = <String, String>{};
   final cssRulesCache = <String, List<_CssRule>>{};
+  // Link resolution runs after the spine, because a footnote marker in chapter
+  // one routinely points at a note collected in the last spine document.
+  final chapterIndexByPath = <String, int>{};
+  final blockIndexByAnchor = <String, int>{};
+  final pendingLinks = <int, Map<int, Map<int, String>>>{};
 
   for (final itemId in spineIds) {
     final manifestItem = manifest[itemId];
@@ -204,14 +210,26 @@ Book _parseEpubSync(
           imageStore.extract(rawUrl, relativeTo: manifestItem.path)?.path,
       resolveFontFamily: fontStore.resolveFamily,
     );
-    final blocks = _documentToBlocks(
+    final parsed = _documentToBlocks(
       document,
       manifestItem.path,
       resolver,
       imageStore,
     );
+    final blocks = parsed.blocks;
 
     if (blocks.isEmpty) continue;
+
+    final chapterIndex = chapters.length;
+    chapterIndexByPath[manifestItem.path] = chapterIndex;
+    for (var index = 0; index < blocks.length; index++) {
+      for (final id in blocks[index].anchorIds) {
+        blockIndexByAnchor.putIfAbsent('${manifestItem.path}#$id', () => index);
+      }
+    }
+    if (parsed.linkHrefs.isNotEmpty) {
+      pendingLinks[chapterIndex] = parsed.linkHrefs;
+    }
 
     final embeddedHeading = blocks
         .where((block) => block.isText && block.isHeading)
@@ -257,6 +275,13 @@ Book _parseEpubSync(
     throw const FormatException('无法从 EPUB 中解析出任何章节内容或图片');
   }
 
+  _resolveEpubLinks(
+    chapters,
+    pendingLinks: pendingLinks,
+    chapterIndexByPath: chapterIndexByPath,
+    blockIndexByAnchor: blockIndexByAnchor,
+  );
+
   final fallbackTitle = fileName
       .replaceAll(RegExp(r'\.epub$', caseSensitive: false), '')
       .trim();
@@ -273,6 +298,70 @@ Book _parseEpubSync(
     sourcePath: resourceDirectory.path,
     coverImagePath: coverImagePath,
     embeddedFonts: fontStore.embeddedFonts,
+  );
+}
+
+/// Rewrites collected anchor hrefs into chapter and block coordinates.
+///
+/// A reference the spine does not contain is dropped rather than kept as a
+/// dead tap target; the text stays readable and simply is not a link.
+void _resolveEpubLinks(
+  List<Chapter> chapters, {
+  required Map<int, Map<int, Map<int, String>>> pendingLinks,
+  required Map<String, int> chapterIndexByPath,
+  required Map<String, int> blockIndexByAnchor,
+}) {
+  for (final entry in pendingLinks.entries) {
+    final chapter = chapters[entry.key];
+    final blocks = chapter.epubBlocks.toList();
+    var changed = false;
+    for (final blockEntry in entry.value.entries) {
+      final blockIndex = blockEntry.key;
+      if (blockIndex < 0 || blockIndex >= blocks.length) continue;
+      final block = blocks[blockIndex];
+      final runs = block.runs.toList();
+      var blockChanged = false;
+      for (final runEntry in blockEntry.value.entries) {
+        final runIndex = runEntry.key;
+        if (runIndex < 0 || runIndex >= runs.length) continue;
+        final target = _epubLinkTarget(
+          runEntry.value,
+          chapterIndexByPath: chapterIndexByPath,
+          blockIndexByAnchor: blockIndexByAnchor,
+        );
+        if (target == null) continue;
+        runs[runIndex] = runs[runIndex].withLink(target);
+        blockChanged = true;
+      }
+      if (!blockChanged) continue;
+      blocks[blockIndex] = block.withRuns(runs);
+      changed = true;
+    }
+    if (!changed) continue;
+    chapters[entry.key] = Chapter(
+      index: chapter.index,
+      title: chapter.title,
+      content: chapter.content,
+      volumeTitle: chapter.volumeTitle,
+      epubBlocks: List<EpubContentBlock>.unmodifiable(blocks),
+    );
+  }
+}
+
+EpubLinkTarget? _epubLinkTarget(
+  String href, {
+  required Map<String, int> chapterIndexByPath,
+  required Map<String, int> blockIndexByAnchor,
+}) {
+  final hashIndex = href.indexOf('#');
+  final path = hashIndex < 0 ? href : href.substring(0, hashIndex);
+  final chapterIndex = chapterIndexByPath[path];
+  if (chapterIndex == null) return null;
+  if (hashIndex < 0) return EpubLinkTarget(chapterIndex: chapterIndex);
+  final blockIndex = blockIndexByAnchor[href];
+  return EpubLinkTarget(
+    chapterIndex: chapterIndex,
+    blockIndex: blockIndex ?? -1,
   );
 }
 
@@ -498,15 +587,62 @@ String _rewriteCssUrls(String css, String cssPath) {
   );
 }
 
-List<EpubContentBlock> _documentToBlocks(
+/// Blocks of one spine document plus the anchor hrefs found inside them.
+///
+/// Hrefs stay unresolved here: a link can point at a later spine item, so the
+/// mapping to chapter and block coordinates only exists after the whole spine
+/// has been read.
+class _ParsedDocument {
+  final List<EpubContentBlock> blocks;
+
+  /// blockIndex -> runIndex -> normalized `path` or `path#fragment`.
+  final Map<int, Map<int, String>> linkHrefs;
+
+  const _ParsedDocument(this.blocks, this.linkHrefs);
+}
+
+_ParsedDocument _documentToBlocks(
   Document document,
   String contentPath,
   _EpubStyleResolver resolver,
   _EpubImageStore imageStore,
 ) {
   final blocks = <EpubContentBlock>[];
+  final linkHrefs = <int, Map<int, String>>{};
+  final pendingAnchorIds = <String>[];
   final root = document.body ?? document.documentElement;
-  if (root == null) return blocks;
+  if (root == null) return _ParsedDocument(blocks, linkHrefs);
+
+  void noteAnchorId(Element element) {
+    final id = element.attributes['id']?.trim();
+    if (id == null || id.isEmpty || id.length > 256) return;
+    if (pendingAnchorIds.length >= 64 || pendingAnchorIds.contains(id)) return;
+    pendingAnchorIds.add(id);
+  }
+
+  List<String> drainAnchorIds() {
+    if (pendingAnchorIds.isEmpty) return const <String>[];
+    final ids = List<String>.unmodifiable(pendingAnchorIds);
+    pendingAnchorIds.clear();
+    return ids;
+  }
+
+  /// Resolves an anchor href against this document. Returns null for external
+  /// schemes and for empty references, which stay ordinary text.
+  String? resolveLinkHref(String rawHref) {
+    final value = rawHref.trim();
+    if (value.isEmpty) return null;
+    if (_uriSchemePattern.hasMatch(value)) return null;
+    final hashIndex = value.indexOf('#');
+    final rawPath = hashIndex < 0 ? value : value.substring(0, hashIndex);
+    final rawFragment = hashIndex < 0 ? '' : value.substring(hashIndex + 1);
+    final path = rawPath.trim().isEmpty
+        ? contentPath
+        : _resolveArchiveReference(rawPath, contentPath);
+    if (path.isEmpty) return null;
+    final fragment = _safeDecodeUriComponent(rawFragment).trim();
+    return fragment.isEmpty ? path : '$path#$fragment';
+  }
 
   void appendImage(Element image, EpubContentStyle inheritedStyle) {
     final rawSource =
@@ -548,6 +684,7 @@ List<EpubContentBlock> _documentToBlocks(
         imageWidth: resolvedWidth,
         imageHeight: resolvedHeight,
         style: style,
+        anchorIds: drainAnchorIds(),
       ),
     );
   }
@@ -567,48 +704,66 @@ List<EpubContentBlock> _documentToBlocks(
       final collected = collector.finish();
       collector = _EpubRunCollector();
       if (collected == null) return;
+      final compact = _compactRuns(collected.runs, blockStyle);
+      final hrefs = <int, String>{};
+      for (var index = 0; index < compact.length; index++) {
+        final href = compact[index].href;
+        if (href != null) hrefs[index] = href;
+      }
+      if (hrefs.isNotEmpty) linkHrefs[blocks.length] = hrefs;
       blocks.add(
         EpubContentBlock(
           kind: EpubContentBlockKind.text,
           text: collected.text,
-          runs: _compactRuns(collected.runs, blockStyle),
+          runs: List<EpubTextRun>.unmodifiable([
+            for (final run in compact)
+              EpubTextRun(text: run.text, style: run.style),
+          ]),
           isHeading: isHeading,
           style: blockStyle,
+          anchorIds: drainAnchorIds(),
         ),
       );
     }
 
-    void visit(Node node, EpubContentStyle style) {
+    void visit(Node node, EpubContentStyle style, String? href) {
       if (node is Text) {
-        collector.add(node.data, style);
+        collector.add(node.data, style, href: href);
         return;
       }
       if (node is! Element || resolver.isHidden(node)) return;
       final tag = node.localName;
       if (tag == 'script' || tag == 'style' || tag == 'head') return;
+      noteAnchorId(node);
       if (tag == 'img' || tag == 'image') {
         flushText();
         appendImage(node, style);
         return;
       }
-      if (tag == 'br' || tag == 'hr') collector.add(' ', style);
+      if (tag == 'br' || tag == 'hr') collector.add(' ', style, href: href);
+      // An anchor nested inside another anchor is malformed markup; the
+      // innermost href wins, matching how browsers resolve the same document.
+      final childHref = tag == 'a'
+          ? (resolveLinkHref(node.attributes['href'] ?? '') ?? href)
+          : href;
       final childStyle = _normalizeInlineStyle(
         resolver.styleFor(node, inherited: style),
         inherited: style,
       );
       for (final child in node.nodes) {
-        visit(child, childStyle);
+        visit(child, childStyle, childHref);
       }
     }
 
     for (final child in element.nodes) {
-      visit(child, blockStyle);
+      visit(child, blockStyle, null);
     }
     flushText();
   }
 
   void walk(Element element, EpubContentStyle inheritedStyle) {
     if (resolver.isHidden(element)) return;
+    noteAnchorId(element);
     final style = resolver.styleFor(element, inherited: inheritedStyle);
     if (element.localName == 'img' || element.localName == 'image') {
       appendImage(element, inheritedStyle);
@@ -636,8 +791,11 @@ List<EpubContentBlock> _documentToBlocks(
   }
 
   walk(root, const EpubContentStyle(textIndentEm: 0));
-  return blocks;
+  return _ParsedDocument(blocks, linkHrefs);
 }
+
+/// Matches any URI scheme, so http, mailto, tel and data links stay plain text.
+final _uriSchemePattern = RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*:');
 
 const _blockElements = <String>{
   'address',
@@ -820,26 +978,29 @@ EpubContentStyle _normalizeImageStyle(EpubContentStyle style) {
   );
 }
 
-List<EpubTextRun> _compactRuns(
-  List<EpubTextRun> source,
-  EpubContentStyle blockStyle,
-) {
-  if (source.isEmpty) return const <EpubTextRun>[];
-  final compact = <EpubTextRun>[];
+List<_RawRun> _compactRuns(List<_RawRun> source, EpubContentStyle blockStyle) {
+  if (source.isEmpty) return const <_RawRun>[];
+  final compact = <_RawRun>[];
   for (final run in source) {
-    if (compact.isNotEmpty && _sameEpubStyle(compact.last.style, run.style)) {
+    // Two runs merge only when they also share a link target, otherwise a
+    // footnote marker would dissolve into the sentence around it.
+    if (compact.isNotEmpty &&
+        compact.last.href == run.href &&
+        _sameEpubStyle(compact.last.style, run.style)) {
       final previous = compact.removeLast();
-      compact.add(
-        EpubTextRun(text: '${previous.text}${run.text}', style: run.style),
-      );
+      compact.add(previous.withText('${previous.text}${run.text}'));
     } else {
       compact.add(run);
     }
   }
-  if (compact.every((run) => _sameEpubStyle(run.style, blockStyle))) {
-    return const <EpubTextRun>[];
+  // A paragraph whose runs all match the block style needs no run list, unless
+  // one of them carries a link that only the run list can hold.
+  if (compact.every(
+    (run) => run.href == null && _sameEpubStyle(run.style, blockStyle),
+  )) {
+    return const <_RawRun>[];
   }
-  return List<EpubTextRun>.unmodifiable(compact);
+  return List<_RawRun>.unmodifiable(compact);
 }
 
 bool _sameEpubStyle(EpubContentStyle first, EpubContentStyle second) =>
@@ -863,25 +1024,40 @@ bool _sameEpubStyle(EpubContentStyle first, EpubContentStyle second) =>
 /// paragraph of a chapter into one run.
 const _transparentContainers = <String>{'html', 'body'};
 
+/// A run before its anchor href has been resolved to a chapter and block.
+///
+/// The spine is still being read while blocks are built, so a link can only be
+/// turned into coordinates once every chapter exists. [href] holds the
+/// normalized `path` or `path#fragment` until that second pass runs.
+class _RawRun {
+  final String text;
+  final EpubContentStyle style;
+  final String? href;
+
+  const _RawRun(this.text, this.style, this.href);
+
+  _RawRun withText(String replacement) => _RawRun(replacement, style, href);
+}
+
 class _CollectedRuns {
   final String text;
-  final List<EpubTextRun> runs;
+  final List<_RawRun> runs;
 
   const _CollectedRuns(this.text, this.runs);
 }
 
 class _EpubRunCollector {
-  final List<EpubTextRun> _runs = <EpubTextRun>[];
+  final List<_RawRun> _runs = <_RawRun>[];
   var _hasText = false;
   var _endsWithSpace = false;
 
-  void add(String rawText, EpubContentStyle style) {
+  void add(String rawText, EpubContentStyle style, {String? href}) {
     if (rawText.isEmpty) return;
     var text = rawText.replaceAll(RegExp(r'\s+'), ' ');
     if (!_hasText) text = text.trimLeft();
     if (_endsWithSpace) text = text.trimLeft();
     if (text.isEmpty) return;
-    _runs.add(EpubTextRun(text: text, style: style));
+    _runs.add(_RawRun(text, style, href));
     _hasText = true;
     _endsWithSpace = text.endsWith(' ');
   }
@@ -890,12 +1066,10 @@ class _EpubRunCollector {
     if (_runs.isEmpty) return null;
     final last = _runs.removeLast();
     final lastText = last.text.trimRight();
-    if (lastText.isNotEmpty) {
-      _runs.add(EpubTextRun(text: lastText, style: last.style));
-    }
+    if (lastText.isNotEmpty) _runs.add(last.withText(lastText));
     final text = _runs.map((run) => run.text).join().trim();
     if (text.isEmpty) return null;
-    return _CollectedRuns(text, List<EpubTextRun>.unmodifiable(_runs));
+    return _CollectedRuns(text, List<_RawRun>.unmodifiable(_runs));
   }
 }
 

@@ -55,9 +55,17 @@ class IncomingFileService {
       do {
         _consumeAgain = false;
         while (_handler != null) {
-          final raw = await _channel.invokeMapMethod<Object?, Object?>(
-            'consumeNext',
-          );
+          final Map<Object?, Object?>? raw;
+          try {
+            raw = await _channel.invokeMapMethod<Object?, Object?>(
+              'consumeNext',
+            );
+          } on PlatformException catch (error, stackTrace) {
+            // The native queue itself is unreachable. Stop draining, and let
+            // the next 'available' notification start a fresh attempt.
+            _report(error.message, error, stackTrace);
+            break;
+          }
           if (raw == null) break;
           final path = raw['path'];
           final name = raw['name'];
@@ -69,27 +77,43 @@ class IncomingFileService {
           }
           final handler = _handler;
           if (handler == null) return;
-          await handler(
-            IncomingBookFile(
-              path: path,
-              name: name,
-              mimeType: raw['mimeType'] is String
-                  ? raw['mimeType']! as String
-                  : '',
-            ),
-          );
+          try {
+            await handler(
+              IncomingBookFile(
+                path: path,
+                name: name,
+                mimeType: raw['mimeType'] is String
+                    ? raw['mimeType']! as String
+                    : '',
+              ),
+            );
+          } on Object catch (error, stackTrace) {
+            // One unreadable file must not strand the others already queued
+            // behind it; opening five books at once should import four when
+            // only one of them is broken.
+            _report(
+              error is PlatformException ? error.message : null,
+              error,
+              stackTrace,
+            );
+          }
         }
       } while (_consumeAgain && _handler != null);
-    } on PlatformException catch (error, stackTrace) {
-      debugPrint('Failed to receive an external book: ${error.message}');
-      debugPrintStack(stackTrace: stackTrace);
-      _errorHandler?.call(
-        error.message?.trim().isNotEmpty == true
-            ? error.message!.trim()
-            : '无法读取外部文件',
-      );
     } finally {
       _consuming = false;
     }
+  }
+
+  static void _report(
+    String? platformMessage,
+    Object error,
+    StackTrace stackTrace,
+  ) {
+    debugPrint('Failed to receive an external book: $error');
+    debugPrintStack(stackTrace: stackTrace);
+    final message = platformMessage?.trim();
+    _errorHandler?.call(
+      message != null && message.isNotEmpty ? message : '无法读取外部文件',
+    );
   }
 }

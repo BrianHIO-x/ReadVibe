@@ -7,6 +7,7 @@ import 'package:fast_gbk/fast_gbk.dart';
 import 'package:dart3_big5/big5.dart';
 
 import '../models/book.dart';
+import 'book_id.dart';
 
 const txtParagraphIndent = '　　';
 const txtParagraphSeparator = '\n';
@@ -98,7 +99,7 @@ Book buildBookFromText({
   final resolvedAuthor = author?.trim();
   final now = DateTime.now();
   return Book(
-    id: '${format.name}_${now.microsecondsSinceEpoch}',
+    id: nextBookId(format.name, now: now),
     title: resolvedTitle != null && resolvedTitle.isNotEmpty
         ? resolvedTitle
         : (cleanTitle.isEmpty ? '未命名书籍' : cleanTitle),
@@ -201,13 +202,92 @@ String decodeTxtBytes(List<int> bytes) {
     payload = payload.sublist(3);
   }
 
+  // Latin text in UTF-16 pads every character with a NUL, which is a structural
+  // signal no amount of content scoring can beat: both readings of "Chapter 1"
+  // decode cleanly, and the byte-swapped one lands in the CJK range where a
+  // Chinese-oriented score would happily prefer it.
+  final bomlessUtf16 = _detectBomlessUtf16(payload);
+  if (bomlessUtf16 != null) return _decodeUtf16(payload, bomlessUtf16);
+
+  String? utf8Text;
   try {
-    return utf8.decode(payload, allowMalformed: false);
+    utf8Text = utf8.decode(payload, allowMalformed: false);
   } on FormatException {
-    final gbk = const GbkCodec(allowMalformed: true).decode(payload);
-    final big5 = Big5.decode(payload);
-    return _legacyChineseScore(big5) > _legacyChineseScore(gbk) ? big5 : gbk;
+    utf8Text = null;
   }
+  // Real UTF-8 prose carries no NUL bytes. Their presence means the file is
+  // almost certainly BOM-less UTF-16 that happened to survive a strict UTF-8
+  // decode, which is what an ASCII-only UTF-16 file does.
+  if (utf8Text != null && !_containsNulByte(payload)) return utf8Text;
+
+  final candidates = <String>[
+    ?utf8Text,
+    ..._legacyChineseCandidates(payload),
+  ];
+  if (candidates.isEmpty) return utf8.decode(payload, allowMalformed: true);
+  var best = candidates.first;
+  var bestScore = _legacyChineseScore(best);
+  for (final candidate in candidates.skip(1)) {
+    final score = _legacyChineseScore(candidate);
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+/// Decodes [payload] with every legacy encoding worth considering.
+///
+/// A Chinese UTF-16 file without a BOM has no NUL bytes to give it away, so it
+/// cannot be told apart from GBK by inspection. Both readings are produced and
+/// the scorer picks whichever one actually looks like Chinese prose.
+List<String> _legacyChineseCandidates(List<int> payload) {
+  final candidates = <String>[];
+  void attempt(String Function() decode) {
+    try {
+      candidates.add(decode());
+    } on Object {
+      // A codec that rejects these bytes simply is not the right one.
+    }
+  }
+
+  attempt(() => const GbkCodec(allowMalformed: true).decode(payload));
+  attempt(() => Big5.decode(payload));
+  if (payload.length >= 4 && payload.length.isEven) {
+    attempt(() => _decodeUtf16(payload, Endian.little));
+    attempt(() => _decodeUtf16(payload, Endian.big));
+  }
+  return candidates;
+}
+
+/// Byte order of a UTF-16 file that carries no byte order mark, or null when
+/// the payload shows no such padding. Chinese UTF-16 has no NUL filler and is
+/// left to content scoring.
+Endian? _detectBomlessUtf16(List<int> payload) {
+  if (payload.length < 4 || !payload.length.isEven) return null;
+  final limit = (payload.length < 8192 ? payload.length : 8192) & ~1;
+  final units = limit ~/ 2;
+  if (units < 2) return null;
+  var evenNuls = 0;
+  var oddNuls = 0;
+  for (var index = 0; index < limit; index += 2) {
+    if (payload[index] == 0) evenNuls++;
+    if (payload[index + 1] == 0) oddNuls++;
+  }
+  // One side must be almost entirely padding and the other almost entirely
+  // free of it, so a file that merely contains a few stray NULs is untouched.
+  if (oddNuls >= units * 0.7 && evenNuls <= units * 0.05) return Endian.little;
+  if (evenNuls >= units * 0.7 && oddNuls <= units * 0.05) return Endian.big;
+  return null;
+}
+
+bool _containsNulByte(List<int> payload) {
+  final limit = payload.length < 8192 ? payload.length : 8192;
+  for (var index = 0; index < limit; index++) {
+    if (payload[index] == 0) return true;
+  }
+  return false;
 }
 
 int _legacyChineseScore(String text) {

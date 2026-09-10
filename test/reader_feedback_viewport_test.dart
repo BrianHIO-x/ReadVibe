@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:readvibe/models/book.dart';
+import 'package:readvibe/models/reader_bookmark.dart';
 import 'package:readvibe/models/reader_settings.dart';
 import 'package:readvibe/repositories/reader_repositories.dart';
 import 'package:readvibe/screens/reader_screen.dart';
@@ -23,6 +24,14 @@ class _Repository implements ReaderRepository {
   Future<Set<String>> getCollapsedTocGroups(String bookId) async => {};
   @override
   Future<void> saveSettings(ReaderSettings settings) async {}
+  @override
+  Future<List<ReaderBookmark>> getBookmarks(String bookId) async =>
+      const <ReaderBookmark>[];
+  @override
+  Future<void> saveBookmarks(
+    String bookId,
+    List<ReaderBookmark> bookmarks,
+  ) async {}
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

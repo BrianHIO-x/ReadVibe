@@ -24,6 +24,10 @@ class ReaderSelectionArea extends StatefulWidget {
   final ScrollController? edgeScrollController;
   final bool edgeScrollEnabled;
 
+  /// Saves the selected text as a note at the current reading position. The
+  /// reader owns the mark list, so the toolbar only forwards the selection.
+  final Future<void> Function(String selectedText)? onAddNote;
+
   const ReaderSelectionArea({
     super.key,
     required this.child,
@@ -35,6 +39,7 @@ class ReaderSelectionArea extends StatefulWidget {
     required this.onReaderModalClosed,
     this.edgeScrollController,
     this.edgeScrollEnabled = true,
+    this.onAddNote,
   });
 
   @override
@@ -309,6 +314,17 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
       if (button.type == type) return button;
     }
     return null;
+  }
+
+  /// Hands the selected text to the reader, then dismisses the toolbar and the
+  /// selection so the note dialog opens over clean body text.
+  Future<void> _addNoteForSelection() async {
+    final selectedText = _selectedContent?.plainText.trim();
+    final handler = widget.onAddNote;
+    ContextMenuController.removeAny();
+    if (handler == null || selectedText == null || selectedText.isEmpty) return;
+    _selectionAreaKey.currentState?.selectableRegion.clearSelection();
+    await handler(selectedText);
   }
 
   Future<void> _runSystemTextAction({required bool translate}) async {
@@ -761,6 +777,11 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
       copy.copyWith(label: '复制'),
       if (share != null) share.copyWith(label: '分享'),
       if (selectAll != null) selectAll.copyWith(label: '全选'),
+      if (widget.onAddNote != null)
+        ContextMenuButtonItem(
+          label: '笔记',
+          onPressed: () => unawaited(_addNoteForSelection()),
+        ),
       ContextMenuButtonItem(
         label: '翻译',
         onPressed: () => unawaited(_runSystemTextAction(translate: true)),

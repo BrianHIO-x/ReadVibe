@@ -90,11 +90,33 @@ class EpubContentStyle {
   });
 }
 
+/// Where an EPUB hyperlink points inside the same book.
+///
+/// External schemes are deliberately not modeled: ReadVibe processes book
+/// content locally, so a publisher's outbound link stays plain text instead of
+/// becoming a tap that leaves the device.
+class EpubLinkTarget {
+  final int chapterIndex;
+
+  /// Block the fragment resolved to, or -1 when only the chapter is known.
+  final int blockIndex;
+
+  const EpubLinkTarget({required this.chapterIndex, this.blockIndex = -1});
+
+  bool get hasBlock => blockIndex >= 0;
+}
+
 class EpubTextRun {
   final String text;
   final EpubContentStyle style;
 
-  const EpubTextRun({required this.text, required this.style});
+  /// Set when the run sits inside an anchor that resolves within this book.
+  final EpubLinkTarget? link;
+
+  const EpubTextRun({required this.text, required this.style, this.link});
+
+  EpubTextRun withLink(EpubLinkTarget? target) =>
+      EpubTextRun(text: text, style: style, link: target);
 }
 
 class EpubContentBlock {
@@ -108,6 +130,10 @@ class EpubContentBlock {
   final double? imageHeight;
   final EpubContentStyle style;
 
+  /// Element ids this block covers, so a link fragment can find its landing
+  /// block. Footnote bodies carry the id that the marker in the text points at.
+  final List<String> anchorIds;
+
   const EpubContentBlock({
     required this.kind,
     this.text = '',
@@ -118,12 +144,35 @@ class EpubContentBlock {
     this.imageWidth,
     this.imageHeight,
     this.style = const EpubContentStyle(),
+    this.anchorIds = const <String>[],
   });
 
   bool get isText => kind == EpubContentBlockKind.text;
   bool get isImage => kind == EpubContentBlockKind.image;
+  bool get hasLinks => runs.any((run) => run.link != null);
+
+  EpubContentBlock withRuns(List<EpubTextRun> replacement) => EpubContentBlock(
+    kind: kind,
+    text: text,
+    runs: List<EpubTextRun>.unmodifiable(replacement),
+    isHeading: isHeading,
+    imagePath: imagePath,
+    altText: altText,
+    imageWidth: imageWidth,
+    imageHeight: imageHeight,
+    style: style,
+    anchorIds: anchorIds,
+  );
 }
 
+/// One chapter of a book.
+///
+/// Chapter deliberately keeps identity equality. A stored chapter reads its
+/// body from disk on first access, so a value-based `==` would have to either
+/// load every payload it compares, which is exactly the work the lazy proxy
+/// exists to avoid, or compare only the cheap fields and call two different
+/// chapters equal. Callers that need a stable key use [index], which is unique
+/// within a book and changes only when its content revision does.
 class Chapter {
   final int index;
   final String title;

@@ -33,8 +33,20 @@ class ReadVibeApp extends StatelessWidget {
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
-      supportedLocales: const [Locale('zh')],
-      locale: const Locale('zh'),
+      // ReadVibe ships a Chinese interface only. Naming the script and region
+      // also settles Han glyph selection: without them a device set to
+      // Japanese or Traditional Chinese can shape shared codepoints with the
+      // wrong regional forms.
+      supportedLocales: const [Locale.fromSubtags(
+        languageCode: 'zh',
+        scriptCode: 'Hans',
+        countryCode: 'CN',
+      )],
+      locale: const Locale.fromSubtags(
+        languageCode: 'zh',
+        scriptCode: 'Hans',
+        countryCode: 'CN',
+      ),
       onGenerateRoute: (settings) {
         switch (settings.name) {
           case '/':

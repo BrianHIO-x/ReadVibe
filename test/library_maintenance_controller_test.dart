@@ -22,6 +22,13 @@ class _MaintenanceRepository implements LibraryMaintenanceRepository {
   }
 
   @override
+  Future<StorageUsageReport> measureStorageUsage() async =>
+      const StorageUsageReport();
+
+  @override
+  Future<int> clearTemporaryCaches() async => 0;
+
+  @override
   Future<BookAvailability> checkBookAvailability(
     Book book, {
     bool deep = false,

@@ -1,12 +1,14 @@
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
 
 import '../../models/book.dart';
 import '../../models/reading_paragraph.dart';
 import '../../models/reader_settings.dart';
 import '../../theme/app_spacing.dart';
+import '../../services/resource_presence.dart';
 import '../../theme/app_theme.dart';
 
 class EpubBlockLayoutMetrics {
@@ -31,10 +33,15 @@ class ReaderEpubLayout {
   const ReaderEpubLayout({
     required this.textScaler,
     required this.resolveSimulationLineExtent,
+    this.onOpenLink,
   });
 
   final TextScaler textScaler;
   final double Function(ReaderSettings settings) resolveSimulationLineExtent;
+
+  /// Opens an internal EPUB link. Null in measurement-only contexts, where a
+  /// tap target would only allocate recognizers no one can reach.
+  final void Function(EpubLinkTarget target)? onOpenLink;
 
   String formatParagraph(EpubContentBlock block) {
     final body = visibleParagraphBody(block.text);
@@ -225,25 +232,38 @@ class ReaderEpubLayout {
         child: content,
       );
     } else {
-      content = SizedBox(
-        width: width,
-        height: metrics.content,
-        child: Text.rich(
+      final background = blockBackground == Colors.transparent
+          ? themeColors.background
+          : blockBackground;
+      final openLink = onOpenLink;
+      final Widget text;
+      if (openLink != null && block.hasLinks) {
+        text = _EpubLinkedText(
+          layout: this,
+          block: block,
+          settings: settings,
+          themeColors: themeColors,
+          foreground: foreground,
+          background: background,
+          simulationPage: simulationPage,
+          onOpenLink: openLink,
+        );
+      } else {
+        text = Text.rich(
           _textSpan(
             block,
             settings: settings,
             foreground: foreground,
-            background: blockBackground == Colors.transparent
-                ? themeColors.background
-                : blockBackground,
+            background: background,
           ),
           textAlign: _textAlign(block.style.textAlign),
           textScaler: textScaler,
           strutStyle: simulationPage
               ? _simulationStrutStyle(block, settings)
               : null,
-        ),
-      );
+        );
+      }
+      content = SizedBox(width: width, height: metrics.content, child: text);
     }
 
     final backgroundPath = block.style.backgroundImagePath;
@@ -254,9 +274,9 @@ class ReaderEpubLayout {
             color: blockBackground == Colors.transparent
                 ? null
                 : blockBackground,
-            image: backgroundPath != null && File(backgroundPath).existsSync()
+            image: importedResourceExists(backgroundPath)
                 ? DecorationImage(
-                    image: FileImage(File(backgroundPath)),
+                    image: FileImage(File(backgroundPath!)),
                     fit: BoxFit.cover,
                     opacity: 0.22,
                   )
@@ -318,6 +338,8 @@ class ReaderEpubLayout {
     required ReaderSettings settings,
     required Color foreground,
     required Color background,
+    Color? linkColor,
+    Map<int, TapGestureRecognizer>? linkRecognizers,
   }) {
     final formatted = formatParagraph(block);
     final prefixLength = math.max(0, formatted.length - block.text.length);
@@ -348,16 +370,26 @@ class ReaderEpubLayout {
         ),
       );
     } else {
-      for (final run in block.runs) {
+      for (var index = 0; index < block.runs.length; index++) {
+        final run = block.runs[index];
+        final isLink = run.link != null && linkColor != null;
+        final style = _runTextStyle(
+          run.style,
+          settings: settings,
+          foreground: foreground,
+          background: background,
+        );
         children.add(
           TextSpan(
             text: run.text,
-            style: _runTextStyle(
-              run.style,
-              settings: settings,
-              foreground: foreground,
-              background: background,
-            ),
+            style: isLink
+                ? style.copyWith(
+                    color: linkColor,
+                    decoration: TextDecoration.underline,
+                    decorationColor: linkColor.withValues(alpha: 0.5),
+                  )
+                : style,
+            recognizer: linkRecognizers?[index],
           ),
         );
       }
@@ -474,5 +506,104 @@ class ReaderEpubLayout {
         ),
       ),
     );
+  }
+}
+
+
+/// Renders a block that contains internal links.
+///
+/// Tap recognizers must outlive a single frame and be disposed with the widget,
+/// so link-bearing blocks render through this stateful wrapper. Blocks without
+/// links keep the cheaper stateless path.
+class _EpubLinkedText extends StatefulWidget {
+  const _EpubLinkedText({
+    required this.layout,
+    required this.block,
+    required this.settings,
+    required this.themeColors,
+    required this.foreground,
+    required this.background,
+    required this.simulationPage,
+    required this.onOpenLink,
+  });
+
+  final ReaderEpubLayout layout;
+  final EpubContentBlock block;
+  final ReaderSettings settings;
+  final ReaderThemeColors themeColors;
+  final Color foreground;
+  final Color background;
+  final bool simulationPage;
+  final void Function(EpubLinkTarget target) onOpenLink;
+
+  @override
+  State<_EpubLinkedText> createState() => _EpubLinkedTextState();
+}
+
+class _EpubLinkedTextState extends State<_EpubLinkedText> {
+  final _recognizers = <int, TapGestureRecognizer>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _buildRecognizers();
+  }
+
+  @override
+  void didUpdateWidget(_EpubLinkedText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (identical(oldWidget.block, widget.block)) return;
+    _disposeRecognizers();
+    _buildRecognizers();
+  }
+
+  void _buildRecognizers() {
+    final runs = widget.block.runs;
+    for (var index = 0; index < runs.length; index++) {
+      final target = runs[index].link;
+      if (target == null) continue;
+      // The callback is read at tap time so a rebuilt parent stays authoritative.
+      _recognizers[index] = TapGestureRecognizer()
+        ..onTap = () => widget.onOpenLink(target);
+    }
+  }
+
+  void _disposeRecognizers() {
+    for (final recognizer in _recognizers.values) {
+      recognizer.dispose();
+    }
+    _recognizers.clear();
+  }
+
+  @override
+  void dispose() {
+    _disposeRecognizers();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Text.rich(
+    widget.layout._textSpan(
+      widget.block,
+      settings: widget.settings,
+      foreground: widget.foreground,
+      background: widget.background,
+      linkColor: _safeLinkColor(),
+      linkRecognizers: _recognizers,
+    ),
+    textAlign: widget.layout._textAlign(widget.block.style.textAlign),
+    textScaler: widget.layout.textScaler,
+    strutStyle: widget.simulationPage
+        ? widget.layout._simulationStrutStyle(widget.block, widget.settings)
+        : null,
+  );
+
+  /// Keeps the accent readable on a publisher background by falling back to the
+  /// block's own foreground when the two colors are too close.
+  Color _safeLinkColor() {
+    final accent = widget.themeColors.accent;
+    final contrast =
+        (accent.computeLuminance() - widget.background.computeLuminance()).abs();
+    return contrast < 0.12 ? widget.foreground : accent;
   }
 }
