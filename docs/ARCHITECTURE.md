@@ -30,7 +30,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `pubspec.yaml` | 项目清单。声明包名 `readvibe`、版本 `0.6.22+68`（`+` 后为 Android 内部构建号）、Dart 约束，以及全部运行依赖（file_picker、archive、shared_preferences、path_provider、path、fast_gbk、dart3_big5、dart_mobi、crypto、html、xml、wakelock_plus、package_info_plus）与开发依赖（flutter_test、flutter_lints）。 |
+| `pubspec.yaml` | 项目清单。声明包名 `readvibe`、版本 `0.6.23+69`（`+` 后为 Android 内部构建号）、Dart 约束，以及全部运行依赖（file_picker、archive、shared_preferences、path_provider、path、fast_gbk、dart3_big5、dart_mobi、crypto、html、xml、wakelock_plus、package_info_plus）与开发依赖（flutter_test、flutter_lints）。 |
 | `pubspec.lock` | 依赖解析结果快照，锁定每个依赖包的确切版本，保证构建可复现。 |
 | `analysis_options.yaml` | Dart 静态分析配置。启用 `flutter_lints` 推荐规则集，未额外增删规则。 |
 | `AGENTS.md` | AI 协作约定。描述项目入口目录、工作原则、版本递增规则与验证要求。 |
@@ -173,7 +173,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `storage_service.dart` | 持久化实现核心。书架元数据存于应用数据目录的 `library.json`（tmp/bak/rename 原子提交，静态按根目录缓存解码结果，首次读取时从旧的 `readvibe_books` 偏好键一次性迁移并删除该键）——Android 每次提交都会重写整份偏好 XML，把书架移出后，阅读中高频的进度写入不再连带重写整个书架；小状态仍入 SharedPreferences，章节正文按章节落为独立 JSON 文件（30 秒 IO 超时、SHA-256 校验、带大小上限的 LRU 章节缓存）；`_LazyChapter` 让大书只有被阅读到的章节才解码，载荷一次读为字节后直接校验摘要（不再解码再重编码），且每章每会话只校验一次，因为该路径运行在 UI isolate 上。另提供 `measureStorageUsage`/`clearTemporaryCaches`（目录遍历在 isolate 中完成）与 `resetLibraryCache`。写路径用全局队列串行化书架级操作与逐书章节写入，删除书时联动清理字体、PDF 源与渲染缓存，并复用 `ReaderPreferencesStore` 与 `ManagedBookResources`。实现上同时满足书架、阅读、PDF 三个仓库接口，并 `export` 出 `StorageCleanupResult`。 |
+| `storage_service.dart` | 持久化实现核心。书架元数据存于应用数据目录的 `library.json`（tmp/bak/rename 原子提交，静态按根目录缓存解码结果，首次读取时从旧的 `readvibe_books` 偏好键一次性迁移并删除该键）——Android 每次提交都会重写整份偏好 XML，把书架移出后，阅读中高频的进度写入不再连带重写整个书架；小状态仍入 SharedPreferences，章节正文按章节落为独立 JSON 文件（30 秒 IO 超时、SHA-256 校验、带大小上限的 LRU 章节缓存）；每批章节的编码、摘要与落盘都在 worker isolate 内同步完成，正文只跨 isolate 一次，章节文件不再逐个 flush——暂存目录经 rename 才成为该书，清单里的长度与摘要负责识别写到一半的载荷，连载长篇导入因此不再按章节数量支付平台往返；`_LazyChapter` 让大书只有被阅读到的章节才解码，载荷一次读为字节后直接校验摘要（不再解码再重编码），且每章每会话只校验一次，因为该路径运行在 UI isolate 上。另提供 `measureStorageUsage`/`clearTemporaryCaches`（目录遍历在 isolate 中完成）与 `resetLibraryCache`。写路径用全局队列串行化书架级操作与逐书章节写入，删除书时联动清理字体、PDF 源与渲染缓存，并复用 `ReaderPreferencesStore` 与 `ManagedBookResources`。实现上同时满足书架、阅读、PDF 三个仓库接口，并 `export` 出 `StorageCleanupResult`。 |
 | `reader_preferences_store.dart` | SharedPreferences 中的阅读态存取。管理文字进度、文字书书签与笔记、PDF 进度（含旧记录一次性迁移）、PDF 书签、笔记、显示主题、目录折叠组与阅读设置；静态写版本队列保证旧写不会覆盖新写，已删书的读取一律短路返回空。 |
 | `managed_book_resources.dart` | 导入二进制资源的生命周期。提供字体保存（.ttf/.otf、64MB 上限、文件名消毒）、PDF 副本保存（1GB 上限、原子 tmp 重命名）与删除；删除 PDF 源前先经网关清渲染缓存，路径白名单限定在应用私有目录内，防止误删兄弟资源。 |
 | `book_id.dart` | 导入书籍的身份。`nextBookId` 在时钟重复或回拨时仍产出唯一 id（进程内单调序号加随机后缀），因为 id 同时用作章节目录、PDF 副本、内嵌字体族和阅读状态的键；`uniqueLibraryTitle` 为重复导入的同名书编号，不超过重命名上限且不切开代理对。 |
@@ -293,6 +293,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `search_match_sheet_test.dart` | PDF 搜索结果仅携带页码目标即可跳页。 |
 | `search_query_change_test.dart` | 搜索面板替换在途关键词时不展示过期命中。 |
 | `storage_service_test.dart` | tmp 中断写入恢复； 新书写清单+独立章节文件； 正文惰性直到访问。 |
+| `large_book_storage_test.dart` | 千章书往返一致且清单每条都带长度与摘要； 书架浅检查有界仍能发现缺失的末尾载荷； 深度清扫仍逐章检查； 重写后不留上一版多余载荷。 |
 | `update_service_test.dart` | 版本三轮段比较：补丁/次级更新判新、同版本不更新。 |
 | `word_count_service_test.dart` | 单次章扫描同时供逐章与全书计数。 |
 | `reader_bookmark_test.dart` | 书签存取顺序、损坏记录丢弃、超上限保留最新、已删书不读写、清理书籍状态一并清除、摘录截断不留孤立代理对。 |

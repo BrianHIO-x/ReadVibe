@@ -1355,34 +1355,28 @@ class StorageService
     final temporaryChapters = Directory(p.join(temporary.path, 'chapters'));
     await temporaryChapters.create(recursive: true);
 
+    // A serialized novel routinely holds thousands of chapters, so each step
+    // here is paid once per chapter and any per-file platform round trip
+    // dominates the import. The worker therefore encodes, hashes and stores a
+    // whole batch itself: the text crosses the isolate boundary once instead
+    // of coming back only to be written out again, and the UI isolate never
+    // waits on an individual chapter file.
     final manifestEntries = <Map<String, dynamic>>[];
-    const batchSize = 16;
+    final chaptersPath = temporaryChapters.path;
+    const batchSize = 64;
     for (var start = 0; start < chapters.length; start += batchSize) {
       final end = math.min(chapters.length, start + batchSize);
       final batch = chapters.sublist(start, end);
-      final payloads = await Isolate.run(() => _chapterBatchToJson(batch));
-      for (var offset = 0; offset < payloads.length; offset++) {
-        final index = start + offset;
-        final fileName = '${index.toString().padLeft(6, '0')}.json';
-        final chapterFile = File(p.join(temporaryChapters.path, fileName));
-        await chapterFile.writeAsString(
-          payloads[offset],
-          encoding: utf8,
-          flush: true,
-        );
-        final chapter = chapters[index];
-        manifestEntries.add(<String, dynamic>{
-          'file': fileName,
-          'bytes': utf8.encode(payloads[offset]).length,
-          'sha256': sha256.convert(utf8.encode(payloads[offset])).toString(),
-          'title': chapter.title,
-          if (chapter.volumeTitle != null) 'volumeTitle': chapter.volumeTitle,
-          'hasRichContent': chapter.hasRichEpubContent,
-          'richBlockCount': chapter.epubBlockCount,
-          'hasSemanticHeading': chapter.hasSemanticHeading,
-        });
-      }
+      manifestEntries.addAll(
+        await Isolate.run(() => _storeChapterBatch(chaptersPath, batch, start)),
+      );
     }
+    // The manifest is the only file flushed to the platform. Chapter payloads
+    // become the book solely through the rename below, and the manifest
+    // records each payload's length and digest, so an interrupted write is
+    // reported as a damaged chapter instead of being served as truncated text.
+    // Flushing every chapter individually bought no additional guarantee and
+    // cost an fsync per chapter.
     await File(p.join(temporary.path, 'manifest.json')).writeAsString(
       jsonEncode(<String, dynamic>{
         'version': 2,
@@ -1666,7 +1660,14 @@ Future<bool> _chapterDirectoryLooksPlausible(
         chapterCount.toInt() != entries.length) {
       return false;
     }
-    for (var index = 0; index < entries.length; index++) {
+    // The shallow form of this check runs for every book each time the shelf
+    // loads, so statting every chapter made shelf startup scale with the total
+    // chapter count of the library rather than with the number of books. It
+    // looks for a payload that never finished being written, and the staged
+    // directory is filled in order, so a bounded sample across the manifest
+    // finds that. Reading a chapter still verifies its own length and digest,
+    // and the deep sweep continues to inspect every entry.
+    for (final index in _shallowChapterProbes(entries.length, verifyContents)) {
       final rawEntry = entries[index];
       if (rawEntry is! Map) return false;
       final entry = Map<String, dynamic>.from(rawEntry);
@@ -1704,6 +1705,25 @@ Future<bool> _chapterDirectoryLooksPlausible(
 
 bool _isStoredChapterFileName(String value) =>
     RegExp(r'^\d{6,}(?:-[A-Za-z0-9_-]+)?\.json$').hasMatch(value);
+
+/// Manifest positions a payload check inspects.
+///
+/// A verifying pass covers the whole book. A shallow pass keeps both ends,
+/// because an interrupted write leaves the tail missing, and spreads the rest
+/// evenly so a gap in the middle is still likely to be caught.
+List<int> _shallowChapterProbes(int count, bool verifyContents) {
+  const probeLimit = 24;
+  if (verifyContents || count <= probeLimit) {
+    return List<int>.generate(count, (index) => index, growable: false);
+  }
+  final step = count / (probeLimit - 1);
+  final probes = <int>{0, count - 1};
+  for (var position = 1; position < probeLimit - 1; position++) {
+    probes.add((position * step).floor().clamp(0, count - 1));
+  }
+  final ordered = probes.toList(growable: false)..sort();
+  return ordered;
+}
 
 /// Selects a readable manifest without modifying an in-progress writer's files.
 /// A committed backup is preferred over staged content when the live file is
@@ -1743,9 +1763,37 @@ List<Chapter> _materializeChapters(List<Chapter> chapters) =>
       );
     }, growable: false);
 
-List<String> _chapterBatchToJson(List<Chapter> chapters) => chapters
-    .map((chapter) => jsonEncode(encodeChapterPayload(chapter)))
-    .toList(growable: false);
+/// Encodes, stores and describes one batch of staged chapters.
+///
+/// Runs in a worker isolate, where synchronous file IO is the cheap option: a
+/// chapter payload is a small file, and awaiting each one separately cost more
+/// than writing it. The returned manifest entries are what the caller commits.
+/// Reading a lazily loaded chapter's body happens here as well, so a large
+/// book never pulls its own payload back through the UI isolate.
+List<Map<String, dynamic>> _storeChapterBatch(
+  String chaptersPath,
+  List<Chapter> chapters,
+  int firstIndex,
+) {
+  final entries = <Map<String, dynamic>>[];
+  for (var offset = 0; offset < chapters.length; offset++) {
+    final chapter = chapters[offset];
+    final fileName = '${(firstIndex + offset).toString().padLeft(6, '0')}.json';
+    final payload = utf8.encode(jsonEncode(encodeChapterPayload(chapter)));
+    File(p.join(chaptersPath, fileName)).writeAsBytesSync(payload);
+    entries.add(<String, dynamic>{
+      'file': fileName,
+      'bytes': payload.length,
+      'sha256': sha256.convert(payload).toString(),
+      'title': chapter.title,
+      if (chapter.volumeTitle != null) 'volumeTitle': chapter.volumeTitle,
+      'hasRichContent': chapter.hasRichEpubContent,
+      'richBlockCount': chapter.epubBlockCount,
+      'hasSemanticHeading': chapter.hasSemanticHeading,
+    });
+  }
+  return entries;
+}
 
 ReadingProgress _remapProgressAfterReparse(
   ReadingProgress progress,
