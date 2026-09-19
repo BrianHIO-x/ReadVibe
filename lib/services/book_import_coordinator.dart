@@ -1,5 +1,6 @@
 import '../models/book.dart';
 import '../repositories/reader_repositories.dart';
+import 'book_import_format.dart';
 import 'epub_parser.dart';
 import 'mobi_parser.dart';
 import 'pdf_import_service.dart';
@@ -38,28 +39,27 @@ class BookImportCoordinator {
     Book? importedBook;
     var metadataSaved = false;
     try {
-      final lowerName = fileName.toLowerCase();
-      if (lowerName.endsWith('.epub')) {
-        importedBook = await parseEpub(path, fileName, _storage);
-      } else if (lowerName.endsWith('.pdf')) {
+      final format = detectBookImportFormat(path: path, fileName: fileName);
+      final labeledName = labeledImportFileName(path, fileName, format);
+      if (format == BookFormat.epub) {
+        importedBook = await parseEpub(path, labeledName, _storage);
+      } else if (format == BookFormat.pdf) {
         importedBook = await _importPdf(
           path: path,
-          fileName: fileName,
+          fileName: labeledName,
           requestPassword: requestPdfPassword,
         );
         if (importedBook == null) return null;
-      } else if (lowerName.endsWith('.txt')) {
-        importedBook = await parseTxt(path, fileName);
-      } else if (lowerName.endsWith('.mobi') ||
-          lowerName.endsWith('.azw') ||
-          lowerName.endsWith('.azw3')) {
-        importedBook = await parseKindleBook(path, fileName);
-      } else if (lowerName.endsWith('.docx') || lowerName.endsWith('.doc')) {
-        importedBook = await parseWordDocument(path, fileName, _storage);
+      } else if (format == BookFormat.txt) {
+        importedBook = await parseTxt(path, labeledName);
+      } else if (format == BookFormat.mobi ||
+          format == BookFormat.azw ||
+          format == BookFormat.azw3) {
+        importedBook = await parseKindleBook(path, labeledName);
+      } else if (format == BookFormat.docx || format == BookFormat.doc) {
+        importedBook = await parseWordDocument(path, labeledName, _storage);
       } else {
-        throw const FormatException(
-          '不支持的文件格式，请选择 TXT、EPUB、MOBI、AZW、AZW3、PDF、DOCX 或 DOC',
-        );
+        throw const FormatException(unsupportedBookFormatMessage);
       }
 
       final committed = await _storage.saveBook(importedBook);

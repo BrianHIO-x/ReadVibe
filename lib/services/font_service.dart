@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
+import 'book_import_format.dart';
 
 class FontService {
   FontService(this._storage);
@@ -45,19 +46,37 @@ class FontService {
   Future<ReaderSettings?> pickAndInstallFont(
     ReaderSettings currentSettings,
   ) async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: const ['ttf', 'otf'],
-    );
+    late final FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+        type: Platform.isAndroid ? FileType.any : FileType.custom,
+        allowedExtensions: Platform.isAndroid ? null : const ['ttf', 'otf'],
+      );
+    } on PlatformException catch (error) {
+      throw FormatException(describeFilePickerFailure(error));
+    }
     if (result == null || result.files.isEmpty) return null;
 
     final picked = result.files.single;
-    final sourcePath = picked.path;
+    final sourcePath = await materializePickedLocalFile(
+      path: picked.path,
+      bytes: picked.bytes,
+      fileName: picked.name,
+    );
     if (sourcePath == null) {
       throw const FormatException('无法读取所选字体文件');
     }
+    final extension = fileExtension(sourcePath).isNotEmpty
+        ? fileExtension(sourcePath)
+        : fileExtension(picked.name);
+    if (extension != 'ttf' && extension != 'otf') {
+      throw const FormatException('仅支持 .ttf 或 .otf 字体文件');
+    }
+    final displayName = fileExtension(picked.name) == extension
+        ? picked.name
+        : '${picked.name}.$extension';
 
-    final saved = await _storage.saveImportedFont(sourcePath, picked.name);
+    final saved = await _storage.saveImportedFont(sourcePath, displayName);
     final family = 'ReadVibeImported_${DateTime.now().microsecondsSinceEpoch}';
     try {
       await loadFont(family: family, path: saved.path);
@@ -73,7 +92,7 @@ class FontService {
     return currentSettings.copyWith(
       fontFamily: family,
       importedFontFamily: family,
-      importedFontName: picked.name,
+      importedFontName: displayName,
       importedFontPath: saved.path,
     );
   }

@@ -12,6 +12,7 @@ import '../theme/app_motion.dart';
 import '../services/font_service.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/book_import_coordinator.dart';
+import '../services/book_import_format.dart';
 import '../services/book_export_service.dart';
 import '../models/library_filter.dart';
 import '../widgets/library_search_controls.dart';
@@ -401,23 +402,43 @@ class _LibraryScreenState extends State<LibraryScreen>
   Future<void> _importBook() async {
     if (_importing || _exporting) return;
     setState(() => _importing = true);
+    String? materializedPath;
     try {
       final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: BookImportCoordinator.supportedExtensions,
+        type: Platform.isAndroid ? FileType.any : FileType.custom,
+        allowedExtensions: Platform.isAndroid
+            ? null
+            : BookImportCoordinator.supportedExtensions,
       );
 
       if (result == null || result.files.isEmpty || !mounted) return;
 
       final file = result.files.first;
-      final path = file.path;
+      final path = await materializePickedLocalFile(
+        path: file.path,
+        bytes: file.bytes,
+        fileName: file.name,
+      );
       if (path == null) {
         _showError('无法获取文件路径');
         return;
       }
+      if (file.path == null) materializedPath = path;
 
       await _importBookPath(path, file.name);
+    } on PlatformException catch (error) {
+      if (mounted) _showError(describeFilePickerFailure(error));
+    } on FileSystemException {
+      if (mounted) _showError('无法读取所选文件');
     } finally {
+      if (materializedPath != null) {
+        try {
+          final temporary = File(materializedPath);
+          if (await temporary.exists()) await temporary.delete();
+        } on FileSystemException {
+          // Picker cache cleanup is best-effort.
+        }
+      }
       if (mounted) setState(() => _importing = false);
     }
   }

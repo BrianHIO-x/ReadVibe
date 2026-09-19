@@ -28,3 +28,9 @@
 # PDFBox deliberately ignores JPX images when it is absent.
 -dontwarn com.gemalto.jp2.JP2Decoder
 -dontwarn com.gemalto.jp2.JP2Encoder
+
+# Keep the on-device PDF and legacy-DOC parsers that release R8 would
+# otherwise shrink until import looks like a damaged file.
+-keep class com.tom_roush.** { *; }
+-keep class org.apache.poi.hwpf.** { *; }
+

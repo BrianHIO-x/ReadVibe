@@ -3,6 +3,7 @@ package com.readvibe.app
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -183,12 +184,31 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun enqueueIncomingFile(intent: Intent?, notifyFlutter: Boolean) {
-        if (intent?.action != Intent.ACTION_VIEW || intent.data == null) return
+        val uri = incomingFileUri(intent) ?: return
+        val queued = Intent(intent).apply { data = uri }
         synchronized(incomingFileIntents) {
             while (incomingFileIntents.size >= 8) incomingFileIntents.removeFirst()
-            incomingFileIntents.addLast(Intent(intent))
+            incomingFileIntents.addLast(queued)
         }
         if (notifyFlutter) incomingFileChannel?.invokeMethod("available", null)
+    }
+
+    private fun incomingFileUri(intent: Intent?): Uri? {
+        if (intent == null) return null
+        return when (intent.action) {
+            Intent.ACTION_VIEW -> intent.data
+            Intent.ACTION_SEND -> extraStreamUri(intent) ?: intent.data
+            else -> null
+        }
+    }
+
+    private fun extraStreamUri(intent: Intent): Uri? {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+        }
     }
 
     private fun copyIncomingFile(intent: Intent): Map<String, String> {
@@ -220,9 +240,12 @@ class MainActivity : FlutterActivity() {
             "text/plain" -> ".txt"
             "application/epub+zip" -> ".epub"
             "application/x-mobipocket-ebook" -> ".mobi"
-            "application/vnd.amazon.ebook" -> ".azw3"
+            "application/vnd.amazon.ebook" -> ".azw"
+            "application/vnd.amazon.mobi8-ebook" -> ".azw3"
+            "application/x-mobi8-ebook" -> ".azw3"
             "application/pdf" -> ".pdf"
             "application/msword" -> ".doc"
+            "application/vnd.ms-word" -> ".doc"
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> ".docx"
             else -> ""
         }
@@ -274,15 +297,63 @@ class MainActivity : FlutterActivity() {
                 }
             }
             require(copiedBytes > 0) { "外部文件为空" }
+            var finalTarget = target
+            var finalName = safeName
+            if (File(safeName).extension.isEmpty()) {
+                val sniffed = sniffImportedExtension(target)
+                if (sniffed.isNotEmpty()) {
+                    val renamed = File(target.parentFile, "${target.name}.$sniffed")
+                    if (target.renameTo(renamed)) {
+                        finalTarget = renamed
+                        finalName = "$safeName.$sniffed"
+                    }
+                }
+            }
             return mapOf(
-                "path" to target.absolutePath,
-                "name" to safeName,
+                "path" to finalTarget.absolutePath,
+                "name" to finalName,
                 "mimeType" to mimeType,
             )
         } catch (error: Throwable) {
             target.delete()
             throw error
         }
+    }
+
+    private fun sniffImportedExtension(file: File): String {
+        FileInputStream(file).use { input ->
+            val header = ByteArray(68)
+            val count = input.read(header)
+            if (count >= 4 &&
+                header[0] == 0x25.toByte() &&
+                header[1] == 0x50.toByte() &&
+                header[2] == 0x44.toByte() &&
+                header[3] == 0x46.toByte()
+            ) {
+                return "pdf"
+            }
+            if (count >= 4 &&
+                header[0] == 0xD0.toByte() &&
+                header[1] == 0xCF.toByte() &&
+                header[2] == 0x11.toByte() &&
+                header[3] == 0xE0.toByte()
+            ) {
+                return "doc"
+            }
+            if (count >= 68 &&
+                header[60] == 0x42.toByte() &&
+                header[61] == 0x4F.toByte() &&
+                header[62] == 0x4F.toByte() &&
+                header[63] == 0x4B.toByte() &&
+                header[64] == 0x4D.toByte() &&
+                header[65] == 0x4F.toByte() &&
+                header[66] == 0x42.toByte() &&
+                header[67] == 0x49.toByte()
+            ) {
+                return "mobi"
+            }
+        }
+        return ""
     }
 
     private fun querySystemTextTargets(action: String?): List<Map<String, Any>> {
