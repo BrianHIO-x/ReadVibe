@@ -29,7 +29,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `pubspec.yaml` | 项目清单。声明包名 `readvibe`、版本 `0.6.24+70`（`+` 后为 Android 内部构建号）、Dart 约束，以及全部运行依赖（file_picker、archive、shared_preferences、path_provider、path、fast_gbk、dart3_big5、dart_mobi、crypto、html、xml、wakelock_plus、package_info_plus）与开发依赖（flutter_lints）。 |
+| `pubspec.yaml` | 项目清单。声明包名 `readvibe`、版本 `0.6.26+72`（`+` 后为 Android 内部构建号）、Dart 约束，以及全部运行依赖（file_picker、archive、shared_preferences、path_provider、path、fast_gbk、dart3_big5、dart_mobi、crypto、html、xml、wakelock_plus、package_info_plus）与开发依赖（flutter_lints）。 |
 | `pubspec.lock` | 依赖解析结果快照，锁定每个依赖包的确切版本，保证构建可复现。 |
 | `analysis_options.yaml` | Dart 静态分析配置。启用 `flutter_lints` 推荐规则集，未额外增删规则。 |
 | `AGENTS.md` | AI 协作约定。描述项目入口目录、工作原则、版本递增规则，以及用 VS Code 的 Android 模拟器确认改动。 |
@@ -80,7 +80,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `MainActivity.kt` | 原生宿主 Activity。注册三个 MethodChannel：`incoming_file`（串行消费外部 ACTION_VIEW 文件并复制到应用缓存）、`system_text_actions`（查询并启动系统翻译/搜索目标）、`document_parser`（经单线程执行器调用 Apache POI 提取旧版 DOC 正文），更新安装通道交给 `AppUpdateHandler`。内含 AI 与浏览器包名白名单，换用显式组件启动防劫持。 |
+| `MainActivity.kt` | 原生宿主 Activity。注册四个 MethodChannel：`incoming_file`（串行消费外部 ACTION_VIEW 文件并复制到应用缓存）、`book_picker`（`ACTION_OPEN_DOCUMENT` 选书，复制走独立线程池，回到前台时若请求还悬着即按取消作答，复制连续 45 秒没有新字节即以中文错误结束）、`system_text_actions`（查询并启动系统翻译/搜索目标）、`document_parser`（经单线程执行器调用 Apache POI 提取旧版 DOC 正文），更新安装通道交给 `AppUpdateHandler`。内含 AI 与浏览器包名白名单，换用显式组件启动防劫持。 |
+| `BookImportProbe.kt` | 选书前的轻量嗅探。只读 SAF 文件的头部与 ZIP 中央目录判别类型，安装包在复制前即被拒，复制时按字节回报进度供上层判断是否仍在推进。 |
 | `AppUpdateHandler.kt` | 更新安装通道 `app_update`。校验放在后台执行器：安装包须位于缓存内的更新目录、包名与版本名同更新信息一致、构建号高于已安装版本、签名与当前应用相同；通过后按需引导用户开启未知来源安装权限，或经 FileProvider 授权打开系统安装程序，校验期间重复调用返回 `UPDATE_BUSY`。 |
 | `BookExportHandler.kt` | 导出通道 `book_export`。把应用私有暂存文件写入用户经系统界面选定的位置；来源限定在导出缓存目录内，单次导出串行，重复调用返回 `EXPORT_BUSY`。 |
 | `BackgroundTaskRunner.kt` | 通用后台任务边界。把工作提交到 worker 执行器、把成功与异常回传到 UI 执行器，支持 isActive 开关在销毁后抑制排队任务与迟到回调。 |
@@ -173,13 +174,14 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `storage_service.dart` | 持久化实现核心。书架元数据存于应用数据目录的 `library.json`（tmp/bak/rename 原子提交，静态按根目录缓存解码结果，首次读取时从旧的 `readvibe_books` 偏好键一次性迁移并删除该键）——Android 每次提交都会重写整份偏好 XML，把书架移出后，阅读中高频的进度写入不再连带重写整个书架；小状态仍入 SharedPreferences，章节正文按章节落为独立 JSON 文件（30 秒 IO 超时、SHA-256 校验、带大小上限的 LRU 章节缓存）；每批章节的编码、摘要与落盘都在 worker isolate 内同步完成，正文只跨 isolate 一次，章节文件不再逐个 flush——暂存目录经 rename 才成为该书，清单里的长度与摘要负责识别写到一半的载荷，连载长篇导入因此不再按章节数量支付平台往返；`_LazyChapter` 让大书只有被阅读到的章节才解码，载荷一次读为字节后直接校验摘要（不再解码再重编码），且每章每会话只校验一次，因为该路径运行在 UI isolate 上。另提供 `measureStorageUsage`/`clearTemporaryCaches`（目录遍历在 isolate 中完成）与 `resetLibraryCache`。写路径用全局队列串行化书架级操作与逐书章节写入，删除书时联动清理字体、PDF 源与渲染缓存，并复用 `ReaderPreferencesStore` 与 `ManagedBookResources`。实现上同时满足书架、阅读、PDF 三个仓库接口，并 `export` 出 `StorageCleanupResult`。 |
+| `storage_service.dart` | 持久化实现核心。书架元数据存于应用数据目录的 `library.json`（tmp/bak/rename 原子提交，静态按根目录缓存解码结果，首次读取时从旧的 `readvibe_books` 偏好键一次性迁移并删除该键）——Android 每次提交都会重写整份偏好 XML，把书架移出后，阅读中高频的进度写入不再连带重写整个书架；小状态仍入 SharedPreferences，章节正文按章节落为独立 JSON 文件（30 秒 IO 超时、SHA-256 校验、带大小上限的 LRU 章节缓存）；每批章节的编码、摘要与落盘都在 worker isolate 内同步完成，正文只跨 isolate 一次，章节文件不再逐个 flush——批次大小按章节总数推导，worker 次数与进度回报次数都不随书变长而增长，`saveBook` 沿 `onChapterProgress` 逐批回报已落盘章节数；暂存目录经 rename 才成为该书，清单里的长度与摘要负责识别写到一半的载荷，连载长篇导入因此不再按章节数量支付平台往返；`_LazyChapter` 让大书只有被阅读到的章节才解码，载荷一次读为字节后直接校验摘要（不再解码再重编码），且每章每会话只校验一次，因为该路径运行在 UI isolate 上。另提供 `measureStorageUsage`/`clearTemporaryCaches`（目录遍历在 isolate 中完成）与 `resetLibraryCache`。写路径用全局队列串行化书架级操作与逐书章节写入，删除书时联动清理字体、PDF 源与渲染缓存，并复用 `ReaderPreferencesStore` 与 `ManagedBookResources`。实现上同时满足书架、阅读、PDF 三个仓库接口，并 `export` 出 `StorageCleanupResult`。 |
 | `reader_preferences_store.dart` | SharedPreferences 中的阅读态存取。管理文字进度、文字书书签与笔记、PDF 进度（含旧记录一次性迁移）、PDF 书签、笔记、显示主题、目录折叠组与阅读设置；静态写版本队列保证旧写不会覆盖新写，已删书的读取一律短路返回空。 |
 | `managed_book_resources.dart` | 导入二进制资源的生命周期。提供字体保存（.ttf/.otf、64MB 上限、文件名消毒）、PDF 副本保存（1GB 上限、原子 tmp 重命名）与删除；删除 PDF 源前先经网关清渲染缓存，路径白名单限定在应用私有目录内，防止误删兄弟资源。 |
 | `book_id.dart` | 导入书籍的身份。`nextBookId` 在时钟重复或回拨时仍产出唯一 id（进程内单调序号加随机后缀），因为 id 同时用作章节目录、PDF 副本、内嵌字体族和阅读状态的键；`uniqueLibraryTitle` 为重复导入的同名书编号，不超过重命名上限且不切开代理对。 |
 | `chinese_text.dart` | 中文检索折叠。`foldFullWidth` 把 U+FF01–FF5E 的全角 ASCII 映射回半角，折叠后符文数不变以保证高亮回映；`。`、`、`等中文标点保留原样。书架搜索与书内搜索共用。 |
 | `resource_presence.dart` | 导入资源存在性缓存。封面、EPUB 背景图等文件只在导入时写入、随书删除，其存在性是路径的属性；`importedResourceExists` 每个路径只做一次 stat，避免 `build` 内逐帧同步 IO。 |
-| `book_import_coordinator.dart` | 格式中立导入事务。按扩展名分发到各解析器，统一走 `BookImportStore` 落盘；失败时回滚已导入的私有资源并保留原始解析错误；PDF 密码由书架层弹窗索取后重试。 |
+| `book_import_coordinator.dart` | 格式中立导入事务。按扩展名分发到各解析器，统一走 `BookImportStore` 落盘；识别、解析、保存三步经 `BookImportProgress` 上报，保存阶段带已落盘章节数，书架据此显示进度并判断导入是否还在推进；失败时回滚已导入的私有资源并保留原始解析错误；PDF 密码由书架层弹窗索取后重试。 |
+| `android_book_picker.dart` | Android 选书通道的 Dart 封装。调用 `book_picker` 取回缓存副本的路径与文件名，取消返回 null，平台错误转成中文 `FormatException`。 |
 | `book_export_service.dart` | 书籍导出。PDF 直接复制当前副本；文字书在 isolate 中按章节顺序写出 UTF-8 TXT（卷标题、富文本标题块、图片替代文本俱到，分块写入避免代理对截断），先落私有暂存再经 `BookExportDestination`（Android SAF 通道）由用户选择保存位置，完成后清理暂存。文件名净化并截 60 字符。 |
 | `book_search_service.dart` | 书内全文搜索。一次会话把书籍与其规范化段落一次性送入 isolate worker，后续关键词只传查询串；规范化折叠大小写与空白，命中区间映射回原始 UTF-16 偏移保证高亮精确；LPM 缓存约 12MB 章节段落，单次扫描上限 500 条。`removeObsoleteData` 清理旧版搜索遗留目录。 |
 | `epub_parser.dart` | EPUB 解析器（9 类）。在 isolate 中解包，保留安全的出版商 CSS 子集（字号/行高/对齐/缩进/粗斜/颜色/背景图），映射为 `EpubContentBlock` 富文本块；解析期收集锚点 id 与 `<a href>`，spine 读完后统一把站内引用解析为（章节、块）坐标，站外协议保持纯文本；处理清单资源、图片落地、本地 @font-face 字体提取；资源限额（输入 256MB、条目 2 万、展开 512MB、单图 64MB）可注入；失败时清理已落地资源目录。 |
@@ -233,7 +235,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `library_screen.dart` | 书架页。书架网格与拖动排序区在底部留出系统手势条高度，内容滚动到手势条之下。经三个可注入依赖（仓库、更新器、导出器）初始化门面服务；负责书籍装载与串号保护、文件选择导入、外部来书导入、开书（含封面截屏快照与书香开页路由）、长按动作面板（改名/排序/删除/导出）、按宽度推导列数的响应式书架与同规格拖动排序网格（`_shelfMetrics` 为两者唯一来源）、搜索与筛选、维护调度、更新检查（3 秒后台静默检查、 dismissed 三天静默）与全局设置侧栏、四种空态（无书/无结果/导入中/打开中）与入场动画。 |
+| `library_screen.dart` | 书架页。书架网格与拖动排序区在底部留出系统手势条高度，内容滚动到手势条之下。经三个可注入依赖（仓库、更新器、导出器）初始化门面服务；负责书籍装载与串号保护、文件选择导入、外部来书导入、开书（含封面截屏快照与书香开页路由）、长按动作面板（改名/排序/删除/导出）、按宽度推导列数的响应式书架与同规格拖动排序网格（`_shelfMetrics` 为两者唯一来源）、搜索与筛选、维护调度、更新检查（3 秒后台静默检查、 dismissed 三天静默）与全局设置侧栏、四种空态（无书/无结果/导入中/打开中）与入场动画。导入按钮显示当前步骤与保存百分比；导入被“静默看门狗”看管，连续 100 秒没有任何进度回报即以中文提示结束等待并恢复书架，长书只要还在推进就不会被打断。 |
 | `reader_screen.dart` | 文字阅读页（核心）。三种阅读模式：分章（横滑切章、可编辑）、滚动（跨章连续）、仿真（整页分页、仿真/平滑翻页）。职责涵盖：设置装载与防抖持久化（键盘瞬时内嵌不触发重排）、阅读进度记录与恢复（文字锚点与偏移多通道）、书签与笔记（顶栏开关、列表面板、选区写笔记、锚点跳转，开关状态缓存以免每帧重排版）、EPUB 站内链接与脚注就地展开、目录/搜索/书签/编辑/设置五面板联动、翻页拖拽手势与速度惯性、相邻页与相邻章预热渲染、顶部进度条与沉浸式系统栏、字体加载回退、Epub 排版委托与保活保留选区等。状态编排分散于五个 controller，滚动控制器重建与预加载缓存集中在本 State。 |
 | `pdf_reader_screen.dart` | PDF 阅读页。加载进度、书签、笔记、显示主题与内嵌批注五源合并；`PageView` 翻页配双指缩放（缩放页横向拖动锁定为平移）、进度滑杆、跳页对话框、书签笔记列表、大纲（缩进层级）、双通道搜索（文件文本或逐页 OCR，OCR 结果做空白规范化）、本页文字面板（优先文字层、缺失时回退 OCR）、显示主题切换与源文件丢失兜底删除；渲染任务按 `页:宽度` 去重并限在途 18 个。 |
 
@@ -276,8 +278,9 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 ## 命名与协作速查
 
-- **协议通道**：`com.readvibe.app/` 前缀下共六个 MethodChannel——`incoming_file`、`system_text_actions`、`document_parser`、`app_update`、`book_export`、`pdf_renderer`，Dart 端各在对应 service 中静态封装（`book_export` 的封装在 `BookExportService` 内）。
+- **协议通道**：`com.readvibe.app/` 前缀下共七个 MethodChannel——`incoming_file`、`book_picker`、`system_text_actions`、`document_parser`、`app_update`、`book_export`、`pdf_renderer`，Dart 端各在对应 service 中静态封装（`book_export` 的封装在 `BookExportService` 内）。
 - **文档级不变量**：正文与解析全部本地执行；章节编辑只改私有副本；导出位置由用户经系统界面选择；签名材料不入库。
+- **worker 闭包**：交给 `Isolate.run` 的闭包一律写在顶层或类级函数里，参数只收可传递的值。写在方法体内会与该方法的捕获上下文共用，凡是那里放着的回调、Future、Timer 或界面状态都会被一起发送，AOT 正式包因此抛 `Illegal argument in isolate message`，而 JIT 下的测试不会复现。
 - **版本约定**：公开版本按 `0.6.X` 递增，Android 内部构建号同步递增；release 构建缺 `key.properties` 即失败。
+- **发布包**：正式包必须放到 `D:\0_Study\0_Stdio\0_Codex_work\1.ReadVibe_Project\dist`，按 `ReadVibe-Android-v<公开版本>-arm64-v8a.apk` 命名。
 - **改动确认**：用 VS Code 连接的 Android 模拟器直接运行即可。
-

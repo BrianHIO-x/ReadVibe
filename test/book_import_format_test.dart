@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:isolate';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/services.dart';
@@ -49,7 +51,11 @@ void main() {
       'META-INF/container.xml': utf8.encode('<container/>'),
     });
     expect(
-      detectBookImportFormat(path: '/cache/msf_2', fileName: '电子书', bytes: epub),
+      detectBookImportFormat(
+        path: '/cache/msf_2',
+        fileName: '电子书',
+        bytes: epub,
+      ),
       BookFormat.epub,
     );
 
@@ -105,8 +111,65 @@ void main() {
         ),
       ),
     );
+    expect(
+      () => detectBookImportFormat(
+        path: '/download/bundle.apks',
+        fileName: 'bundle.xapk',
+      ),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          androidPackageImportMessage,
+        ),
+      ),
+    );
     expect(androidPackageImportMessage.contains('损坏'), isFalse);
   });
+
+  test(
+    'an APK with a large stored payload is rejected from the central directory',
+    () {
+      final apk = _zip({
+        'AndroidManifest.xml': utf8.encode('<manifest/>'),
+        'classes.dex': Uint8List.fromList(<int>[0x64, 0x65, 0x78, 0x0a]),
+        'resources.arsc': utf8.encode('arsc'),
+        'lib/arm64-v8a/libnative.so': Uint8List(2 * 1024 * 1024),
+      });
+      expect(
+        () => detectBookImportFormat(
+          path: '/cache/msf_large_apk',
+          fileName: '安装包',
+          bytes: apk,
+        ),
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.message,
+            'message',
+            androidPackageImportMessage,
+          ),
+        ),
+      );
+
+      final file = File(
+        '${Directory.systemTemp.path}/readvibe_apk_sniff_${DateTime.now().microsecondsSinceEpoch}',
+      );
+      addTearDown(() {
+        if (file.existsSync()) file.deleteSync();
+      });
+      file.writeAsBytesSync(apk, flush: true);
+      expect(
+        () => detectBookImportFormat(path: file.path, fileName: '安装包'),
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.message,
+            'message',
+            androidPackageImportMessage,
+          ),
+        ),
+      );
+    },
+  );
 
   test('unsupported picker files stay rejected when MIME filtering is */*', () {
     expect(BookImportCoordinator.supportedExtensions.contains('mobi'), isTrue);
@@ -144,6 +207,29 @@ void main() {
         ),
       ),
       '文件选择器已打开，请完成当前选择',
+    );
+  });
+
+  test('APK rejection survives Isolate.run', () async {
+    final apk = _zip({
+      'AndroidManifest.xml': utf8.encode('<manifest/>'),
+      'classes.dex': Uint8List.fromList(<int>[0x64, 0x65, 0x78, 0x0a]),
+    });
+    await expectLater(
+      Isolate.run(
+        () => detectBookImportFormat(
+          path: '/cache/msf_apk',
+          fileName: '安装包',
+          bytes: apk,
+        ),
+      ),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          androidPackageImportMessage,
+        ),
+      ),
     );
   });
 }

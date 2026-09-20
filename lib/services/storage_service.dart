@@ -25,6 +25,12 @@ import 'txt_parser.dart';
 
 export '../repositories/reader_repositories.dart' show StorageCleanupResult;
 
+// Chapter payloads are written in batches. These bound how often the import
+// hands work to a worker isolate and how often it can report progress.
+const _chapterWriteBatches = 48;
+const _minChapterBatch = 32;
+const _maxChapterBatch = 512;
+
 const _kBooksKey = 'readvibe_books';
 const _kLibraryFileName = 'library.json';
 const _kChapterPrefix = 'readvibe_chapters_';
@@ -349,7 +355,10 @@ class StorageService
   }
 
   @override
-  Future<Book> saveBook(Book book) async {
+  Future<Book> saveBook(
+    Book book, {
+    ChapterWriteProgress? onChapterProgress,
+  }) async {
     if (book.isPdf &&
         (book.sourcePath == null ||
             book.pageCount == null ||
@@ -389,7 +398,12 @@ class StorageService
       // Save the large payload first. The shelf metadata is only committed
       // after the chapter file is safely in place.
       if (!book.isPdf) {
-        await _saveChapters(book.id, book.chapters, contentRevision: revision);
+        await _saveChapters(
+          book.id,
+          book.chapters,
+          contentRevision: revision,
+          onProgress: onChapterProgress,
+        );
       }
       if (existingIndex >= 0) {
         metadata[existingIndex] = committedBook.toJson();
@@ -739,10 +753,7 @@ class StorageService
     await _resources.deleteSource(book.sourcePath);
   }
 
-  /// Reclaims private payloads that are no longer referenced by shelf
-  /// metadata. A grace period protects imports that wrote their files but have
-  /// not committed metadata yet, as well as recoverable interrupted writes.
-  @override
+  /// Measures what ReadVibe occupies on this device.
   @override
   Future<StorageUsageReport> measureStorageUsage() async {
     final root = (await getAppDataDirectory()).absolute.path;
@@ -807,6 +818,9 @@ class StorageService
     ];
   }
 
+  /// Reclaims private payloads that are no longer referenced by shelf
+  /// metadata. A grace period protects imports that wrote their files but have
+  /// not committed metadata yet, as well as recoverable interrupted writes.
   @override
   Future<StorageCleanupResult> collectOrphanedData({
     Duration gracePeriod = const Duration(hours: 24),
@@ -1225,6 +1239,7 @@ class StorageService
     String bookId,
     List<Chapter> chapters, {
     int contentRevision = 0,
+    ChapterWriteProgress? onProgress,
   }) async {
     final directory = await _chapterDirectory(bookId);
     return _enqueueChapterWrite(directory.path, () async {
@@ -1232,6 +1247,7 @@ class StorageService
         directory,
         chapters,
         contentRevision: contentRevision,
+        onProgress: onProgress,
       );
       final legacyFile = await _chapterFile(bookId);
       for (final candidate in <File>[
@@ -1348,6 +1364,7 @@ class StorageService
     Directory directory,
     List<Chapter> chapters, {
     int contentRevision = 0,
+    ChapterWriteProgress? onProgress,
   }) async {
     final temporary = Directory('${directory.path}.tmp');
     final backup = Directory('${directory.path}.bak');
@@ -1363,13 +1380,15 @@ class StorageService
     // waits on an individual chapter file.
     final manifestEntries = <Map<String, dynamic>>[];
     final chaptersPath = temporaryChapters.path;
-    const batchSize = 64;
+    final batchSize = _chapterBatchSize(chapters.length);
+    onProgress?.call(0, chapters.length);
     for (var start = 0; start < chapters.length; start += batchSize) {
       final end = math.min(chapters.length, start + batchSize);
       final batch = chapters.sublist(start, end);
       manifestEntries.addAll(
-        await Isolate.run(() => _storeChapterBatch(chaptersPath, batch, start)),
+        await _storeChapterBatchInBackground(chaptersPath, batch, start),
       );
+      onProgress?.call(end, chapters.length);
     }
     // The manifest is the only file flushed to the platform. Chapter payloads
     // become the book solely through the rename below, and the manifest
@@ -1762,6 +1781,31 @@ List<Chapter> _materializeChapters(List<Chapter> chapters) =>
         epubBlocks: chapter.epubBlocks,
       );
     }, growable: false);
+
+/// Hands one batch of chapters to a worker isolate.
+///
+/// The closure is built here rather than inside the write loop so that it can
+/// see nothing but its own parameters. A closure written in the loop would
+/// share the enclosing method's capture context, which also holds the progress
+/// reporter, and a reporter that owns a timer or widget state is unsendable.
+Future<List<Map<String, dynamic>>> _storeChapterBatchInBackground(
+  String chaptersPath,
+  List<Chapter> batch,
+  int firstIndex,
+) => Isolate.run(() => _storeChapterBatch(chaptersPath, batch, firstIndex));
+
+/// Chapters handed to one worker run.
+///
+/// Every batch costs an isolate spawn and every batch boundary is a chance to
+/// report progress, so neither a short book nor a thousand-chapter serial
+/// should pick the same fixed number. Sizing by the book keeps the spawn count
+/// and the number of progress reports roughly constant instead of letting both
+/// grow with the chapter count.
+int _chapterBatchSize(int chapterCount) =>
+    (chapterCount / _chapterWriteBatches).ceil().clamp(
+      _minChapterBatch,
+      _maxChapterBatch,
+    );
 
 /// Encodes, stores and describes one batch of staged chapters.
 ///

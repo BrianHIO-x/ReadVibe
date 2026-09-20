@@ -38,7 +38,7 @@ class WordCountService {
     if (existing != null) return existing;
 
     late final Future<List<int>> operation;
-    operation = Isolate.run(() => _countBookChapterBodies(book))
+    operation = _countInBackground(book)
         .then((counts) {
           final immutableCounts = List<int>.unmodifiable(counts);
           if (immutableCounts.length <= 100000) {
@@ -66,6 +66,15 @@ class WordCountService {
   /// Counts a single edited chapter without rescanning the rest of the book.
   static Future<int> countContent(String content) =>
       Isolate.run(() => _countVisibleRunesIn(content));
+
+  /// Counts [book] in a worker isolate.
+  ///
+  /// Written at class scope so the closure sees only its own parameter. Built
+  /// inside [countChapters] it would share that method's capture context,
+  /// which also holds the in-flight future that the completion handler reads,
+  /// and a future cannot cross an isolate boundary.
+  static Future<List<int>> _countInBackground(Book book) =>
+      Isolate.run(() => _countBookChapterBodies(book));
 
   /// Derives the whole-book count from the one authoritative chapter scan.
   /// Values are saturated to the same range accepted by persisted metadata.

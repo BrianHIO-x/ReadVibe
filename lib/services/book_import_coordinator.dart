@@ -1,3 +1,5 @@
+import 'dart:isolate';
+
 import '../models/book.dart';
 import '../repositories/reader_repositories.dart';
 import 'book_import_format.dart';
@@ -9,6 +11,42 @@ import 'txt_parser.dart';
 import 'word_parser.dart';
 
 typedef PdfPasswordProvider = Future<String?> Function();
+
+typedef BookImportProgressReporter = void Function(BookImportProgress progress);
+
+/// Where an import currently is.
+///
+/// A serialized novel takes long enough that a single opaque label cannot tell
+/// the reader whether the app is working or wedged. Naming the step, and
+/// counting chapters while they are written, is what makes the difference
+/// visible.
+enum BookImportStage { inspecting, parsing, saving }
+
+class BookImportProgress {
+  const BookImportProgress(this.stage, {this.completed = 0, this.total = 0});
+
+  final BookImportStage stage;
+
+  /// Chapters already written, meaningful while [stage] is
+  /// [BookImportStage.saving].
+  final int completed;
+
+  /// Chapters the book holds, or zero before the count is known.
+  final int total;
+
+  /// How far the current step has come, or null when it cannot be measured.
+  double? get fraction {
+    if (total <= 0 || completed <= 0) return null;
+    return (completed / total).clamp(0.0, 1.0);
+  }
+
+  /// Short Chinese label for the shelf.
+  String get label => switch (stage) {
+    BookImportStage.inspecting => '识别文件',
+    BookImportStage.parsing => '解析正文',
+    BookImportStage.saving => '保存章节',
+  };
+}
 
 /// Format-independent import transaction used by both the file picker and
 /// Android ACTION_VIEW entry points.
@@ -35,12 +73,15 @@ class BookImportCoordinator {
     required String path,
     required String fileName,
     required PdfPasswordProvider requestPdfPassword,
+    BookImportProgressReporter? onProgress,
   }) async {
     Book? importedBook;
     var metadataSaved = false;
     try {
-      final format = detectBookImportFormat(path: path, fileName: fileName);
+      onProgress?.call(const BookImportProgress(BookImportStage.inspecting));
+      final format = await _detectInBackground(path, fileName);
       final labeledName = labeledImportFileName(path, fileName, format);
+      onProgress?.call(const BookImportProgress(BookImportStage.parsing));
       if (format == BookFormat.epub) {
         importedBook = await parseEpub(path, labeledName, _storage);
       } else if (format == BookFormat.pdf) {
@@ -62,7 +103,24 @@ class BookImportCoordinator {
         throw const FormatException(unsupportedBookFormatMessage);
       }
 
-      final committed = await _storage.saveBook(importedBook);
+      onProgress?.call(
+        BookImportProgress(
+          BookImportStage.saving,
+          total: importedBook.chapterCount,
+        ),
+      );
+      final committed = await _storage.saveBook(
+        importedBook,
+        onChapterProgress: onProgress == null
+            ? null
+            : (written, count) => onProgress(
+                BookImportProgress(
+                  BookImportStage.saving,
+                  completed: written,
+                  total: count,
+                ),
+              ),
+      );
       metadataSaved = true;
       return committed;
     } on Object {
@@ -96,3 +154,14 @@ class BookImportCoordinator {
     }
   }
 }
+
+/// Detects the format of [path] in a worker isolate.
+///
+/// The body runs at the top level on purpose. A closure written inside
+/// [BookImportCoordinator.importFile] would share that method's capture
+/// context, and anything else held there travels with it: the password
+/// callback and the progress reporter both belong to the shelf, and a live
+/// timer or widget state cannot cross an isolate boundary. Taking the two
+/// strings as parameters means nothing else can be reached from here.
+Future<BookFormat> _detectInBackground(String path, String fileName) =>
+    Isolate.run(() => detectBookImportFormat(path: path, fileName: fileName));

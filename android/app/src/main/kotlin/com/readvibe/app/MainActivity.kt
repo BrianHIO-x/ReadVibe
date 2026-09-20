@@ -1,5 +1,6 @@
 package com.readvibe.app
 
+import android.app.Activity
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -13,14 +14,32 @@ import org.apache.poi.hwpf.extractor.WordExtractor
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import android.os.Handler
+import android.os.Looper
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : FlutterActivity() {
     companion object {
         private const val TEXT_ACTION_CHANNEL = "com.readvibe.app/system_text_actions"
         private const val DOCUMENT_PARSER_CHANNEL = "com.readvibe.app/document_parser"
         private const val INCOMING_FILE_CHANNEL = "com.readvibe.app/incoming_file"
+        private const val BOOK_PICKER_CHANNEL = "com.readvibe.app/book_picker"
+        private const val PICK_BOOK_REQUEST = 0x5242
+
+        // A document provider may serve a file over the network, where a read
+        // can block with no bytes arriving. The copy is abandoned only after
+        // it stops making progress, so a slow but advancing transfer finishes.
+        // A result and the return to the foreground arrive together, and the
+        // order is not guaranteed. Waiting this long before treating a
+        // request as abandoned lets a result that lands second still win.
+        private const val ABANDONED_PICK_GRACE_MS = 1_500L
+        private const val COPY_STALL_MS = 45_000L
+        private const val COPY_STALL_CHECK_MS = 5_000L
+        private const val COPY_STALL_MESSAGE =
+            "读取所选文件长时间没有进展，请把文件保存到本机后重试"
         private const val ACTION_TRANSLATE = "android.intent.action.TRANSLATE"
         private val AI_PACKAGE_ALLOWLIST = setOf(
             "com.deepseek.chat",
@@ -42,8 +61,17 @@ class MainActivity : FlutterActivity() {
 
     private val documentExecutor = Executors.newSingleThreadExecutor()
     private val incomingFileExecutor = Executors.newSingleThreadExecutor()
+    // The picker copies on its own threads. A pool rather than a single thread
+    // because a read that blocks inside a document provider may ignore an
+    // interrupt, and one abandoned copy must not hold up every later
+    // selection. Sharing the incoming-file executor would have the same fault.
+    private val pickedBookExecutor = Executors.newCachedThreadPool()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val incomingFileIntents = ArrayDeque<Intent>()
     private var incomingFileChannel: MethodChannel? = null
+    private var pickBookResult: MethodChannel.Result? = null
+    private var pickerTookForeground = false
+
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -80,6 +108,35 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                 }
+            }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            BOOK_PICKER_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            if (call.method != "pick") {
+                result.notImplemented()
+                return@setMethodCallHandler
+            }
+            if (pickBookResult != null) {
+                result.error("already_active", "文件选择器已打开，请完成当前选择", null)
+                return@setMethodCallHandler
+            }
+            pickBookResult = result
+            pickerTookForeground = false
+            try {
+                @Suppress("DEPRECATION")
+                startActivityForResult(
+                    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "*/*"
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    },
+                    PICK_BOOK_REQUEST,
+                )
+            } catch (error: Exception) {
+                pickBookResult = null
+                result.error("invalid_format_type", "无法打开系统文件选择器", null)
             }
         }
         enqueueIncomingFile(intent, notifyFlutter = false)
@@ -177,6 +234,32 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onPause() {
+        if (pickBookResult != null) pickerTookForeground = true
+        super.onPause()
+    }
+
+    /**
+     * Answers a selection the system never delivered.
+     *
+     * A picker that closes normally clears the request through
+     * onActivityResult, which can land either side of this callback. Checking
+     * again after a short grace period therefore only ever finds a request the
+     * system abandoned, and answering it keeps the shelf from waiting on a
+     * result that is not coming, and keeps the next selection from being
+     * refused as one already in progress.
+     */
+    override fun onResume() {
+        super.onResume()
+        if (!pickerTookForeground) return
+        pickerTookForeground = false
+        mainHandler.postDelayed({
+            val abandoned = pickBookResult ?: return@postDelayed
+            pickBookResult = null
+            abandoned.success(null)
+        }, ABANDONED_PICK_GRACE_MS)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -236,6 +319,11 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+        val resolverType = if (uri.scheme == "content") {
+            contentResolver.getType(uri).orEmpty()
+        } else {
+            ""
+        }
         val inferredExtension = when (mimeType.lowercase()) {
             "text/plain" -> ".txt"
             "application/epub+zip" -> ".epub"
@@ -271,6 +359,17 @@ class MainActivity : FlutterActivity() {
         } else {
             "$safeBaseName.$safeExtension"
         }
+        BookImportProbe.rejectAndroidPackage(
+            context = this,
+            uri = uri,
+            extraNames = listOf(
+                fallbackName,
+                sanitizedName,
+                safeName,
+                uri.lastPathSegment.orEmpty(),
+            ),
+            extraMimes = listOf(mimeType, resolverType),
+        )
         val target = File(
             incomingDirectory,
             "${System.currentTimeMillis()}_${safeName.ifEmpty { "外部文件" }}",
@@ -318,6 +417,68 @@ class MainActivity : FlutterActivity() {
             target.delete()
             throw error
         }
+    }
+
+    private fun onBookPicked(uri: Uri?) {
+        val pending = pickBookResult ?: return
+        pickBookResult = null
+        if (uri == null) {
+            pending.success(null)
+            return
+        }
+        val answered = AtomicBoolean(false)
+        val lastProgress = AtomicLong(System.currentTimeMillis())
+        watchCopyProgress(answered, lastProgress, pending)
+        pickedBookExecutor.execute {
+            try {
+                val copied = BookImportProbe.copyPickedBook(this, uri) {
+                    lastProgress.set(System.currentTimeMillis())
+                }
+                if (answered.compareAndSet(false, true)) {
+                    runOnUiThread { pending.success(copied) }
+                }
+            } catch (error: Throwable) {
+                val message = error.message ?: "无法读取所选文件"
+                val code = when (message) {
+                    BookImportProbe.ANDROID_PACKAGE_MESSAGE -> "android_package"
+                    BookImportProbe.UNSUPPORTED_MESSAGE -> "unsupported"
+                    else -> "read_failed"
+                }
+                if (answered.compareAndSet(false, true)) {
+                    runOnUiThread { pending.error(code, message, null) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Fails a copy that has stopped moving.
+     *
+     * Reading from a document provider can block with no bytes arriving and no
+     * error, which would leave the shelf waiting on a selection forever. Only
+     * a stall ends the copy, so a large file arriving slowly still completes.
+     */
+    private fun watchCopyProgress(
+        answered: AtomicBoolean,
+        lastProgress: AtomicLong,
+        pending: MethodChannel.Result,
+    ) {
+        mainHandler.postDelayed(
+            object : Runnable {
+                override fun run() {
+                    if (answered.get()) return
+                    val quiet = System.currentTimeMillis() - lastProgress.get()
+                    if (quiet < COPY_STALL_MS) {
+                        mainHandler.postDelayed(this, COPY_STALL_CHECK_MS)
+                        return
+                    }
+                    if (answered.compareAndSet(false, true)) {
+                        pending.error("read_failed", COPY_STALL_MESSAGE, null)
+                    }
+                }
+            },
+            COPY_STALL_CHECK_MS,
+        )
     }
 
     private fun sniffImportedExtension(file: File): String {
@@ -468,10 +629,19 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == PICK_BOOK_REQUEST) {
+            pickerTookForeground = false
+            if (resultCode != Activity.RESULT_OK) {
+                pickBookResult?.success(null)
+                pickBookResult = null
+                return
+            }
+            onBookPicked(data?.data)
+            return
+        }
         if (bookExporter?.onActivityResult(requestCode, resultCode, data) == true) return
         super.onActivityResult(requestCode, resultCode, data)
     }
-
     override fun onDestroy() {
         updateHandler?.dispose()
         updateHandler = null
@@ -481,7 +651,11 @@ class MainActivity : FlutterActivity() {
         pdfHandler?.dispose()
         pdfHandler = null
         incomingFileExecutor.shutdownNow()
+        pickedBookExecutor.shutdownNow()
+        mainHandler.removeCallbacksAndMessages(null)
         incomingFileChannel = null
+        pickBookResult?.error("read_failed", "无法选择文件", null)
+        pickBookResult = null
         super.onDestroy()
     }
 }

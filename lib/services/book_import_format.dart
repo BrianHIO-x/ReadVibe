@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:archive/archive.dart';
 import 'package:flutter/services.dart';
 
 import '../models/book.dart';
@@ -13,6 +12,18 @@ const androidPackageImportMessage = '这是 Android 安装包，不是书籍';
 
 const _headerSampleBytes = 68;
 const _textSampleBytes = 8192;
+const _maxCentralDirectoryBytes = 2 * 1024 * 1024;
+const _maxZipEntries = 4096;
+const _eocdMinSize = 22;
+const _maxEocdComment = 65535;
+const _zip64LocatorSize = 20;
+const _zip64EocdMinSize = 56;
+const _centralHeaderSize = 46;
+const _eocdSignature = 0x06054b50;
+const _zip64LocatorSignature = 0x07064b50;
+const _zip64EocdSignature = 0x06064b50;
+const _centralDirectorySignature = 0x02014b50;
+final _dexEntryPattern = RegExp(r'^classes\d+\.dex$');
 
 /// Turns a failed system file picker into a short Chinese message.
 String describeFilePickerFailure(Object error) {
@@ -116,8 +127,9 @@ BookFormat _bookFormat(_DetectedImport detected) {
     _DetectedImport.docx => BookFormat.docx,
     _DetectedImport.doc => BookFormat.doc,
     _DetectedImport.pdf => BookFormat.pdf,
-    _DetectedImport.apk =>
-      throw const FormatException(androidPackageImportMessage),
+    _DetectedImport.apk => throw const FormatException(
+      androidPackageImportMessage,
+    ),
   };
 }
 
@@ -146,6 +158,9 @@ _DetectedImport? _namedFormat(String extension) {
     case 'mobi':
       return _DetectedImport.mobi;
     case 'apk':
+    case 'apks':
+    case 'xapk':
+    case 'apkm':
       return _DetectedImport.apk;
     default:
       return null;
@@ -223,32 +238,17 @@ bool _isMobiHeader(List<int> bytes) {
 }
 
 _DetectedImport? _formatFromZip(String path, List<int>? bytes) {
-  late final Archive archive;
-  InputFileStream? stream;
-  try {
-    if (bytes != null) {
-      archive = ZipDecoder().decodeBytes(bytes);
-    } else {
-      stream = InputFileStream(path);
-      archive = ZipDecoder().decodeStream(stream);
-    }
-  } on Object {
-    return null;
-  } finally {
-    stream?.closeSync();
-  }
+  final names = bytes != null
+      ? _zipNamesFromBytes(bytes)
+      : _zipNamesFromFile(path);
+  if (names == null || names.isEmpty) return null;
 
-  final names = <String>{
-    for (final file in archive.files) _zipName(file.name),
-  };
   final hasManifest = names.contains('androidmanifest.xml');
-  final hasDex = names.any(
-    (name) =>
-        name == 'classes.dex' || RegExp(r'^classes\d+\.dex$').hasMatch(name),
-  );
-  if (hasManifest && hasDex) return _DetectedImport.apk;
+  final hasDex = names.any(_isDexEntry);
+  final hasResources = names.contains('resources.arsc');
+  if (hasManifest && (hasDex || hasResources)) return _DetectedImport.apk;
 
-  if (names.contains('meta-inf/container.xml') || _isEpubMime(archive)) {
+  if (names.contains('meta-inf/container.xml') || names.contains('mimetype')) {
     return _DetectedImport.epub;
   }
   final hasContentTypes = names.contains('[content_types].xml');
@@ -261,17 +261,124 @@ _DetectedImport? _formatFromZip(String path, List<int>? bytes) {
   return null;
 }
 
-bool _isEpubMime(Archive archive) {
-  for (final file in archive.files) {
-    if (_zipName(file.name) != 'mimetype' || file.isDirectory) continue;
-    try {
-      final content = utf8.decode(file.content).trim();
-      return content == 'application/epub+zip';
-    } on Object {
-      return false;
+bool _isDexEntry(String name) =>
+    name == 'classes.dex' || _dexEntryPattern.hasMatch(name);
+
+Set<String>? _zipNamesFromBytes(List<int> bytes) {
+  if (bytes.length < _eocdMinSize) return null;
+  final view = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+  return _zipNamesFromView(_BytesZipView(view));
+}
+
+Set<String>? _zipNamesFromFile(String path) {
+  final file = File(path);
+  if (!file.existsSync()) return null;
+  final raf = file.openSync();
+  try {
+    return _zipNamesFromView(_FileZipView(raf, raf.lengthSync()));
+  } on Object {
+    return null;
+  } finally {
+    raf.closeSync();
+  }
+}
+
+Set<String>? _zipNamesFromView(_ZipView view) {
+  final directory = _readCentralDirectory(view);
+  if (directory == null || directory.isEmpty) return null;
+  return _namesFromCentralDirectory(directory);
+}
+
+Uint8List? _readCentralDirectory(_ZipView view) {
+  if (view.length < _eocdMinSize) return null;
+  final eocdOffset = _findEocd(view);
+  if (eocdOffset == null) return null;
+  final eocd = view.read(eocdOffset, _eocdMinSize);
+  if (eocd.length < _eocdMinSize) return null;
+
+  var entries = _readUint16(eocd, 10);
+  var cdSize = _readUint32(eocd, 12);
+  var cdOffset = _readUint32(eocd, 16);
+  if (entries == 0xffff || cdSize == 0xffffffff || cdOffset == 0xffffffff) {
+    final zip64 = _readZip64Directory(view, eocdOffset);
+    if (zip64 != null) {
+      entries = zip64.entries;
+      cdSize = zip64.size;
+      cdOffset = zip64.offset;
     }
   }
-  return false;
+  if (entries <= 0 || cdSize <= 0 || cdOffset < 0 || cdOffset >= view.length) {
+    return null;
+  }
+  final available = view.length - cdOffset;
+  if (available <= 0) return null;
+  final length = cdSize < available ? cdSize : available;
+  final bounded = length < _maxCentralDirectoryBytes
+      ? length
+      : _maxCentralDirectoryBytes;
+  final directory = view.read(cdOffset, bounded);
+  return directory.isEmpty ? null : directory;
+}
+
+int? _findEocd(_ZipView view) {
+  final length = view.length;
+  if (length < _eocdMinSize) return null;
+  final maxScan = _eocdMinSize + _maxEocdComment;
+  final tailStart = length > maxScan ? length - maxScan : 0;
+  final tail = view.read(tailStart, length - tailStart);
+  if (tail.length < _eocdMinSize) return null;
+  for (var abs = length - _eocdMinSize; abs >= tailStart; abs--) {
+    final index = abs - tailStart;
+    if (index + _eocdMinSize > tail.length) continue;
+    if (_readUint32(tail, index) != _eocdSignature) continue;
+    final commentLength = _readUint16(tail, index + 20);
+    if (abs + _eocdMinSize + commentLength == length) return abs;
+  }
+  return null;
+}
+
+_Zip64Directory? _readZip64Directory(_ZipView view, int eocdOffset) {
+  if (eocdOffset < _zip64LocatorSize) return null;
+  final locator = view.read(eocdOffset - _zip64LocatorSize, _zip64LocatorSize);
+  if (locator.length < _zip64LocatorSize) return null;
+  if (_readUint32(locator, 0) != _zip64LocatorSignature) return null;
+  final zip64Offset = _readUint64(locator, 8);
+  if (zip64Offset < 0 || zip64Offset >= view.length) return null;
+  final record = view.read(zip64Offset, _zip64EocdMinSize);
+  if (record.length < _zip64EocdMinSize) return null;
+  if (_readUint32(record, 0) != _zip64EocdSignature) return null;
+  final entries = _readUint64(record, 32);
+  final size = _readUint64(record, 40);
+  final offset = _readUint64(record, 48);
+  if (entries <= 0 || size <= 0 || offset < 0) return null;
+  return _Zip64Directory(entries: entries, size: size, offset: offset);
+}
+
+Set<String> _namesFromCentralDirectory(Uint8List directory) {
+  final names = <String>{};
+  var offset = 0;
+  while (offset + _centralHeaderSize <= directory.length &&
+      names.length < _maxZipEntries) {
+    if (_readUint32(directory, offset) != _centralDirectorySignature) break;
+    final nameLength = _readUint16(directory, offset + 28);
+    final extraLength = _readUint16(directory, offset + 30);
+    final commentLength = _readUint16(directory, offset + 32);
+    final nameStart = offset + _centralHeaderSize;
+    final nameEnd = nameStart + nameLength;
+    if (nameEnd > directory.length) break;
+    if (nameLength > 0) {
+      names.add(
+        _zipName(
+          utf8.decode(
+            directory.sublist(nameStart, nameEnd),
+            allowMalformed: true,
+          ),
+        ),
+      );
+    }
+    offset = nameEnd + extraLength + commentLength;
+  }
+  return names;
 }
 
 String _zipName(String name) {
@@ -282,6 +389,18 @@ String _zipName(String name) {
   if (value.startsWith('/')) value = value.substring(1);
   return value;
 }
+
+int _readUint16(List<int> bytes, int offset) =>
+    bytes[offset] | (bytes[offset + 1] << 8);
+
+int _readUint32(List<int> bytes, int offset) =>
+    bytes[offset] |
+    (bytes[offset + 1] << 8) |
+    (bytes[offset + 2] << 16) |
+    (bytes[offset + 3] << 24);
+
+int _readUint64(List<int> bytes, int offset) =>
+    _readUint32(bytes, offset) | (_readUint32(bytes, offset + 4) << 32);
 
 bool _looksLikePlainText(List<int> bytes) {
   if (bytes.isEmpty) return false;
@@ -318,9 +437,69 @@ bool _looksLikeLegacyChinese(List<int> bytes) {
       continue;
     }
     final isAsciiText =
-        value == 9 || value == 10 || value == 13 || (value >= 32 && value < 127);
+        value == 9 ||
+        value == 10 ||
+        value == 13 ||
+        (value >= 32 && value < 127);
     if (isAsciiText) continue;
     if (value < 32) return false;
   }
   return pairs >= 8;
+}
+
+class _Zip64Directory {
+  const _Zip64Directory({
+    required this.entries,
+    required this.size,
+    required this.offset,
+  });
+
+  final int entries;
+  final int size;
+  final int offset;
+}
+
+abstract class _ZipView {
+  int get length;
+  Uint8List read(int offset, int count);
+}
+
+class _BytesZipView implements _ZipView {
+  _BytesZipView(this._bytes);
+
+  final Uint8List _bytes;
+
+  @override
+  int get length => _bytes.length;
+
+  @override
+  Uint8List read(int offset, int count) {
+    if (offset < 0 || count <= 0 || offset >= _bytes.length) {
+      return Uint8List(0);
+    }
+    final end = offset + count;
+    return _bytes.sublist(offset, end > _bytes.length ? _bytes.length : end);
+  }
+}
+
+class _FileZipView implements _ZipView {
+  _FileZipView(this._raf, this.length);
+
+  final RandomAccessFile _raf;
+
+  @override
+  final int length;
+
+  @override
+  Uint8List read(int offset, int count) {
+    if (offset < 0 || count <= 0 || offset >= length) {
+      return Uint8List(0);
+    }
+    final end = offset + count;
+    final clamped = end > length ? length - offset : count;
+    _raf.setPositionSync(offset);
+    final buffer = Uint8List(clamped);
+    final read = _raf.readIntoSync(buffer);
+    return read == clamped ? buffer : buffer.sublist(0, read);
+  }
 }

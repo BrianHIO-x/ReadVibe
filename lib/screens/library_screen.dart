@@ -13,6 +13,7 @@ import '../services/font_service.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/book_import_coordinator.dart';
 import '../services/book_import_format.dart';
+import '../services/android_book_picker.dart';
 import '../services/book_export_service.dart';
 import '../models/library_filter.dart';
 import '../widgets/library_search_controls.dart';
@@ -54,6 +55,23 @@ class LibraryScreen extends StatefulWidget {
 
 enum _BookAction { rename, move, delete, exportFile }
 
+/// How long a reporting import may stay quiet before the shelf gives up.
+///
+/// Chapters are written in batches and every batch is reported, so a gap this
+/// long means nothing is coming back.
+const _importStallLimit = Duration(seconds: 100);
+
+/// How long a step that cannot report its own progress may take.
+///
+/// Reading a file and parsing it are each a single call that says nothing
+/// until it returns, and a book close to the accepted size limit legitimately
+/// spends minutes inside them on a slow device. This bound therefore only has
+/// to be short enough that a wedged import still releases the shelf.
+const _importSilentStepLimit = Duration(minutes: 12);
+
+/// How long a file handed over by another app waits for a busy shelf.
+const _incomingImportQueueLimit = Duration(minutes: 10);
+
 Offset _centerDragAnchorStrategy(
   Draggable<Object> draggable,
   BuildContext context,
@@ -77,6 +95,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   ReaderSettings _settings = const ReaderSettings();
   bool _loading = true;
   bool _importing = false;
+  BookImportProgress? _importProgress;
   bool _openingBook = false;
   bool _settingsOpen = false;
   int _loadSerial = 0;
@@ -401,31 +420,29 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   Future<void> _importBook() async {
     if (_importing || _exporting) return;
-    setState(() => _importing = true);
     String? materializedPath;
+    var startedImport = false;
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: Platform.isAndroid ? FileType.any : FileType.custom,
-        allowedExtensions: Platform.isAndroid
-            ? null
-            : BookImportCoordinator.supportedExtensions,
-      );
+      final picked = Platform.isAndroid
+          ? await AndroidBookPicker.pick()
+          : await _pickBookWithFilePicker();
+      if (picked == null || !mounted) return;
 
-      if (result == null || result.files.isEmpty || !mounted) return;
-
-      final file = result.files.first;
-      final path = await materializePickedLocalFile(
-        path: file.path,
-        bytes: file.bytes,
-        fileName: file.name,
-      );
-      if (path == null) {
-        _showError('无法获取文件路径');
-        return;
+      startedImport = true;
+      setState(() {
+        _importing = true;
+        _importProgress = null;
+      });
+      if (picked.deleteAfterImport) materializedPath = picked.path;
+      await _importBookPath(picked.path, picked.name);
+    } on FormatException catch (error) {
+      if (mounted) {
+        _showError(
+          error.message.trim().isNotEmpty
+              ? error.message
+              : '导入失败，请确认文件未损坏后重试',
+        );
       }
-      if (file.path == null) materializedPath = path;
-
-      await _importBookPath(path, file.name);
     } on PlatformException catch (error) {
       if (mounted) _showError(describeFilePickerFailure(error));
     } on FileSystemException {
@@ -439,16 +456,54 @@ class _LibraryScreenState extends State<LibraryScreen>
           // Picker cache cleanup is best-effort.
         }
       }
-      if (mounted) setState(() => _importing = false);
+      if (startedImport && mounted) {
+        setState(() {
+          _importing = false;
+          _importProgress = null;
+        });
+      }
     }
   }
 
+  Future<PickedImportFile?> _pickBookWithFilePicker() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: BookImportCoordinator.supportedExtensions,
+    );
+    if (result == null || result.files.isEmpty) return null;
+    final file = result.files.first;
+    final path = await materializePickedLocalFile(
+      path: file.path,
+      bytes: file.bytes,
+      fileName: file.name,
+    );
+    if (path == null) {
+      throw const FormatException('无法获取文件路径');
+    }
+    return PickedImportFile(
+      path: path,
+      name: file.name,
+      deleteAfterImport: file.path == null,
+    );
+  }
+
   Future<void> _importIncomingBook(IncomingBookFile file) async {
+    // A file handed over by another app waits for the shelf to be free. The
+    // wait is bounded so a shelf that never becomes free drops this copy with
+    // a message instead of spinning for the rest of the session.
+    final waitUntil = DateTime.now().add(_incomingImportQueueLimit);
     while (mounted && (_importing || _loading || _exporting)) {
+      if (DateTime.now().isAfter(waitUntil)) {
+        if (mounted) _showError('书架正忙，未能导入「${file.name}」，请稍后重试');
+        return;
+      }
       await Future<void>.delayed(const Duration(milliseconds: 160));
     }
     if (!mounted) return;
-    setState(() => _importing = true);
+    setState(() {
+      _importing = true;
+      _importProgress = null;
+    });
     try {
       await _importBookPath(file.path, file.name);
     } finally {
@@ -458,27 +513,120 @@ class _LibraryScreenState extends State<LibraryScreen>
       } on FileSystemException {
         // Native cache maintenance retries stale external-file copies later.
       }
-      if (mounted) setState(() => _importing = false);
+      if (mounted) {
+        setState(() {
+          _importing = false;
+          _importProgress = null;
+        });
+      }
     }
   }
 
   Future<void> _importBookPath(String path, String fileName) async {
     try {
-      final importedBook = await _bookImporter.importFile(
-        path: path,
-        fileName: fileName,
-        requestPdfPassword: () => _requestPdfPassword(fileName),
-      );
+      final importedBook = await _withoutStalling<Book?>((beat) async {
+        final book = await _bookImporter.importFile(
+          path: path,
+          fileName: fileName,
+          requestPdfPassword: () => _requestPdfPassword(fileName),
+          onProgress: (progress) {
+            beat(_stepLimit(progress.stage));
+            // An import the shelf has already given up on keeps running until
+            // it unwinds. Its late reports are no longer anyone's progress.
+            if (mounted && _importing) {
+              setState(() => _importProgress = progress);
+            }
+          },
+        );
+        beat(_importStallLimit);
+        if (book != null) await _loadData();
+        return book;
+      }, _importSilentStepLimit);
       if (importedBook == null) return;
-      await _loadData();
       _showMessage('「${importedBook.title}」已导入书架');
-    } catch (error) {
+    } catch (error, stack) {
+      // The reader gets a sentence they can act on. A failure that is not
+      // already phrased for them still has to be recoverable from a device
+      // log, which is the only evidence a release build leaves behind.
+      if (error is! FormatException) {
+        debugPrint('Book import failed for $fileName: $error');
+        debugPrintStack(stackTrace: stack);
+      }
       _showError(
         error is FormatException && error.message.trim().isNotEmpty
             ? error.message
-            : '导入失败，请确认文件未损坏后重试',
+            : '导入失败于「${_importProgress?.label ?? '读取文件'}」，'
+                  '请确认文件未损坏后重试',
       );
     }
+  }
+
+  /// Runs an import and stops waiting on it once it goes quiet.
+  ///
+  /// A long serial legitimately spends minutes writing chapters, so a limit on
+  /// total time would abandon healthy imports. Silence is the signal that
+  /// matters: every step reports as it advances, so a stretch with nothing
+  /// reported means no result is coming, and the shelf has to become usable
+  /// again instead of showing 导入中 for the rest of the session. The work
+  /// itself is left to unwind on its own; each import writes its own private
+  /// directory, so a late finisher cannot corrupt the retry.
+  Future<T> _withoutStalling<T>(
+    Future<T> Function(void Function(Duration within) beat) body,
+    Duration firstStep,
+  ) {
+    final result = Completer<T>();
+    Timer? watchdog;
+    void beat(Duration within) {
+      if (result.isCompleted) return;
+      watchdog?.cancel();
+      watchdog = Timer(within, () {
+        if (result.isCompleted) return;
+        // Naming the step turns a repeat report into something actionable.
+        final step = _importProgress?.label ?? '读取文件';
+        result.completeError(
+          FormatException('「$step」长时间没有响应，已停止等待。请重试，或换一个文件'),
+        );
+      });
+    }
+
+    beat(firstStep);
+    body(beat)
+        .then(
+          (value) {
+            if (!result.isCompleted) result.complete(value);
+          },
+          onError: (Object error, StackTrace stack) {
+            if (!result.isCompleted) result.completeError(error, stack);
+          },
+        )
+        .whenComplete(() => watchdog?.cancel());
+    return result.future;
+  }
+
+  /// How long the step that follows [stage] may stay quiet.
+  ///
+  /// Saving reports after every batch of chapters, so it is held to the short
+  /// limit. Everything else is one opaque call whose only report is that it
+  /// finished.
+  Duration _stepLimit(BookImportStage stage) => switch (stage) {
+    BookImportStage.saving => _importStallLimit,
+    BookImportStage.inspecting || BookImportStage.parsing =>
+      _importSilentStepLimit,
+  };
+
+  /// Label for the import control while an import is running.
+  ///
+  /// The toolbar button sits beside the search and filter controls and has to
+  /// stay narrow, so it carries only the share already saved. The empty-shelf
+  /// button is what a reader watches during their first import, and there is
+  /// room there to name the step as well.
+  String _importLabel({required bool compact}) {
+    final progress = _importProgress;
+    if (progress == null) return '导入中...';
+    final fraction = progress.fraction;
+    if (fraction == null) return compact ? '导入中...' : '${progress.label}...';
+    final percent = (fraction * 100).round();
+    return compact ? '导入 $percent%' : '${progress.label} $percent%';
   }
 
   Future<String?> _requestPdfPassword(String fileName) async {
@@ -1400,7 +1548,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                           _importing ? Icons.hourglass_empty : Icons.add,
                           size: 18,
                         ),
-                        label: Text(_importing ? '导入中...' : '导入'),
+                        label: Text(
+                          _importing ? _importLabel(compact: true) : '导入',
+                        ),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: colors.accent,
                           foregroundColor: Colors.white,
@@ -1524,7 +1674,9 @@ class _LibraryScreenState extends State<LibraryScreen>
               _importing ? Icons.hourglass_empty : Icons.add,
               size: 18,
             ),
-            label: Text(_importing ? '导入中...' : '导入书籍'),
+            label: Text(
+              _importing ? _importLabel(compact: false) : '导入书籍',
+            ),
             style: ElevatedButton.styleFrom(
               backgroundColor: colors.accent,
               foregroundColor: Colors.white,

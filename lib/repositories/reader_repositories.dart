@@ -64,12 +64,23 @@ abstract interface class ImportedPdfStore {
   Future<File> saveImportedPdf(String sourcePath, String bookId);
 }
 
+/// Reports how much of a book's payload has reached disk.
+///
+/// A serialized novel takes long enough to save that the shelf has to be able
+/// to tell the difference between slow and stuck, so the store announces its
+/// own progress rather than leaving the caller to guess.
+typedef ChapterWriteProgress =
+    void Function(int chaptersWritten, int chapterCount);
+
 /// Persistence required by the format-independent import coordinator.
 abstract interface class BookImportStore
     implements AppDataDirectoryProvider, ImportedPdfStore {
   /// Persists a newly imported book and returns the committed snapshot, whose
   /// title may be numbered when the shelf already holds a book by that name.
-  Future<Book> saveBook(Book book);
+  ///
+  /// [onChapterProgress] is called as chapter payloads are written, before the
+  /// shelf metadata is committed.
+  Future<Book> saveBook(Book book, {ChapterWriteProgress? onChapterProgress});
 
   Future<void> discardImportedBook(Book book);
 }
