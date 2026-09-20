@@ -7,8 +7,10 @@ import 'package:flutter/services.dart';
 
 import '../theme/app_spacing.dart';
 import '../models/book_content_revision.dart';
+import '../models/chapter_editor_text.dart';
 import '../theme/app_theme.dart';
 import 'app_dialog.dart';
+import 'chapter_editor_input_formatter.dart';
 
 typedef ChapterEditSaver = Future<void> Function(String title, String content);
 
@@ -109,6 +111,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
 
   late final TextEditingController _titleController;
   late final _FindHighlightController _contentController;
+  late final String _initialContent;
   final _findController = TextEditingController();
   final _replaceController = TextEditingController();
   final _findFocus = FocusNode();
@@ -215,15 +218,16 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
 
   bool get _dirty =>
       _titleController.text != widget.initialTitle ||
-      _contentController.text != widget.initialContent;
+      normalizeChapterEditorSpaces(_contentController.text) != _initialContent;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _titleController = TextEditingController(text: widget.initialTitle);
-    _contentController = _FindHighlightController(text: widget.initialContent);
-    _lastContent = widget.initialContent;
+    _initialContent = normalizeChapterEditorSpaces(widget.initialContent);
+    _contentController = _FindHighlightController(text: _initialContent);
+    _lastContent = _initialContent;
     _titleController.addListener(_handleTitleChanged);
     _contentController.addListener(_handleContentChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) => _applyInitialAnchor());
@@ -299,6 +303,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
   // ── Find and replace ──────────────────────────────────
 
   List<TextRange> _computeMatches(String query, String text) {
+    query = normalizeChapterEditorSpaces(query);
     if (query.isEmpty || text.isEmpty) return const <TextRange>[];
     var haystack = text;
     var needle = query;
@@ -410,7 +415,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
     final range = _matches[_matchIndex];
     final text = _contentController.text;
     if (range.end > text.length) return;
-    final replacement = _replaceController.text;
+    final replacement = normalizeChapterEditorSpaces(_replaceController.text);
     final target = _matchIndex;
     // Writing the value re-runs the content listener, which refreshes _matches
     // against the new text before the next statement reads it back.
@@ -420,9 +425,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
         offset: range.start + replacement.length,
       ),
     );
-    final index = _matches.isEmpty
-        ? -1
-        : math.min(target, _matches.length - 1);
+    final index = _matches.isEmpty ? -1 : math.min(target, _matches.length - 1);
     setState(() {
       _matchIndex = index;
       _notice = '已替换 1 处';
@@ -433,7 +436,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
   void _replaceAll() {
     if (_saving || _matches.isEmpty) return;
     final text = _contentController.text;
-    final replacement = _replaceController.text;
+    final replacement = normalizeChapterEditorSpaces(_replaceController.text);
     final capped = _matches.length >= _maxFindMatches;
     final buffer = StringBuffer();
     var cursor = 0;
@@ -536,7 +539,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
   Future<void> _save() async {
     if (_saving) return;
     final title = _titleController.text.trim();
-    final content = _contentController.text;
+    final content = normalizeChapterEditorSpaces(_contentController.text);
     if (title.isEmpty) {
       setState(() => _errorMessage = '章节标题不能为空');
       return;
@@ -692,6 +695,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
               Expanded(
                 child: TextField(
                   controller: _findController,
+                  inputFormatters: const [ChapterEditorInputFormatter()],
                   focusNode: _findFocus,
                   enabled: !_saving,
                   onChanged: (_) => _handleQueryChanged(),
@@ -742,6 +746,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
               Expanded(
                 child: TextField(
                   controller: _replaceController,
+                  inputFormatters: const [ChapterEditorInputFormatter()],
                   enabled: !_saving,
                   style: TextStyle(color: colors.text, fontSize: 14),
                   decoration: _panelFieldDecoration(
@@ -831,16 +836,19 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
                   child: TextField(
                     key: _contentFieldKey,
                     controller: _contentController,
+                    inputFormatters: const [ChapterEditorInputFormatter()],
                     scrollController: _contentScrollController,
                     enabled: !_saving,
                     expands: true,
                     minLines: null,
                     maxLines: null,
                     keyboardType: TextInputType.multiline,
+                    autocorrect: false,
                     textAlignVertical: TextAlignVertical.top,
                     style: TextStyle(
                       color: colors.text,
                       fontSize: 17,
+                      fontFamily: 'SourceHanSerifSC',
                       height: 1.65,
                     ),
                     decoration: InputDecoration(
@@ -870,7 +878,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
                   children: [
                     Expanded(
                       child: Text(
-                        _errorMessage ?? _notice ?? '修改不会回写原始书籍文件',
+                        _errorMessage ?? _notice ?? '空格键一次占一汉字宽，缩进两字按两次',
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(

@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../models/book.dart';
+import '../models/chapter_editor_text.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/word_count_service.dart';
 
@@ -35,9 +36,9 @@ class ChapterEditingController {
     }
 
     final sourceChapter = sourceBook.chapters[chapterIndex];
-    final normalizedContent = content
-        .replaceAll('\r\n', '\n')
-        .replaceAll('\r', '\n');
+    final normalizedContent = normalizeChapterEditorSpaces(
+      content.replaceAll('\r\n', '\n').replaceAll('\r', '\n'),
+    );
     final replacement = Chapter(
       index: sourceChapter.index,
       title: title.trim(),
