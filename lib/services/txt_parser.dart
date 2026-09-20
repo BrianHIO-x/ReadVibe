@@ -42,6 +42,16 @@ final _chapterPatterns = [
   ),
 ];
 
+/// Encodings a plain text file is read as once its bytes rule out UTF-8.
+enum _TxtEncoding { utf8, gbk, big5, utf16le, utf16be }
+
+// An encoding is recognizable from the opening pages, so only this many bytes
+// are decoded once per candidate before the winner reads the whole file.
+const _encodingProbeBytes = 192 * 1024;
+
+// Bytes handed to the Big5 codec at a time. See [_decodeBig5].
+const _big5PieceBytes = 2048;
+
 // Novel-sized TXT files are a few megabytes; anything near a gigabyte would
 // exhaust memory when decoded and split inside the worker isolate.
 const _maxTxtFileBytes = 256 * 1024 * 1024;
@@ -220,45 +230,86 @@ String decodeTxtBytes(List<int> bytes) {
   // decode, which is what an ASCII-only UTF-16 file does.
   if (utf8Text != null && !_containsNulByte(payload)) return utf8Text;
 
-  final candidates = <String>[
-    ?utf8Text,
-    ..._legacyChineseCandidates(payload),
-  ];
-  if (candidates.isEmpty) return utf8.decode(payload, allowMalformed: true);
-  var best = candidates.first;
-  var bestScore = _legacyChineseScore(best);
-  for (final candidate in candidates.skip(1)) {
-    final score = _legacyChineseScore(candidate);
-    if (score > bestScore) {
-      best = candidate;
+  // Which encoding a file uses is settled by its opening pages, so only those
+  // are offered to each codec. Decoding a whole novel once per candidate
+  // multiplied the cost of an import by the number of encodings considered,
+  // and a serialized novel is large enough for that to be the whole import.
+  final probe = payload.length <= _encodingProbeBytes
+      ? payload
+      : payload.sublist(0, _encodingProbeBytes);
+  final encodings = _legacyChineseEncodings(payload, hasUtf8: utf8Text != null);
+  if (encodings.isEmpty) return utf8.decode(payload, allowMalformed: true);
+  var best = encodings.first;
+  int? bestScore;
+  for (final encoding in encodings) {
+    final text = _decodeWith(encoding, probe);
+    if (text == null) continue;
+    final score = _legacyChineseScore(text);
+    if (bestScore == null || score > bestScore) {
+      best = encoding;
       bestScore = score;
     }
   }
-  return best;
+  return _decodeWith(best, payload) ??
+      utf8.decode(payload, allowMalformed: true);
 }
 
-/// Decodes [payload] with every legacy encoding worth considering.
+/// Encodings worth considering for [payload], in the order they are tried.
 ///
 /// A Chinese UTF-16 file without a BOM has no NUL bytes to give it away, so it
-/// cannot be told apart from GBK by inspection. Both readings are produced and
+/// cannot be told apart from GBK by inspection. Both readings are offered and
 /// the scorer picks whichever one actually looks like Chinese prose.
-List<String> _legacyChineseCandidates(List<int> payload) {
-  final candidates = <String>[];
-  void attempt(String Function() decode) {
-    try {
-      candidates.add(decode());
-    } on Object {
-      // A codec that rejects these bytes simply is not the right one.
-    }
-  }
+List<_TxtEncoding> _legacyChineseEncodings(
+  List<int> payload, {
+  required bool hasUtf8,
+}) => <_TxtEncoding>[
+  if (hasUtf8) _TxtEncoding.utf8,
+  _TxtEncoding.gbk,
+  _TxtEncoding.big5,
+  if (payload.length >= 4 && payload.length.isEven) ...<_TxtEncoding>[
+    _TxtEncoding.utf16le,
+    _TxtEncoding.utf16be,
+  ],
+];
 
-  attempt(() => const GbkCodec(allowMalformed: true).decode(payload));
-  attempt(() => Big5.decode(payload));
-  if (payload.length >= 4 && payload.length.isEven) {
-    attempt(() => _decodeUtf16(payload, Endian.little));
-    attempt(() => _decodeUtf16(payload, Endian.big));
+/// Reads [bytes] as [encoding], or null when that codec rejects them.
+String? _decodeWith(_TxtEncoding encoding, List<int> bytes) {
+  try {
+    return switch (encoding) {
+      _TxtEncoding.utf8 => utf8.decode(bytes, allowMalformed: true),
+      _TxtEncoding.gbk => const GbkCodec(allowMalformed: true).decode(bytes),
+      _TxtEncoding.big5 => _decodeBig5(bytes),
+      _TxtEncoding.utf16le => _decodeUtf16(bytes, Endian.little),
+      _TxtEncoding.utf16be => _decodeUtf16(bytes, Endian.big),
+    };
+  } on Object {
+    // A codec that rejects these bytes simply is not the right one.
+    return null;
   }
-  return candidates;
+}
+
+/// Reads Big5 text in bounded pieces.
+///
+/// The codec appends to a string one character at a time, so its cost grows
+/// with the square of the input and a novel-sized file never finishes. Handing
+/// it small pieces keeps that quadratic term negligible and makes the whole
+/// read grow with the file. A piece never ends between a lead byte and the
+/// byte that belongs to it, so where the pieces fall cannot change the text.
+String _decodeBig5(List<int> bytes) {
+  if (bytes.length <= _big5PieceBytes) return Big5.decode(bytes);
+  final text = StringBuffer();
+  var start = 0;
+  while (start < bytes.length) {
+    var end = start;
+    while (end < bytes.length && end - start < _big5PieceBytes) {
+      final lead = bytes[end];
+      final paired = lead >= 0x81 && lead < 0xff && end + 1 < bytes.length;
+      end += paired ? 2 : 1;
+    }
+    text.write(Big5.decode(bytes.sublist(start, end)));
+    start = end;
+  }
+  return text.toString();
 }
 
 /// Byte order of a UTF-16 file that carries no byte order mark, or null when
