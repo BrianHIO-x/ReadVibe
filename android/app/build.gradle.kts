@@ -92,7 +92,6 @@ android {
 }
 
 dependencies {
-    testImplementation("junit:junit:4.13.2")
     implementation("org.apache.poi:poi-scratchpad:5.5.1")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     // Bundled on-device model: scanned PDF OCR never uploads page images.
