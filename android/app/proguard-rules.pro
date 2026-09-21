@@ -34,3 +34,15 @@
 -keep class com.tom_roush.** { *; }
 -keep class org.apache.poi.hwpf.** { *; }
 
+# SIKE loads tables relative to these class objects via getResourceAsStream.
+# Preserve the class objects as well as their names; name-only rules still
+# allow class-literal rewriting when a parameter class gets optimized away.
+-keep class org.bouncycastle.pqc.crypto.sike.P434
+-keep class org.bouncycastle.pqc.crypto.sike.P503
+-keep class org.bouncycastle.pqc.crypto.sike.P610
+-keep class org.bouncycastle.pqc.crypto.sike.P751
+
+# Excluding lowmc.properties is safe only while its readers stay unreachable.
+-checkdiscard class org.bouncycastle.pqc.crypto.picnic.LowmcConstants
+-checkdiscard class org.bouncycastle.pqc.crypto.picnic.PicnicEngine
+

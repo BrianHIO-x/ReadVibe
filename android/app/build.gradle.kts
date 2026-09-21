@@ -32,10 +32,10 @@ android {
     packaging {
         resources.excludes += setOf(
             "META-INF/DEPENDENCIES",
-            // R8 removes these unused post-quantum engines, but not their data tables.
-            // PDF AES/RSA security and all PDFBox fonts/CMaps remain packaged.
+            // Picnic's resource-reading engine is discarded (checked by R8 and
+            // the release guard). SIKE parameter initialization still reads its
+            // tables, so those resources must remain packaged.
             "org/bouncycastle/pqc/crypto/picnic/*.properties",
-            "org/bouncycastle/pqc/crypto/sike/*.properties",
         )
     }
 
