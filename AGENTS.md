@@ -24,7 +24,7 @@ ReadVibe 是 Flutter 编写的 Android 本地阅读器。本文件适用于整�
 
 ## 配置与发布
 
-每次 Bug 修复或功能更新，公开版本按 `0.6.X` 递增，`pubspec.yaml` 中 `+` 之后的 Android 内部构建号同步递增；两者都只在该文件里维护，构建命令不再用参数覆盖。
+当前版本系列为 `0.7.X`。每次 Bug 修复或功能更新递增补丁版本，`pubspec.yaml` 中 `+` 之后的 Android 内部构建号同步递增；两者都只在该文件里维护，构建命令不再用参数覆盖。大版本以用户指定为准。
 
 版本及 Dart 约束见 [pubspec.yaml](pubspec.yaml)，Android 构建及签名要求见 [应用构建配置](android/app/build.gradle.kts)。
 

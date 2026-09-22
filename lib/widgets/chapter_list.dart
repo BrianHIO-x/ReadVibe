@@ -7,6 +7,7 @@ import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_sheet.dart';
 import '../services/word_count_service.dart';
+import '../services/chinese_text.dart';
 
 typedef TocGroupExpansionChanged = void Function(String groupId, bool expanded);
 
@@ -47,25 +48,81 @@ class ChapterListSheet extends StatefulWidget {
 class _ChapterListSheetState extends State<ChapterListSheet> {
   late Set<String> _collapsedGroupIds;
   bool _initialScrollScheduled = false;
+  late _TocDirectory _directory;
+  final _searchController = TextEditingController();
+  String _query = '';
+  List<int> _searchResults = const [];
 
   @override
   void initState() {
     super.initState();
     _collapsedGroupIds = Set<String>.from(widget.collapsedGroupIds);
+    _directory = _TocDirectory.fromChapters(widget.chapters);
   }
 
   @override
   void didUpdateWidget(covariant ChapterListSheet oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.chapters, widget.chapters)) {
+      _directory = _TocDirectory.fromChapters(widget.chapters);
+      _updateSearch(_searchController.text);
+    }
     if (!setEquals(oldWidget.collapsedGroupIds, widget.collapsedGroupIds)) {
       _collapsedGroupIds = Set<String>.from(widget.collapsedGroupIds);
     }
   }
 
   @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _updateSearch(String value) {
+    final query = foldFullWidth(value).trim().toLowerCase();
+    final ordinal = int.tryParse(query);
+    setState(() {
+      _query = query;
+      _searchResults = query.isEmpty
+          ? const []
+          : [
+              for (var i = 0; i < widget.chapters.length; i++)
+                if (ordinal == i + 1 ||
+                    foldFullWidth(
+                      widget.chapters[i].title,
+                    ).toLowerCase().contains(query) ||
+                    foldFullWidth(
+                      widget.chapters[i].volumeTitle ?? '',
+                    ).toLowerCase().contains(query))
+                  i,
+            ];
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.scrollController.hasClients) {
+        widget.scrollController.jumpTo(0);
+      }
+    });
+  }
+
+  void _revealCurrentChapter() {
+    _searchController.clear();
+    for (final entry in _directory.entries.whereType<_TocVolumeEntry>()) {
+      if (entry.chapterIndexes.contains(widget.currentChapter) &&
+          _collapsedGroupIds.remove(entry.id)) {
+        widget.onGroupExpansionChanged(entry.id, true);
+      }
+    }
+    setState(() {
+      _query = '';
+      _searchResults = const [];
+      _initialScrollScheduled = false;
+    });
+    FocusScope.of(context).unfocus();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final directory = _TocDirectory.fromChapters(widget.chapters);
-    _scheduleInitialScroll(directory);
+    if (_query.isEmpty) _scheduleInitialScroll(_directory);
 
     return AppSheetSurface(
       colors: widget.colors,
@@ -113,6 +170,14 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
                     ),
                   ),
                   IconButton(
+                    tooltip: '回到当前章',
+                    onPressed: _revealCurrentChapter,
+                    icon: Icon(
+                      Icons.my_location_rounded,
+                      color: widget.colors.accent,
+                    ),
+                  ),
+                  IconButton(
                     onPressed: () => Navigator.of(context).pop(),
                     tooltip: '关闭',
                     icon: Icon(Icons.close, color: widget.colors.secondary),
@@ -120,12 +185,57 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
                 ],
               ),
             ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, AppSpacing.md),
+              child: TextField(
+                controller: _searchController,
+                onChanged: _updateSearch,
+                textInputAction: TextInputAction.search,
+                onSubmitted: (_) => FocusScope.of(context).unfocus(),
+                decoration: InputDecoration(
+                  hintText: '搜索章节名、卷名或序号',
+                  prefixIcon: const Icon(Icons.search_rounded),
+                  suffixIcon: _query.isEmpty
+                      ? null
+                      : IconButton(
+                          tooltip: '清除目录搜索',
+                          onPressed: () {
+                            _searchController.clear();
+                            _updateSearch('');
+                          },
+                          icon: const Icon(Icons.close_rounded),
+                        ),
+                ),
+              ),
+            ),
+            if (_query.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                child: Text(
+                  _searchResults.isEmpty
+                      ? '没有匹配的章节'
+                      : '找到 ${_searchResults.length} 章',
+                  style: TextStyle(
+                    color: widget.colors.secondary,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
             Divider(height: 1, color: widget.colors.border),
             Expanded(
               child: CustomScrollView(
                 controller: widget.scrollController,
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
                 slivers: [
-                  ..._buildDirectorySlivers(directory),
+                  if (_query.isEmpty)
+                    ..._buildDirectorySlivers(_directory)
+                  else
+                    SliverList.builder(
+                      itemCount: _searchResults.length,
+                      itemBuilder: (_, index) =>
+                          _buildChapterRow(_searchResults[index]),
+                    ),
                   SliverToBoxAdapter(
                     child: SizedBox(
                       height: MediaQuery.paddingOf(context).bottom,
@@ -141,19 +251,34 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
   }
 
   List<Widget> _buildDirectorySlivers(_TocDirectory directory) {
-    return directory.entries
-        .map((entry) {
-          return switch (entry) {
-            _TocDirectEntry(:final chapterIndex) => SliverToBoxAdapter(
-              child: _buildChapterRow(
-                chapterIndex,
-                isTopLevel: directory.hasVolumes,
-              ),
-            ),
-            _TocVolumeEntry() => _buildVolumeSection(entry),
-          };
-        })
-        .toList(growable: false);
+    final slivers = <Widget>[];
+    var direct = <int>[];
+    void flush() {
+      if (direct.isEmpty) return;
+      final indexes = direct;
+      slivers.add(
+        SliverList.builder(
+          itemCount: indexes.length,
+          itemBuilder: (_, index) => _buildChapterRow(
+            indexes[index],
+            isTopLevel: directory.hasVolumes,
+          ),
+        ),
+      );
+      direct = <int>[];
+    }
+
+    for (final entry in directory.entries) {
+      switch (entry) {
+        case _TocDirectEntry(:final chapterIndex):
+          direct.add(chapterIndex);
+        case _TocVolumeEntry():
+          flush();
+          slivers.add(_buildVolumeSection(entry));
+      }
+    }
+    flush();
+    return slivers;
   }
 
   Widget _buildVolumeSection(_TocVolumeEntry entry) {

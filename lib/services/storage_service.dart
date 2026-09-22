@@ -91,10 +91,7 @@ class _LazyChapterStore {
       }
       _verified.add(index);
     }
-    final chapter = decodeChapterPayload(
-      jsonDecode(utf8.decode(bytes)),
-      index,
-    );
+    final chapter = decodeChapterPayload(jsonDecode(utf8.decode(bytes)), index);
     _cache[index] = chapter;
     while (_cache.length > 8) {
       _cache.remove(_cache.keys.first);
@@ -371,6 +368,7 @@ class StorageService
 
     late Book committed;
     await _enqueueLibraryMutation(() async {
+      onChapterProgress?.call(0, book.chapterCount);
       final metadata = await _readBookMetadata();
       final existingIndex = metadata.indexWhere(
         (item) => item['id'] == book.id,
@@ -1024,7 +1022,9 @@ class StorageService
     for (final candidate in <File>[live, backup]) {
       if (!await candidate.exists()) continue;
       try {
-        final decoded = jsonDecode(await candidate.readAsString(encoding: utf8));
+        final decoded = jsonDecode(
+          await candidate.readAsString(encoding: utf8),
+        );
         if (decoded is List) return decoded;
         return null;
       } on Object {
@@ -1564,7 +1564,6 @@ class StorageService
       }
     });
   }
-
 }
 
 bool _matchesBookRevision(Map<String, dynamic> metadata, Book sourceBook) {
@@ -1622,8 +1621,7 @@ Future<bool> _chapterPayloadLooksPlausible(
     final last = await input.readByte();
     if (first != 0x5b || last != 0x5d) return false;
     if (verifyContents) {
-      final raw = await file.readAsString(encoding: utf8);
-      await Isolate.run(() => _chaptersFromJson(raw));
+      await _verifyLegacyPayloadInBackground(file.path);
     }
     return true;
   } on Object {
@@ -1644,6 +1642,21 @@ List<Chapter> _chaptersFromJson(String raw) {
 }
 
 Future<bool> _chapterDirectoryLooksPlausible(
+  Directory directory, {
+  bool verifyContents = false,
+}) => verifyContents
+    ? _verifyChapterDirectoryInBackground(directory.path)
+    : _inspectChapterDirectory(directory);
+
+Future<bool> _verifyChapterDirectoryInBackground(String path) => Isolate.run(
+  () => _inspectChapterDirectory(Directory(path), verifyContents: true),
+);
+
+Future<void> _verifyLegacyPayloadInBackground(String path) => Isolate.run(() {
+  _chaptersFromJson(File(path).readAsStringSync(encoding: utf8));
+});
+
+Future<bool> _inspectChapterDirectory(
   Directory directory, {
   bool verifyContents = false,
 }) async {
@@ -1669,7 +1682,9 @@ Future<bool> _chapterDirectoryLooksPlausible(
       await input.close();
     }
     final rawManifest = await manifest.readAsString(encoding: utf8);
-    final parsed = _chapterManifestFromJson(rawManifest);
+    final parsed = verifyContents
+        ? _chapterManifestFromJson(rawManifest)
+        : await _decodeChapterManifestInBackground(rawManifest);
     final entries = parsed['chapters'];
     final chapterCount = parsed['chapterCount'];
     if (parsed['version'] != 2 ||
@@ -1713,7 +1728,7 @@ Future<bool> _chapterDirectoryLooksPlausible(
           return false;
         }
       } else {
-        await Isolate.run(() => decodeChapterPayload(jsonDecode(raw), index));
+        decodeChapterPayload(jsonDecode(raw), index);
       }
     }
     return true;
@@ -1801,11 +1816,9 @@ Future<List<Map<String, dynamic>>> _storeChapterBatchInBackground(
 /// should pick the same fixed number. Sizing by the book keeps the spawn count
 /// and the number of progress reports roughly constant instead of letting both
 /// grow with the chapter count.
-int _chapterBatchSize(int chapterCount) =>
-    (chapterCount / _chapterWriteBatches).ceil().clamp(
-      _minChapterBatch,
-      _maxChapterBatch,
-    );
+int _chapterBatchSize(int chapterCount) => (chapterCount / _chapterWriteBatches)
+    .ceil()
+    .clamp(_minChapterBatch, _maxChapterBatch);
 
 /// Encodes, stores and describes one batch of staged chapters.
 ///
@@ -1921,7 +1934,6 @@ Future<int?> _readStoredContentRevision(Directory directory) async {
   );
   return readContentRevision(data['contentRevision']);
 }
-
 
 /// Total bytes of each directory, in the order given. A missing directory
 /// contributes zero rather than failing the whole measurement.

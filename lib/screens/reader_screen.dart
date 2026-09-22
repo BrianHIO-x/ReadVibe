@@ -34,6 +34,7 @@ import '../controllers/reader_progress_controller.dart';
 import '../controllers/reader_search_controller.dart';
 import '../controllers/reader_selection_controller.dart';
 import '../controllers/reader_word_count_controller.dart';
+import '../controllers/reader_window_controller.dart';
 import 'reader/reader_epub_layout.dart';
 import 'reader/reader_layout_cache.dart';
 import 'reader/reader_pagination_support.dart';
@@ -111,7 +112,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _readerModalOpen = false;
   double? _simulationViewportLock;
   bool _closingReader = false;
-  double _viewPaddingTop = 0;
+  final _windowController = ReaderWindowController();
+  late final Future<void> _windowReady;
   ReadingProgress? _currentProgress;
   Set<String> _collapsedTocGroupIds = <String>{};
   List<ReaderBookmark> _bookmarks = const <ReaderBookmark>[];
@@ -193,6 +195,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       _handleTextSelectionActivityChanged,
     );
     WidgetsBinding.instance.addObserver(this);
+    _windowController.addListener(_handleWindowMetrics);
+    _windowReady = _windowController.initialize();
     // Keep screen on while reading — the user should not have to tap to
     // prevent the device from sleeping mid-paragraph.
     _ignorePlatformFuture(WakelockPlus.enable(), 'enable wakelock');
@@ -372,10 +376,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     // Bottom gesture navigation stays visible; only the top status bar is
     // hidden for the immersive reading surface.
     _ignorePlatformFuture(
-      SystemChrome.setEnabledSystemUIMode(
-        SystemUiMode.manual,
-        overlays: [SystemUiOverlay.bottom],
-      ),
+      _windowController.showChrome(false),
       'hide reader status bar',
     );
   }
@@ -384,7 +385,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!mounted) return;
     _applySystemBarStyle();
     _ignorePlatformFuture(
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
+      _windowController.showChrome(true),
       'show status bar',
     );
   }
@@ -392,7 +393,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _showLibrarySystemBars() {
     _applySystemBarStyle();
     _ignorePlatformFuture(
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
+      _windowController.showChrome(true),
       'restore library system bars',
     );
   }
@@ -406,6 +407,10 @@ class _ReaderScreenState extends State<ReaderScreen>
               WidgetsBinding.instance.platformDispatcher.platformBrightness,
         );
     SystemChrome.setSystemUIOverlayStyle(AppTheme.systemUiOverlayStyle(colors));
+  }
+
+  void _handleWindowMetrics() {
+    if (mounted) setState(() {});
   }
 
   void _ignorePlatformFuture(Future<void> future, String operation) {
@@ -436,6 +441,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _loadInitialState() async {
+    await _windowReady;
+    if (!mounted) return;
     var savedSettings = const ReaderSettings();
     ReadingProgress? savedProgress;
     try {
@@ -931,11 +938,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     _simulationPreviewController?.dispose();
     _simulationPaperBackController?.dispose();
     _showLibrarySystemBars();
+    _windowController.removeListener(_handleWindowMetrics);
+    _windowController.dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _ignorePlatformFuture(
+      WakelockPlus.toggle(enable: state == AppLifecycleState.resumed),
+      'update reader wakelock',
+    );
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
@@ -1805,6 +1818,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _beginReaderModal() {
     if (_readerModalOpen) return;
     _readerModalOpen = true;
+    _showStatusBar();
     _simulationViewportLock =
         _settings.readingMode == ReaderReadingMode.simulation &&
             _readerViewportHeight > 0
@@ -1831,6 +1845,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _simulationViewportLock = null;
     if (!mounted) return;
     setState(() {});
+    if (!_showOverlay) _hideStatusBarForReader();
     _scheduleSimulationSnapshotWarmup();
   }
 
@@ -2711,20 +2726,26 @@ class _ReaderScreenState extends State<ReaderScreen>
           duration: AppMotion.sheet,
           reverseDuration: AppMotion.normal,
         ),
-        builder: (_) => DraggableScrollableSheet(
-          initialChildSize: 0.75,
-          maxChildSize: 0.95,
-          minChildSize: 0.3,
-          builder: (_, scrollController) => ChapterListSheet(
-            chapters: _book.chapters,
-            currentChapter: _chapterIndex,
-            scrollController: scrollController,
-            colors: themeColors,
-            wordCountListenable: _wordCountController.wordCount,
-            chapterWordCountsListenable: _wordCountController.chapterWordCounts,
-            collapsedGroupIds: _collapsedTocGroupIds,
-            onGroupExpansionChanged: _handleTocGroupExpansionChanged,
-            onSelect: _openChapter,
+        builder: (sheetContext) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+          ),
+          child: DraggableScrollableSheet(
+            initialChildSize: 0.75,
+            maxChildSize: 0.95,
+            minChildSize: 0.3,
+            builder: (_, scrollController) => ChapterListSheet(
+              chapters: _book.chapters,
+              currentChapter: _chapterIndex,
+              scrollController: scrollController,
+              colors: themeColors,
+              wordCountListenable: _wordCountController.wordCount,
+              chapterWordCountsListenable:
+                  _wordCountController.chapterWordCounts,
+              collapsedGroupIds: _collapsedTocGroupIds,
+              onGroupExpansionChanged: _handleTocGroupExpansionChanged,
+              onSelect: _openChapter,
+            ),
           ),
         ),
       );
@@ -2748,7 +2769,6 @@ class _ReaderScreenState extends State<ReaderScreen>
           }),
     );
   }
-
 
   // ── Bookmarks and notes ─────────────────────────────
   //
@@ -3054,7 +3074,8 @@ class _ReaderScreenState extends State<ReaderScreen>
             bottom: false,
             child: SingleChildScrollView(
               padding: EdgeInsets.only(
-                bottom: AppSpacing.lg + MediaQuery.paddingOf(sheetContext).bottom,
+                bottom:
+                    AppSpacing.lg + MediaQuery.paddingOf(sheetContext).bottom,
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -3117,7 +3138,9 @@ class _ReaderScreenState extends State<ReaderScreen>
       debugPrintStack(stackTrace: stackTrace);
       return null;
     }
-    if (target.blockIndex < 0 || target.blockIndex >= blocks.length) return null;
+    if (target.blockIndex < 0 || target.blockIndex >= blocks.length) {
+      return null;
+    }
     final block = blocks[target.blockIndex];
     if (!block.isText) return null;
     final text = block.text.trim();
@@ -3322,10 +3345,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _settings,
       _settings.readingMode,
     );
-    final anchor = _captureReadingTextAnchor(
-      snapshot,
-      topBias: lineExtent / 2,
-    );
+    final anchor = _captureReadingTextAnchor(snapshot, topBias: lineExtent / 2);
     if (anchor == null || anchor.chapterIndex != _chapterIndex) return null;
     final prefix = _paragraphPrefixLength(chapter, anchor.paragraphIndex);
     return contentOffsetForReadingParagraph(
@@ -3546,14 +3566,9 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     final fontFamily = _settings.effectiveFontFamily;
     final viewPadding = MediaQuery.viewPaddingOf(context);
-    // Snapshot the initial top inset once so the layout stays fixed when the
-    // status bar is hidden after the book-opening animation settles.
-    if (_viewPaddingTop == 0 && viewPadding.top > 0) {
-      _viewPaddingTop = viewPadding.top;
-    }
-    final stableTopInset = _viewPaddingTop > 0
-        ? _viewPaddingTop
-        : viewPadding.top;
+    final contentInsets = _windowController.contentInsets(viewPadding);
+    final chromeInsets = _windowController.chromeInsets(viewPadding);
+    final stableTopInset = math.max(chromeInsets.top, contentInsets.top);
     final horizontalPadding = _settings.pageMargin.horizontalPadding;
 
     final content = PopScope(
@@ -3579,11 +3594,9 @@ class _ReaderScreenState extends State<ReaderScreen>
             // ── Reading content ─────────────────────
             LayoutBuilder(
               builder: (context, constraints) {
-                final width = constraints.maxWidth;
+                final width = constraints.maxWidth - contentInsets.horizontal;
                 final reportedHeight = constraints.maxHeight;
-                final stableViewPadding = viewPadding.copyWith(
-                  top: stableTopInset,
-                );
+                final stableViewPadding = contentInsets;
                 _readerViewportWidth = width;
                 if (!_readerModalOpen) {
                   _readerViewportHeight = reportedHeight;
@@ -3637,17 +3650,23 @@ class _ReaderScreenState extends State<ReaderScreen>
                         fit: StackFit.expand,
                         children: [
                           ClipRect(
-                            child: MediaQuery(
-                              data: MediaQuery.of(
-                                context,
-                              ).copyWith(textScaler: TextScaler.noScaling),
-                              child: _buildReadingModeView(
-                                width: width,
-                                height: readerHeight,
-                                themeColors: themeColors,
-                                fontFamily: fontFamily,
-                                viewPadding: stableViewPadding,
-                                horizontalPadding: horizontalPadding,
+                            child: Padding(
+                              padding: EdgeInsets.only(
+                                left: contentInsets.left,
+                                right: contentInsets.right,
+                              ),
+                              child: MediaQuery(
+                                data: MediaQuery.of(
+                                  context,
+                                ).copyWith(textScaler: TextScaler.noScaling),
+                                child: _buildReadingModeView(
+                                  width: width,
+                                  height: readerHeight,
+                                  themeColors: themeColors,
+                                  fontFamily: fontFamily,
+                                  viewPadding: stableViewPadding,
+                                  horizontalPadding: horizontalPadding,
+                                ),
                               ),
                             ),
                           ),
@@ -3701,7 +3720,11 @@ class _ReaderScreenState extends State<ReaderScreen>
                       child: AnimatedContainer(
                         duration: AppMotion.normal,
                         curve: AppMotion.standard,
-                        padding: EdgeInsets.only(top: stableTopInset),
+                        padding: EdgeInsets.only(
+                          top: stableTopInset,
+                          left: contentInsets.left,
+                          right: contentInsets.right,
+                        ),
                         decoration: BoxDecoration(
                           color: themeColors.headerBg,
                           border: Border(

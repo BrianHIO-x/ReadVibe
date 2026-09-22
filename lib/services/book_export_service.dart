@@ -107,7 +107,7 @@ Future<PreparedBookExport> prepareBookExport(Book book, Directory cache) async {
     } else {
       if (book.chapters.isEmpty) throw const FormatException('书籍正文缺失，无法导出');
       final path = file.path;
-      await Isolate.run(() => _writeText(book, path));
+      await _writeTextInBackground(book, path);
     }
     return PreparedBookExport(
       directory,
@@ -120,6 +120,11 @@ Future<PreparedBookExport> prepareBookExport(Book book, Directory cache) async {
     rethrow;
   }
 }
+
+// Only the immutable book snapshot and path cross the isolate boundary; the
+// prepared export and its cleanup/destination state remain on the caller.
+Future<void> _writeTextInBackground(Book book, String path) =>
+    Isolate.run(() => _writeText(book, path));
 
 Future<void> _writeText(Book book, String path) async {
   final output = await File(path).open(mode: FileMode.write);

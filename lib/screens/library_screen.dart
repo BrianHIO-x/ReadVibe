@@ -141,6 +141,15 @@ class _LibraryScreenState extends State<LibraryScreen>
     _maintenance = LibraryMaintenanceController(
       repository: _storage,
       books: () => _books,
+      canRun: () =>
+          mounted &&
+          ModalRoute.of(context)?.isCurrent == true &&
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
+          !_importing &&
+          !_exporting &&
+          !_openingBook &&
+          !_settingsOpen &&
+          !_reorderMode,
       onAvailability: (values) {
         if (mounted) setState(() => _availabilityMap.addAll(values));
       },
@@ -438,9 +447,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     } on FormatException catch (error) {
       if (mounted) {
         _showError(
-          error.message.trim().isNotEmpty
-              ? error.message
-              : '导入失败，请确认文件未损坏后重试',
+          error.message.trim().isNotEmpty ? error.message : '导入失败，请确认文件未损坏后重试',
         );
       }
     } on PlatformException catch (error) {
@@ -523,25 +530,40 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _importBookPath(String path, String fileName) async {
+    var active = true;
     try {
-      final importedBook = await _withoutStalling<Book?>((beat) async {
-        final book = await _bookImporter.importFile(
-          path: path,
-          fileName: fileName,
-          requestPdfPassword: () => _requestPdfPassword(fileName),
-          onProgress: (progress) {
-            beat(_stepLimit(progress.stage));
-            // An import the shelf has already given up on keeps running until
-            // it unwinds. Its late reports are no longer anyone's progress.
-            if (mounted && _importing) {
-              setState(() => _importProgress = progress);
-            }
-          },
-        );
-        beat(_importStallLimit);
-        if (book != null) await _loadData();
-        return book;
-      }, _importSilentStepLimit);
+      final importedBook = await _withoutStalling<Book?>(
+        (beat) async {
+          final book = await _bookImporter.importFile(
+            path: path,
+            fileName: fileName,
+            requestPdfPassword: () async {
+              if (!active || !mounted) return null;
+              // Waiting for the reader's password is not a stalled parser.
+              beat(const Duration(days: 1));
+              try {
+                return await _requestPdfPassword(fileName);
+              } finally {
+                beat(_importSilentStepLimit);
+              }
+            },
+            isCancelled: () => !active || !mounted,
+            onProgress: (progress) {
+              beat(_stepLimit(progress.stage));
+              // An import the shelf has already given up on keeps running until
+              // it unwinds. Its late reports are no longer anyone's progress.
+              if (active && mounted && _importing) {
+                setState(() => _importProgress = progress);
+              }
+            },
+          );
+          beat(_importStallLimit);
+          if (book != null && mounted) await _loadData();
+          return book;
+        },
+        _importSilentStepLimit,
+        onStalled: () => active = false,
+      );
       if (importedBook == null) return;
       _showMessage('「${importedBook.title}」已导入书架');
     } catch (error, stack) {
@@ -558,6 +580,8 @@ class _LibraryScreenState extends State<LibraryScreen>
             : '导入失败于「${_importProgress?.label ?? '读取文件'}」，'
                   '请确认文件未损坏后重试',
       );
+    } finally {
+      active = false;
     }
   }
 
@@ -572,8 +596,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   /// directory, so a late finisher cannot corrupt the retry.
   Future<T> _withoutStalling<T>(
     Future<T> Function(void Function(Duration within) beat) body,
-    Duration firstStep,
-  ) {
+    Duration firstStep, {
+    VoidCallback? onStalled,
+  }) {
     final result = Completer<T>();
     Timer? watchdog;
     void beat(Duration within) {
@@ -581,6 +606,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       watchdog?.cancel();
       watchdog = Timer(within, () {
         if (result.isCompleted) return;
+        onStalled?.call();
         // Naming the step turns a repeat report into something actionable.
         final step = _importProgress?.label ?? '读取文件';
         result.completeError(
@@ -610,8 +636,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   /// finished.
   Duration _stepLimit(BookImportStage stage) => switch (stage) {
     BookImportStage.saving => _importStallLimit,
-    BookImportStage.inspecting || BookImportStage.parsing =>
-      _importSilentStepLimit,
+    BookImportStage.inspecting ||
+    BookImportStage.parsing => _importSilentStepLimit,
   };
 
   /// Label for the import control while an import is running.
@@ -1674,9 +1700,7 @@ class _LibraryScreenState extends State<LibraryScreen>
               _importing ? Icons.hourglass_empty : Icons.add,
               size: 18,
             ),
-            label: Text(
-              _importing ? _importLabel(compact: false) : '导入书籍',
-            ),
+            label: Text(_importing ? _importLabel(compact: false) : '导入书籍'),
             style: ElevatedButton.styleFrom(
               backgroundColor: colors.accent,
               foregroundColor: Colors.white,
@@ -1741,7 +1765,9 @@ class _LibraryScreenState extends State<LibraryScreen>
           AppSpacing.md + MediaQuery.paddingOf(context).bottom,
         ),
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: _shelfMetrics(MediaQuery.sizeOf(context).width).columns,
+          crossAxisCount: _shelfMetrics(
+            MediaQuery.sizeOf(context).width,
+          ).columns,
           childAspectRatio: _shelfCardAspectRatio,
           crossAxisSpacing: AppSpacing.xs,
           mainAxisSpacing: AppSpacing.sm,

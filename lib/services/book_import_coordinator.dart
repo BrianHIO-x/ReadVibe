@@ -74,12 +74,20 @@ class BookImportCoordinator {
     required String fileName,
     required PdfPasswordProvider requestPdfPassword,
     BookImportProgressReporter? onProgress,
+    bool Function()? isCancelled,
   }) async {
+    void checkActive() {
+      if (isCancelled?.call() == true) {
+        throw const FormatException('本次导入已停止');
+      }
+    }
+
     Book? importedBook;
     var metadataSaved = false;
     try {
       onProgress?.call(const BookImportProgress(BookImportStage.inspecting));
       final format = await _detectInBackground(path, fileName);
+      checkActive();
       final labeledName = labeledImportFileName(path, fileName, format);
       onProgress?.call(const BookImportProgress(BookImportStage.parsing));
       if (format == BookFormat.epub) {
@@ -103,6 +111,7 @@ class BookImportCoordinator {
         throw const FormatException(unsupportedBookFormatMessage);
       }
 
+      checkActive();
       onProgress?.call(
         BookImportProgress(
           BookImportStage.saving,
@@ -111,15 +120,16 @@ class BookImportCoordinator {
       );
       final committed = await _storage.saveBook(
         importedBook,
-        onChapterProgress: onProgress == null
-            ? null
-            : (written, count) => onProgress(
-                BookImportProgress(
-                  BookImportStage.saving,
-                  completed: written,
-                  total: count,
-                ),
-              ),
+        onChapterProgress: (written, count) {
+          checkActive();
+          onProgress?.call(
+            BookImportProgress(
+              BookImportStage.saving,
+              completed: written,
+              total: count,
+            ),
+          );
+        },
       );
       metadataSaved = true;
       return committed;

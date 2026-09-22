@@ -29,7 +29,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `pubspec.yaml` | 项目清单。声明包名 `readvibe`、版本 `0.6.27+73`（`+` 后为 Android 内部构建号）、Dart 约束，以及全部运行依赖（file_picker、archive、shared_preferences、path_provider、path、fast_gbk、dart3_big5、dart_mobi、crypto、html、xml、wakelock_plus、package_info_plus）与开发依赖（flutter_lints）。 |
+| `pubspec.yaml` | 项目清单。声明包名、公开版本和 Android 内部构建号、Dart 约束、运行依赖、开发依赖、字体和其他打包资源。 |
 | `pubspec.lock` | 依赖解析结果快照，锁定每个依赖包的确切版本，保证构建可复现。 |
 | `analysis_options.yaml` | Dart 静态分析配置。启用 `flutter_lints` 推荐规则集，未额外增删规则。 |
 | `AGENTS.md` | AI 协作约定。描述项目入口目录、工作原则、版本递增规则，以及用 VS Code 的 Android 模拟器确认改动。 |
@@ -162,13 +162,14 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | 文件 | 作用 |
 |---|---|
 | `chapter_editing_controller.dart` | 章节编辑事务。`save()` 归一化换行、重建 `Chapter`、使字数缓存失效、经仓库替换章节、增量重算编辑章字数并回写摘要；返回 `ChapterEditResult` 携带新书籍与字数。阅读页只保留视图缓存与锚点恢复职责。 |
-| `library_maintenance_controller.dart` | 书架维护编排。开架 30 秒后触发一次维护：清理遗留搜索数据、回收孤儿文件、逐本深度检查可用性（每本间隔 120ms），用代数与同一性判断丢弃过期扫描结果；支持取消、合并重复执行与随页面销毁。 |
+| `library_maintenance_controller.dart` | 空闲书架维护编排。逐本检查、逐本发布结果，以书籍快照同一性拒绝过期结果；页面忙碌或进入后台后在书籍边界暂停，保留本轮完成项并延后续扫。深度章节校验由存储层工作线程执行。 |
 | `document_search_controller.dart` | 文档搜索会话控制器。串行化耗时搜索并只发布当前查询的结果，提交期间的新提交替换待处理项；对外暴露结果、进行中、已搜索与失败四种状态。 |
 | `reader_pagination_controller.dart` | 纯分页数学。把原始滚动范围取整到整视口页高，容差 0.01，供仿真模式滚动位置共用。 |
 | `reader_progress_controller.dart` | 进度写序列化。把异步保存串成队列，保证旧的保存不会越过新的阅读位置落盘，错误经回调上报。 |
 | `reader_search_controller.dart` | 书内搜索会话管理。保证同一时刻只有一个后台搜索会话，切换关键词即释放旧会话。 |
 | `reader_selection_controller.dart` | 文字选区共享状态。以三个 `ValueNotifier`（激活、拖动中、被模态阻断）在阅读页、滚动位置与 SelectionArea 之间广播选区状态。 |
 | `reader_word_count_controller.dart` | 阅读页字数状态。初始化时采用书籍已存字数，需要时后台重算逐章字数并持久化；以代数拒绝过期结果，暴露 `wordCount` 与 `chapterWordCounts` 两个监听器供目录与页脚消费。 |
+| `reader_window_controller.dart` | 文字与 PDF 阅读共用的窗口协调器。串行提交状态栏显示请求，读取物理摄像头和系统栏 Insets，响应旋转、键盘收起与前后台变化。正文安全区和菜单安全区独立。原生对应 `ReaderWindowHandler.kt`，通过 AndroidX Insets API 保持 edge-to-edge 并单独隐藏顶部图标。 |
 
 ### lib/services/
 
@@ -278,9 +279,9 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 ## 命名与协作速查
 
-- **协议通道**：`com.readvibe.app/` 前缀下共七个 MethodChannel——`incoming_file`、`book_picker`、`system_text_actions`、`document_parser`、`app_update`、`book_export`、`pdf_renderer`，Dart 端各在对应 service 中静态封装（`book_export` 的封装在 `BookExportService` 内）。
+- **协议通道**：`com.readvibe.app/` 前缀下的 `incoming_file`、`book_picker`、`system_text_actions`、`document_parser`、`app_update`、`book_export`、`pdf_renderer` 分别承载平台能力；`reader_window` 由阅读窗口协调器访问。
 - **文档级不变量**：正文与解析全部本地执行；章节编辑只改私有副本；导出位置由用户经系统界面选择；签名材料不入库。
 - **worker 闭包**：交给 `Isolate.run` 的闭包一律写在顶层或类级函数里，参数只收可传递的值。写在方法体内会与该方法的捕获上下文共用，凡是那里放着的回调、Future、Timer 或界面状态都会被一起发送，AOT 正式包因此抛 `Illegal argument in isolate message`，且只在真机或模拟器的 release 构建上暴露。
-- **版本约定**：公开版本按 `0.6.X` 递增，Android 内部构建号同步递增；release 构建缺 `key.properties` 即失败。
+- **版本约定**：当前公开版本系列为 `0.7.X`，Android 内部构建号同步递增，唯一来源为 `pubspec.yaml`；release 构建缺 `key.properties` 即失败。
 - **发布包**：正式包必须放到 `D:\0_Study\0_Stdio\0_Codex_work\1.ReadVibe_Project\dist`，按 `ReadVibe-Android-v<公开版本>-arm64-v8a.apk` 命名。
 - **改动确认**：用 VS Code 连接的 Android 模拟器直接运行即可。

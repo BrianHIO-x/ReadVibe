@@ -58,6 +58,7 @@ class MainActivity : FlutterActivity() {
     private var bookExporter: BookExportHandler? = null
     private var pdfHandler: PdfChannelHandler? = null
     private var updateHandler: AppUpdateHandler? = null
+    private var readerWindow: ReaderWindowHandler? = null
 
     private val documentExecutor = Executors.newSingleThreadExecutor()
     private val incomingFileExecutor = Executors.newSingleThreadExecutor()
@@ -75,6 +76,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        readerWindow = ReaderWindowHandler(this, flutterEngine.dartExecutor.binaryMessenger)
         bookExporter = BookExportHandler(this, flutterEngine.dartExecutor.binaryMessenger)
         pdfHandler = PdfChannelHandler(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
         updateHandler = AppUpdateHandler(this, flutterEngine.dartExecutor.binaryMessenger)
@@ -643,6 +645,8 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
     }
     override fun onDestroy() {
+        readerWindow?.dispose()
+        readerWindow = null
         updateHandler?.dispose()
         updateHandler = null
         bookExporter?.dispose()

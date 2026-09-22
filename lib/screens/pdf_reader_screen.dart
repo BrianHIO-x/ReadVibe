@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/book.dart';
+import '../controllers/reader_window_controller.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/pdf_renderer_service.dart';
@@ -38,7 +39,13 @@ class PdfReaderScreen extends StatefulWidget {
   State<PdfReaderScreen> createState() => _PdfReaderScreenState();
 }
 
-class _PdfReaderScreenState extends State<PdfReaderScreen> {
+class _PdfReaderScreenState extends State<PdfReaderScreen>
+    with WidgetsBindingObserver {
+  final _windowController = ReaderWindowController();
+  int _searchSerial = 0;
+  bool _savingBookmark = false;
+  bool _savingNote = false;
+  bool _retryingPage = false;
   late final PdfReaderRepository _storage;
   late final PdfRendererGateway _renderer;
   final Map<String, Future<String>> _renderTasks = <String, Future<String>>{};
@@ -72,7 +79,8 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     super.initState();
     _storage = widget.repository ?? StorageService();
     _renderer = widget.renderer ?? const PlatformPdfRendererGateway();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_windowController.initialize());
     unawaited(_setWakelock(true));
     _loadProgress();
   }
@@ -160,16 +168,16 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   void _scheduleChromeAutoHide() {
     _autoHideTimer?.cancel();
     _autoHideTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted) _setChromeVisible(false);
+      if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+        _setChromeVisible(false);
+      }
     });
   }
 
   void _setChromeVisible(bool visible) {
     if (_chromeVisible == visible) return;
     setState(() => _chromeVisible = visible);
-    SystemChrome.setEnabledSystemUIMode(
-      visible ? SystemUiMode.edgeToEdge : SystemUiMode.immersiveSticky,
-    );
+    unawaited(_windowController.showChrome(visible));
   }
 
   void _toggleChrome() {
@@ -256,13 +264,28 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
 
-  void _toggleBookmark() {
+  Future<void> _toggleBookmark() async {
+    if (_savingBookmark) return;
+    _savingBookmark = true;
+    final previous = Set<int>.of(_bookmarks);
     setState(() {
       if (!_bookmarks.add(_currentPage)) _bookmarks.remove(_currentPage);
     });
-    unawaited(
-      _storage.savePdfBookmarks(widget.book.id, _bookmarks, _pageCount),
-    );
+    try {
+      await _storage.savePdfBookmarks(
+        widget.book.id,
+        Set<int>.of(_bookmarks),
+        _pageCount,
+      );
+    } on Object catch (error) {
+      debugPrint('PDF bookmark save failed: $error');
+      if (mounted) {
+        setState(() => _bookmarks = previous);
+        AppToast.error(context, '书签保存失败，请重试', colors: _overlayColors);
+      }
+    } finally {
+      _savingBookmark = false;
+    }
   }
 
   Future<void> _showBookmarks() async {
@@ -334,6 +357,8 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   }
 
   Future<void> _editPageNote() async {
+    if (_savingNote) return;
+    final pageIndex = _currentPage;
     _autoHideTimer?.cancel();
     final controller = TextEditingController(text: _notes[_currentPage] ?? '');
     final note = await showAppDialog<String?>(
@@ -369,22 +394,32 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     );
     controller.dispose();
     if (note == null || !mounted) return;
-    setState(() {
-      final normalized = note.trim();
-      if (normalized.isEmpty) {
-        _notes.remove(_currentPage);
-      } else {
-        _notes[_currentPage] = normalized;
+    _savingNote = true;
+    final nextNotes = Map<int, String>.of(_notes);
+    final normalized = note.trim();
+    if (normalized.isEmpty) {
+      nextNotes.remove(pageIndex);
+    } else {
+      nextNotes[pageIndex] = normalized;
+    }
+    try {
+      await _storage.savePdfNotes(widget.book.id, nextNotes, _pageCount);
+    } on Object catch (error) {
+      debugPrint('PDF note save failed: $error');
+      _savingNote = false;
+      if (mounted) {
+        AppToast.error(context, '笔记保存失败，请重试', colors: _overlayColors);
       }
-    });
-    await _storage.savePdfNotes(widget.book.id, _notes, _pageCount);
+      return;
+    }
+    if (mounted) setState(() => _notes = nextNotes);
     final sourcePath = _sourcePath;
     if (sourcePath != null) {
       try {
         await _renderer.syncTextNote(
           filePath: sourcePath,
-          pageIndex: _currentPage,
-          noteId: 'ReadVibe:${widget.book.id}:$_currentPage',
+          pageIndex: pageIndex,
+          noteId: 'ReadVibe:${widget.book.id}:$pageIndex',
           contents: note.trim(),
         );
         _renderTasks.clear();
@@ -401,6 +436,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
         }
       }
     }
+    _savingNote = false;
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
 
@@ -411,6 +447,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
   }
 
   Future<List<PdfTextSearchResult>> _searchPdfWithOcr(String rawQuery) async {
+    final serial = ++_searchSerial;
     final sourcePath = _sourcePath;
     final query = _normalizeOcrText(rawQuery).toLowerCase();
     if (sourcePath == null || query.isEmpty) {
@@ -418,15 +455,23 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     }
     final results = <PdfTextSearchResult>[];
     for (var pageIndex = 0; pageIndex < _pageCount; pageIndex++) {
+      if (!mounted || serial != _searchSerial) return const [];
       final source = await _renderer.recognizePageText(
         filePath: sourcePath,
         pageIndex: pageIndex,
       );
+      if (!mounted || serial != _searchSerial) return const [];
       final normalized = _normalizeOcrText(source);
-      final searchable = normalized.toLowerCase();
-      var offset = searchable.indexOf(query);
+      final folded = normalized.toLowerCase();
+      final searchable = folded.length == normalized.length
+          ? folded
+          : normalized;
+      final needle = folded.length == normalized.length
+          ? query
+          : _normalizeOcrText(rawQuery);
+      var offset = searchable.indexOf(needle);
       while (offset >= 0 && results.length < maxDocumentSearchResults) {
-        final end = offset + query.length;
+        final end = offset + needle.length;
         final snippetStart = math.max(0, offset - 30);
         final snippetEnd = math.min(normalized.length, end + 48);
         final leading = snippetStart > 0;
@@ -444,7 +489,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
             snippetMatchEnd: matchStart + end - offset,
           ),
         );
-        offset = searchable.indexOf(query, end);
+        offset = searchable.indexOf(needle, end);
       }
       if (results.length >= maxDocumentSearchResults) break;
     }
@@ -482,6 +527,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
         ),
       ),
     );
+    _searchSerial++;
     if (selected != null && mounted) await _goToPage(selected.pageIndex);
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
@@ -570,8 +616,15 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
       ),
     );
     if (selected != null && selected != _displayTheme && mounted) {
-      setState(() => _displayTheme = selected);
-      await _storage.savePdfDisplayTheme(widget.book.id, selected);
+      try {
+        await _storage.savePdfDisplayTheme(widget.book.id, selected);
+        if (mounted) setState(() => _displayTheme = selected);
+      } on Object catch (error) {
+        debugPrint('PDF theme save failed: $error');
+        if (mounted) {
+          AppToast.error(context, '主题保存失败，请重试', colors: _overlayColors);
+        }
+      }
     }
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
@@ -681,8 +734,16 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     );
     if (confirmed != true || !mounted) return;
     setState(() => _deleting = true);
-    await _storage.deleteBook(widget.book.id);
-    if (mounted) Navigator.of(context).pop();
+    try {
+      await _storage.deleteBook(widget.book.id);
+      if (mounted) Navigator.of(context).pop();
+    } on Object catch (error) {
+      debugPrint('PDF deletion failed: $error');
+      if (mounted) {
+        setState(() => _deleting = false);
+        AppToast.error(context, '删除失败，请重试', colors: _overlayColors);
+      }
+    }
   }
 
   Future<String> _pageImage(int pageIndex, int widthPx) {
@@ -748,6 +809,8 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _searchSerial++;
     _autoHideTimer?.cancel();
     if (_ready && _fatalError == null && _pageCount > 0) {
       unawaited(_savePage(_currentPage));
@@ -759,8 +822,36 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     }
     _transformControllers.clear();
     _pageController?.dispose();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _windowController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final resumed = state == AppLifecycleState.resumed;
+    unawaited(_setWakelock(resumed));
+    if (!resumed) {
+      _autoHideTimer?.cancel();
+      if (_ready && _fatalError == null) unawaited(_savePage(_currentPage));
+    } else if (_chromeVisible && ModalRoute.of(context)?.isCurrent == true) {
+      _scheduleChromeAutoHide();
+    }
+  }
+
+  Future<void> _retryPage(int pageIndex) async {
+    if (_retryingPage || _sourcePath == null) return;
+    setState(() => _retryingPage = true);
+    try {
+      await _renderer.clearFileCache(_sourcePath!);
+      _renderTasks.clear();
+    } on Object catch (error) {
+      debugPrint('PDF render retry failed: $error');
+      if (mounted) {
+        AppToast.error(context, '页面缓存无法重建，请稍后重试', colors: _overlayColors);
+      }
+    } finally {
+      if (mounted) setState(() => _retryingPage = false);
+    }
   }
 
   Color get _pdfPageBackground => switch (_displayTheme) {
@@ -829,6 +920,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
       value: SystemUiOverlayStyle.light,
       child: Scaffold(
         backgroundColor: const Color(0xFF111111),
+        resizeToAvoidBottomInset: false,
         body: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: _toggleChrome,
@@ -866,6 +958,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                             return _buildError(
                               '第 ${pageIndex + 1} 页无法渲染',
                               allowDelete: true,
+                              onRetry: () => _retryPage(pageIndex),
                             );
                           }
                           final path = snapshot.data;
@@ -890,8 +983,10 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
                                       File(path),
                                       fit: BoxFit.contain,
                                       filterQuality: FilterQuality.high,
-                                      errorBuilder: (_, _, _) =>
-                                          _buildError('页面图像读取失败'),
+                                      errorBuilder: (_, _, _) => _buildError(
+                                        '页面图像读取失败',
+                                        onRetry: () => _retryPage(pageIndex),
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -1166,7 +1261,11 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
     );
   }
 
-  Widget _buildError(String message, {bool allowDelete = false}) {
+  Widget _buildError(
+    String message, {
+    bool allowDelete = false,
+    VoidCallback? onRetry,
+  }) {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.xl),
@@ -1184,6 +1283,14 @@ class _PdfReaderScreenState extends State<PdfReaderScreen> {
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70),
             ),
+            if (onRetry != null) ...[
+              const SizedBox(height: AppSpacing.md),
+              FilledButton.icon(
+                onPressed: _retryingPage ? null : onRetry,
+                icon: const Icon(Icons.refresh_rounded),
+                label: Text(_retryingPage ? '正在重新加载…' : '重新加载此页'),
+              ),
+            ],
             if (allowDelete) ...[
               const SizedBox(height: AppSpacing.lg),
               OutlinedButton.icon(

@@ -117,6 +117,8 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
   final _findFocus = FocusNode();
   final _contentScrollController = ScrollController();
   final _contentFieldKey = GlobalKey();
+  final _undoController = UndoHistoryController();
+  late int _characterCount;
   bool _saving = false;
   bool _allowPop = false;
   String? _errorMessage;
@@ -227,6 +229,8 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
     _titleController = TextEditingController(text: widget.initialTitle);
     _initialContent = normalizeChapterEditorSpaces(widget.initialContent);
     _contentController = _FindHighlightController(text: _initialContent);
+    _contentController.selection = const TextSelection.collapsed(offset: 0);
+    _characterCount = _initialContent.runes.length;
     _lastContent = _initialContent;
     _titleController.addListener(_handleTitleChanged);
     _contentController.addListener(_handleContentChanged);
@@ -247,6 +251,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
     _replaceController.dispose();
     _findFocus.dispose();
     _contentScrollController.dispose();
+    _undoController.dispose();
     super.dispose();
   }
 
@@ -342,6 +347,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
     final text = _contentController.text;
     if (text == _lastContent) return;
     _lastContent = text;
+    _characterCount = text.runes.length;
     final matches = _findVisible
         ? _computeMatches(_findController.text, _contentController.text)
         : const <TextRange>[];
@@ -836,6 +842,7 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
                   child: TextField(
                     key: _contentFieldKey,
                     controller: _contentController,
+                    undoController: _undoController,
                     inputFormatters: const [ChapterEditorInputFormatter()],
                     scrollController: _contentScrollController,
                     enabled: !_saving,
@@ -889,9 +896,30 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
                         ),
                       ),
                     ),
-                    const SizedBox(width: AppSpacing.md),
+                    ValueListenableBuilder<UndoHistoryValue>(
+                      valueListenable: _undoController,
+                      builder: (_, history, _) => Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: '撤销正文修改',
+                            onPressed: !_saving && history.canUndo
+                                ? _undoController.undo
+                                : null,
+                            icon: const Icon(Icons.undo_rounded),
+                          ),
+                          IconButton(
+                            tooltip: '重做正文修改',
+                            onPressed: !_saving && history.canRedo
+                                ? _undoController.redo
+                                : null,
+                            icon: const Icon(Icons.redo_rounded),
+                          ),
+                        ],
+                      ),
+                    ),
                     Text(
-                      '${_contentController.text.runes.length} 字符',
+                      '$_characterCount 字符',
                       style: TextStyle(color: colors.secondary, fontSize: 12),
                     ),
                   ],

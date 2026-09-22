@@ -11,6 +11,7 @@ class LibraryMaintenanceController {
     required this.books,
     required this.onAvailability,
     required this.onError,
+    this.canRun,
     Future<void> Function()? cleanup,
     this.initialDelay = const Duration(seconds: 30),
     this.bookInterval = const Duration(milliseconds: 120),
@@ -20,6 +21,7 @@ class LibraryMaintenanceController {
   final List<Book> Function() books;
   final void Function(Map<String, BookAvailability>) onAvailability;
   final void Function(Object, StackTrace) onError;
+  final bool Function()? canRun;
   final Future<void> Function() _cleanup;
   final Duration initialDelay;
   final Duration bookInterval;
@@ -27,12 +29,15 @@ class LibraryMaintenanceController {
   Future<void>? _running;
   bool _scheduled = false;
   bool _disposed = false;
+  bool _cleaned = false;
+  final Map<String, Book> _checkedBooks = {};
 
   void schedule() {
     if (_disposed || _scheduled) return;
     _scheduled = true;
     _timer = Timer(initialDelay, () {
       _timer = null;
+      _scheduled = false;
       unawaited(run());
     });
   }
@@ -48,35 +53,45 @@ class LibraryMaintenanceController {
 
   Future<void> _run() async {
     try {
-      await _cleanup();
-      if (_disposed) return;
-      await repository.collectOrphanedData();
-      if (_disposed) return;
+      if (!_mayContinue()) return;
+      if (!_cleaned) {
+        await _cleanup();
+        if (!_mayContinue()) return;
+        await repository.collectOrphanedData();
+        _cleaned = true;
+      }
+      if (!_mayContinue()) return;
       final snapshot = List<Book>.of(books());
-      final scannedBooks = {for (final book in snapshot) book.id: book};
-      final results = <String, BookAvailability>{};
+      final ids = snapshot.map((book) => book.id).toSet();
+      _checkedBooks.removeWhere((id, _) => !ids.contains(id));
       for (final book in snapshot) {
-        if (_disposed) return;
+        if (!_mayContinue()) return;
+        if (identical(_checkedBooks[book.id], book)) continue;
         final availability = await repository.checkBookAvailability(
           book,
           deep: true,
         );
         if (_disposed) return;
-        // A reload/edit may replace a book with the same ID during this scan.
-        results[book.id] = availability;
+        // Publish one book at a time, with identity checked at the commit.
+        // Busy readers pause between books; checked entries survive the pause.
+        if (books().any((current) => identical(current, book))) {
+          _checkedBooks[book.id] = book;
+          onAvailability({book.id: availability});
+        }
         if (bookInterval > Duration.zero) {
           await Future<void>.delayed(bookInterval);
         }
       }
-      if (_disposed) return;
-      final currentBooks = {for (final book in books()) book.id: book};
-      results.removeWhere(
-        (id, _) => !identical(scannedBooks[id], currentBooks[id]),
-      );
-      onAvailability(Map<String, BookAvailability>.unmodifiable(results));
     } on Object catch (error, stack) {
       if (!_disposed) onError(error, stack);
     }
+  }
+
+  bool _mayContinue() {
+    if (_disposed) return false;
+    if (canRun?.call() != false) return true;
+    schedule();
+    return false;
   }
 
   void dispose() {
