@@ -6,7 +6,13 @@ import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
-    show RenderRepaintBoundary, RenderSliver, ScrollCacheExtent;
+    show
+        RenderAbstractViewport,
+        RenderOffstage,
+        RenderParagraph,
+        RenderRepaintBoundary,
+        RenderSliver,
+        ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../theme/app_theme.dart';
@@ -43,6 +49,9 @@ import 'reader/reader_selectable_block.dart';
 
 const double _simulationPageExtentTolerance = 0.01;
 
+// Hairline drawn where the reader bars meet the page.
+const double _readerChromeBorder = 0.5;
+
 /// Reader screen — displays book content with settings overlay
 class ReaderScreen extends StatefulWidget {
   final Book book;
@@ -75,6 +84,17 @@ class _ReaderScreenState extends State<ReaderScreen>
   late ReaderSettings _settings;
   late int _chapterIndex;
   bool _showOverlay = false;
+  // How far each reader bar reaches past its own content, so its inner edge
+  // falls between two lines of text instead of across one.
+  double _headerTextGap = 0;
+  double _footerTextGap = 0;
+  double _headerChromeInset = 0;
+  double _footerChromeInset = 0;
+  bool _chromeAlignmentScheduled = false;
+  final GlobalKey _readerStackKey = GlobalKey();
+  final GlobalKey _readingSurfaceKey = GlobalKey();
+  final GlobalKey _headerRowKey = GlobalKey();
+  final GlobalKey _footerRowKey = GlobalKey();
   late ScrollController _scrollController;
   bool _settingsLoaded = false;
   String? _readerLoadError;
@@ -2135,9 +2155,18 @@ class _ReaderScreenState extends State<ReaderScreen>
     _enqueueProgressSave(progress);
     final serial = ++_overlayToggleSerial;
     final willShow = !_showOverlay;
+    // Measured before the bars slide in, so they arrive already fitted to the
+    // page. Hiding keeps the current fit for the slide out.
+    final textGaps = willShow ? _measureChromeTextGaps() : null;
     // Update _showOverlay first: _hideStatusBarForReader refuses to run while
     // the chrome is visible, so the state must already reflect the toggle.
-    setState(() => _showOverlay = willShow);
+    setState(() {
+      _showOverlay = willShow;
+      if (textGaps != null) {
+        _headerTextGap = textGaps.header;
+        _footerTextGap = textGaps.footer;
+      }
+    });
     if (willShow) {
       _refreshCurrentBookmarkState();
       _showStatusBar();
@@ -2172,6 +2201,136 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
       _scheduleSimulationSnapshotWarmup();
     });
+  }
+
+  void _scheduleChromeAlignment() {
+    if (_chromeAlignmentScheduled) return;
+    _chromeAlignmentScheduled = true;
+    WidgetsBinding.instance
+      ..addPostFrameCallback((_) {
+        _chromeAlignmentScheduled = false;
+        _alignChromeToText();
+      })
+      ..ensureVisualUpdate();
+  }
+
+  void _alignChromeToText() {
+    if (!mounted || !_showOverlay) return;
+    final controller = _scrollController;
+    // Bars that followed a moving page would jump line by line. The scroll
+    // end notification measures again once the text comes to rest.
+    if (controller.hasClients &&
+        controller.positions.any(
+          (position) => position.isScrollingNotifier.value,
+        )) {
+      return;
+    }
+    final gaps = _measureChromeTextGaps();
+    if (gaps == null) return;
+    if ((gaps.header - _headerTextGap).abs() < 0.5 &&
+        (gaps.footer - _footerTextGap).abs() < 0.5) {
+      return;
+    }
+    setState(() {
+      _headerTextGap = gaps.header;
+      _footerTextGap = gaps.footer;
+    });
+  }
+
+  /// How far each bar must reach past its content so that its inner edge
+  /// lands on a line boundary. Only lines the reader can currently see count.
+  ({double header, double footer})? _measureChromeTextGaps() {
+    final stack = _readerStackKey.currentContext?.findRenderObject();
+    final surface = _readingSurfaceKey.currentContext?.findRenderObject();
+    final headerRow = _headerRowKey.currentContext?.findRenderObject();
+    final footerRow = _footerRowKey.currentContext?.findRenderObject();
+    if (stack is! RenderBox ||
+        surface is! RenderBox ||
+        headerRow is! RenderBox ||
+        footerRow is! RenderBox ||
+        !stack.hasSize ||
+        !surface.hasSize ||
+        !headerRow.hasSize ||
+        !footerRow.hasSize) {
+      return null;
+    }
+    final headerEdge =
+        _headerChromeInset + headerRow.size.height + _readerChromeBorder;
+    final footerEdge =
+        stack.size.height -
+        _footerChromeInset -
+        footerRow.size.height -
+        _readerChromeBorder;
+    var header = 0.0;
+    var footer = 0.0;
+
+    void visit(RenderObject node, Rect clip) {
+      if (node is RenderOffstage && node.offstage) return;
+      if (node is! RenderBox) {
+        node.visitChildren((child) => visit(child, clip));
+        return;
+      }
+      if (!node.hasSize) return;
+      final bounds = MatrixUtils.transformRect(
+        node.getTransformTo(stack),
+        Offset.zero & node.size,
+      );
+      final visible = clip.intersect(bounds);
+      // Pages parked beside the current one during a turn stay off screen.
+      if (visible.width <= 0 || visible.height <= 0) return;
+      if (node is RenderParagraph) {
+        header = math.max(
+          header,
+          _lineOverhang(node, bounds.top, visible, headerEdge, below: true),
+        );
+        footer = math.max(
+          footer,
+          _lineOverhang(node, bounds.top, visible, footerEdge, below: false),
+        );
+        return;
+      }
+      final childClip = node is RenderAbstractViewport ? visible : clip;
+      node.visitChildren((child) => visit(child, childClip));
+    }
+
+    visit(surface, Offset.zero & stack.size);
+    return (header: header, footer: footer);
+  }
+
+  /// The distance from [edge] to the far side of the line it cuts through,
+  /// measured into the text the bar covers.
+  double _lineOverhang(
+    RenderParagraph paragraph,
+    double top,
+    Rect visible,
+    double edge, {
+    required bool below,
+  }) {
+    if (edge <= visible.top || edge >= visible.bottom) return 0;
+    final position = paragraph.getPositionForOffset(Offset(0, edge - top));
+    final length = paragraph.text
+        .toPlainText(includeSemanticsLabels: false)
+        .length;
+    // Simulation pages force every line onto the strut; the spacing styles
+    // would shrink those boxes to the glyphs and miss the leading.
+    final boxHeightStyle = paragraph.strutStyle?.forceStrutHeight == true
+        ? ui.BoxHeightStyle.strut
+        : ui.BoxHeightStyle.includeLineSpacingMiddle;
+    for (final start in [position.offset, position.offset - 1]) {
+      if (start < 0 || start >= length) continue;
+      final boxes = paragraph.getBoxesForSelection(
+        TextSelection(baseOffset: start, extentOffset: start + 1),
+        boxHeightStyle: boxHeightStyle,
+      );
+      for (final box in boxes) {
+        final lineTop = math.max(box.top + top, visible.top);
+        final lineBottom = math.min(box.bottom + top, visible.bottom);
+        if (lineTop < edge - 0.5 && edge + 0.5 < lineBottom) {
+          return below ? lineBottom - edge : edge - lineTop;
+        }
+      }
+    }
+    return 0;
   }
 
   void _handleReadingPointerDown(PointerDownEvent event) {
@@ -3570,6 +3729,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     final chromeInsets = _windowController.chromeInsets(viewPadding);
     final stableTopInset = math.max(chromeInsets.top, contentInsets.top);
     final horizontalPadding = _settings.pageMargin.horizontalPadding;
+    _headerChromeInset = stableTopInset;
+    _footerChromeInset = viewPadding.bottom + AppSpacing.sm;
+    // Font, margin or window changes move the lines under the visible bars.
+    if (_showOverlay) _scheduleChromeAlignment();
 
     final content = PopScope(
       canPop: false,
@@ -3584,6 +3747,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         // repagination of the reader body.
         resizeToAvoidBottomInset: false,
         body: Stack(
+          key: _readerStackKey,
           children: [
             // ── Stable reader background ─────────────
             // The book-opening route draws the visible shared-element
@@ -3592,98 +3756,108 @@ class _ReaderScreenState extends State<ReaderScreen>
             Positioned.fill(child: ColoredBox(color: themeColors.background)),
 
             // ── Reading content ─────────────────────
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final width = constraints.maxWidth - contentInsets.horizontal;
-                final reportedHeight = constraints.maxHeight;
-                final stableViewPadding = contentInsets;
-                _readerViewportWidth = width;
-                if (!_readerModalOpen) {
-                  _readerViewportHeight = reportedHeight;
-                }
-                _readerViewPadding = stableViewPadding;
-                // The simulation grid computes page height in unscaled line
-                // extents while Flutter would render each line scaled by the
-                // system font scale. On devices with a non-default scale the
-                // two disagree and page boundaries land mid-line, clipping
-                // the first/last row of glyphs. The reader has its own font
-                // size setting, so lock the scale: measurement and rendering
-                // share one grid on every device.
-                _readerTextScaler = TextScaler.noScaling;
-                final readerHeight =
-                    _readerModalOpen &&
-                        _settings.readingMode == ReaderReadingMode.simulation &&
-                        _simulationViewportLock != null
-                    ? _simulationViewportLock!
-                    : reportedHeight;
-                return Listener(
-                  behavior: HitTestBehavior.opaque,
-                  onPointerDown: _handleReadingPointerDown,
-                  onPointerMove: (event) =>
-                      _handleReadingPointerMove(event, width),
-                  onPointerUp: (event) => _handleReadingPointerUp(event, width),
-                  onPointerCancel: _handleReadingPointerCancel,
-                  child: GestureDetector(
+            NotificationListener<ScrollEndNotification>(
+              onNotification: (_) {
+                if (_showOverlay) _scheduleChromeAlignment();
+                return false;
+              },
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final width = constraints.maxWidth - contentInsets.horizontal;
+                  final reportedHeight = constraints.maxHeight;
+                  final stableViewPadding = contentInsets;
+                  _readerViewportWidth = width;
+                  if (!_readerModalOpen) {
+                    _readerViewportHeight = reportedHeight;
+                  }
+                  _readerViewPadding = stableViewPadding;
+                  // The simulation grid computes page height in unscaled line
+                  // extents while Flutter would render each line scaled by the
+                  // system font scale. On devices with a non-default scale the
+                  // two disagree and page boundaries land mid-line, clipping
+                  // the first/last row of glyphs. The reader has its own font
+                  // size setting, so lock the scale: measurement and rendering
+                  // share one grid on every device.
+                  _readerTextScaler = TextScaler.noScaling;
+                  final readerHeight =
+                      _readerModalOpen &&
+                          _settings.readingMode ==
+                              ReaderReadingMode.simulation &&
+                          _simulationViewportLock != null
+                      ? _simulationViewportLock!
+                      : reportedHeight;
+                  return Listener(
                     behavior: HitTestBehavior.opaque,
-                    onHorizontalDragStart:
-                        _settings.readingMode != ReaderReadingMode.chapter
-                        ? null
-                        : _handleHorizontalDragStart,
-                    onHorizontalDragUpdate:
-                        _settings.readingMode != ReaderReadingMode.chapter
-                        ? null
-                        : (details) =>
-                              _handleHorizontalDragUpdate(details, width),
-                    onHorizontalDragEnd:
-                        _settings.readingMode != ReaderReadingMode.chapter
-                        ? null
-                        : (details) => _handleHorizontalDragEnd(details, width),
-                    onHorizontalDragCancel:
-                        _settings.readingMode != ReaderReadingMode.chapter
-                        ? null
-                        : _handleHorizontalDragCancel,
-                    child: AnimatedContainer(
-                      duration: AppMotion.normal,
-                      curve: AppMotion.standard,
-                      color: themeColors.background,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          ClipRect(
-                            child: Padding(
-                              padding: EdgeInsets.only(
-                                left: contentInsets.left,
-                                right: contentInsets.right,
-                              ),
-                              child: MediaQuery(
-                                data: MediaQuery.of(
-                                  context,
-                                ).copyWith(textScaler: TextScaler.noScaling),
-                                child: _buildReadingModeView(
-                                  width: width,
-                                  height: readerHeight,
-                                  themeColors: themeColors,
-                                  fontFamily: fontFamily,
-                                  viewPadding: stableViewPadding,
-                                  horizontalPadding: horizontalPadding,
+                    onPointerDown: _handleReadingPointerDown,
+                    onPointerMove: (event) =>
+                        _handleReadingPointerMove(event, width),
+                    onPointerUp: (event) =>
+                        _handleReadingPointerUp(event, width),
+                    onPointerCancel: _handleReadingPointerCancel,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onHorizontalDragStart:
+                          _settings.readingMode != ReaderReadingMode.chapter
+                          ? null
+                          : _handleHorizontalDragStart,
+                      onHorizontalDragUpdate:
+                          _settings.readingMode != ReaderReadingMode.chapter
+                          ? null
+                          : (details) =>
+                                _handleHorizontalDragUpdate(details, width),
+                      onHorizontalDragEnd:
+                          _settings.readingMode != ReaderReadingMode.chapter
+                          ? null
+                          : (details) =>
+                                _handleHorizontalDragEnd(details, width),
+                      onHorizontalDragCancel:
+                          _settings.readingMode != ReaderReadingMode.chapter
+                          ? null
+                          : _handleHorizontalDragCancel,
+                      child: AnimatedContainer(
+                        duration: AppMotion.normal,
+                        curve: AppMotion.standard,
+                        color: themeColors.background,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            ClipRect(
+                              key: _readingSurfaceKey,
+                              child: Padding(
+                                padding: EdgeInsets.only(
+                                  left: contentInsets.left,
+                                  right: contentInsets.right,
+                                ),
+                                child: MediaQuery(
+                                  data: MediaQuery.of(
+                                    context,
+                                  ).copyWith(textScaler: TextScaler.noScaling),
+                                  child: _buildReadingModeView(
+                                    width: width,
+                                    height: readerHeight,
+                                    themeColors: themeColors,
+                                    fontFamily: fontFamily,
+                                    viewPadding: stableViewPadding,
+                                    horizontalPadding: horizontalPadding,
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                          if (_readingModeReloading)
-                            Positioned.fill(
-                              child: AbsorbPointer(
-                                child: ColoredBox(
-                                  color: themeColors.background,
+                            if (_readingModeReloading)
+                              Positioned.fill(
+                                child: AbsorbPointer(
+                                  child: ColoredBox(
+                                    color: themeColors.background,
+                                  ),
                                 ),
                               ),
-                            ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
 
             // ── Reading progress ─────────────────────
@@ -3730,67 +3904,74 @@ class _ReaderScreenState extends State<ReaderScreen>
                           border: Border(
                             bottom: BorderSide(
                               color: themeColors.border,
-                              width: 0.5,
+                              width: _readerChromeBorder,
                             ),
                           ),
                         ),
-                        child: Row(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            IconButton(
-                              onPressed: _closeReader,
-                              tooltip: '返回',
-                              icon: Icon(
-                                Icons.arrow_back_ios,
-                                color: themeColors.secondary,
-                              ),
-                            ),
-                            Expanded(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Text(
-                                    '当前章节 ${_chapterIndex + 1}/${_book.chapters.length}',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w500,
-                                      color: themeColors.secondary,
-                                    ),
+                            Row(
+                              key: _headerRowKey,
+                              children: [
+                                IconButton(
+                                  onPressed: _closeReader,
+                                  tooltip: '返回',
+                                  icon: Icon(
+                                    Icons.arrow_back_ios,
+                                    color: themeColors.secondary,
                                   ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    _epubLayout.formatChapterTitle(
-                                      _currentChapter.title,
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w600,
-                                      color: themeColors.text,
-                                    ),
-                                    textAlign: TextAlign.center,
+                                ),
+                                Expanded(
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Text(
+                                        '当前章节 ${_chapterIndex + 1}/${_book.chapters.length}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w500,
+                                          color: themeColors.secondary,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        _epubLayout.formatChapterTitle(
+                                          _currentChapter.title,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w600,
+                                          color: themeColors.text,
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    ],
                                   ),
-                                ],
-                              ),
+                                ),
+                                // Same 48 dp the back button occupies, so the
+                                // centered chapter title keeps its position.
+                                IconButton(
+                                  onPressed: _toggleBookmark,
+                                  tooltip: _currentPositionBookmarked
+                                      ? '删除此处书签'
+                                      : '在此处添加书签',
+                                  icon: Icon(
+                                    _currentPositionBookmarked
+                                        ? Icons.bookmark_rounded
+                                        : Icons.bookmark_border_rounded,
+                                    color: _currentPositionBookmarked
+                                        ? themeColors.accent
+                                        : themeColors.secondary,
+                                  ),
+                                ),
+                              ],
                             ),
-                            // Same 48 dp the back button occupies, so the
-                            // centered chapter title keeps its position.
-                            IconButton(
-                              onPressed: _toggleBookmark,
-                              tooltip: _currentPositionBookmarked
-                                  ? '删除此处书签'
-                                  : '在此处添加书签',
-                              icon: Icon(
-                                _currentPositionBookmarked
-                                    ? Icons.bookmark_rounded
-                                    : Icons.bookmark_border_rounded,
-                                color: _currentPositionBookmarked
-                                    ? themeColors.accent
-                                    : themeColors.secondary,
-                              ),
-                            ),
+                            SizedBox(height: _headerTextGap),
                           ],
                         ),
                       ),
@@ -3831,52 +4012,59 @@ class _ReaderScreenState extends State<ReaderScreen>
                           border: Border(
                             top: BorderSide(
                               color: themeColors.border,
-                              width: 0.5,
+                              width: _readerChromeBorder,
                             ),
                           ),
                         ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            _bottomBarButton(
-                              icon: Icons.list,
-                              label: '目录',
-                              subtitle:
-                                  '${_chapterIndex + 1}/${_book.chapters.length}',
-                              onTap: _showChapterList,
-                              color: themeColors.secondary,
-                            ),
-                            _bottomBarButton(
-                              icon: Icons.search_rounded,
-                              label: '搜索',
-                              subtitle: '全文',
-                              onTap: _showSearch,
-                              color: themeColors.secondary,
-                            ),
-                            _bottomBarButton(
-                              icon: Icons.bookmarks_outlined,
-                              label: '书签',
-                              subtitle: _bookmarks.isEmpty
-                                  ? '未添加'
-                                  : '${_bookmarks.length}',
-                              onTap: _showBookmarks,
-                              color: themeColors.secondary,
-                            ),
-                            if (_settings.readingMode ==
-                                ReaderReadingMode.chapter)
-                              _bottomBarButton(
-                                icon: Icons.edit_note_rounded,
-                                label: '编辑',
-                                subtitle: '当前章',
-                                onTap: _showChapterEditor,
-                                color: themeColors.secondary,
-                              ),
-                            _bottomBarButton(
-                              icon: Icons.text_fields,
-                              label: '设置',
-                              subtitle: '${_settings.fontSize.toInt()}pt',
-                              onTap: _showSettings,
-                              color: themeColors.secondary,
+                            SizedBox(height: _footerTextGap),
+                            Row(
+                              key: _footerRowKey,
+                              mainAxisAlignment: MainAxisAlignment.spaceAround,
+                              children: [
+                                _bottomBarButton(
+                                  icon: Icons.list,
+                                  label: '目录',
+                                  subtitle:
+                                      '${_chapterIndex + 1}/${_book.chapters.length}',
+                                  onTap: _showChapterList,
+                                  color: themeColors.secondary,
+                                ),
+                                _bottomBarButton(
+                                  icon: Icons.search_rounded,
+                                  label: '搜索',
+                                  subtitle: '全文',
+                                  onTap: _showSearch,
+                                  color: themeColors.secondary,
+                                ),
+                                _bottomBarButton(
+                                  icon: Icons.bookmarks_outlined,
+                                  label: '书签',
+                                  subtitle: _bookmarks.isEmpty
+                                      ? '未添加'
+                                      : '${_bookmarks.length}',
+                                  onTap: _showBookmarks,
+                                  color: themeColors.secondary,
+                                ),
+                                if (_settings.readingMode ==
+                                    ReaderReadingMode.chapter)
+                                  _bottomBarButton(
+                                    icon: Icons.edit_note_rounded,
+                                    label: '编辑',
+                                    subtitle: '当前章',
+                                    onTap: _showChapterEditor,
+                                    color: themeColors.secondary,
+                                  ),
+                                _bottomBarButton(
+                                  icon: Icons.text_fields,
+                                  label: '设置',
+                                  subtitle: '${_settings.fontSize.toInt()}pt',
+                                  onTap: _showSettings,
+                                  color: themeColors.secondary,
+                                ),
+                              ],
                             ),
                           ],
                         ),
