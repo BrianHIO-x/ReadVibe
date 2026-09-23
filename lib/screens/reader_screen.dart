@@ -100,8 +100,15 @@ class _ReaderScreenState extends State<ReaderScreen>
   String? _readerLoadError;
   Timer? _saveTimer;
   final _pageDragOffsetNotifier = ValueNotifier<double>(0);
+  // How far the curling leaf's corner has risen off its edge.
+  final _pageCurlLiftNotifier = ValueNotifier<double>(0);
+  late final Listenable _pageTurnPose = Listenable.merge([
+    _pageDragOffsetNotifier,
+    _pageCurlLiftNotifier,
+  ]);
   late final AnimationController _pageTurnController;
   Animation<double>? _pageTurnAnimation;
+  Animation<double>? _pageCurlLiftAnimation;
   double _pageDragOffset = 0;
   int? _pageDragTargetIndex;
   bool _commitPageTurnWhenSettled = false;
@@ -119,6 +126,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   Offset? _simulationTurnLastPosition;
   VelocityTracker? _simulationTurnVelocityTracker;
   bool _simulationTurnActive = false;
+  // Finger position that counts as zero drag once the touch slop is passed.
+  Offset? _simulationTurnAnchor;
+  PageCurlCorner _pageCurlCorner = PageCurlCorner.middle;
   final ReaderSelectionController _selectionController =
       ReaderSelectionController();
   final ReaderProgressController _progressController =
@@ -230,6 +240,8 @@ class _ReaderScreenState extends State<ReaderScreen>
           ..addListener(() {
             final animation = _pageTurnAnimation;
             if (animation == null) return;
+            final lift = _pageCurlLiftAnimation;
+            if (lift != null) _pageCurlLiftNotifier.value = lift.value;
             _setPageDragOffset(animation.value);
           });
     _loadInitialState();
@@ -941,6 +953,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _visibleProgressNotifier.dispose();
     _pageTurnController.dispose();
     _pageDragOffsetNotifier.dispose();
+    _pageCurlLiftNotifier.dispose();
     _selectionController.active.removeListener(
       _handleTextSelectionActivityChanged,
     );
@@ -1554,6 +1567,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _setPageDragOffset(double value) {
+    // A page lying flat has no lifted corner.
+    if (value == 0) _pageCurlLiftNotifier.value = 0;
     if (_pageDragOffset == value) return;
     _pageDragOffset = value;
     _pageDragOffsetNotifier.value = value;
@@ -2353,7 +2368,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  void _handleReadingPointerMove(PointerMoveEvent event, double width) {
+  void _handleReadingPointerMove(
+    PointerMoveEvent event,
+    double width,
+    double height,
+  ) {
     if (_selectionController.active.value) {
       if (event.pointer == _readingTapPointer) _readingTapMoved = true;
       if (event.pointer == _simulationTurnPointer) {
@@ -2370,25 +2389,42 @@ class _ReaderScreenState extends State<ReaderScreen>
       final lastPosition = _simulationTurnLastPosition;
       if (origin != null && lastPosition != null) {
         final travel = event.localPosition - origin;
+        // A curl may be pulled diagonally off a corner. A slide turns only
+        // on mostly horizontal drags.
+        final steepness = _turnsWithPageCurl ? 0.5 : 1.15;
         if (!_simulationTurnActive &&
             travel.dx.abs() >= 9 &&
-            travel.dx.abs() > travel.dy.abs() * 1.15) {
+            travel.dx.abs() > travel.dy.abs() * steepness) {
           _simulationTurnActive = true;
           _readingTapMoved = true;
           _beginHorizontalPageTurn();
           // Drop the touch-slop dead zone from the first delta. Applying the
           // full travel would teleport the leaf past the slop distance while
           // the finger has effectively not moved yet.
-          _updateHorizontalPageTurn(
-            deltaX: travel.dx - 9 * travel.dx.sign,
-            width: width,
-          );
+          _simulationTurnAnchor = origin + Offset(9 * travel.dx.sign, 0);
+          _pageCurlCorner = origin.dy * 3 < height
+              ? PageCurlCorner.top
+              : origin.dy * 3 > height * 2
+              ? PageCurlCorner.bottom
+              : PageCurlCorner.middle;
+          if (_turnsWithPageCurl) {
+            _updateSimulationCurl(event.localPosition, width, height);
+          } else {
+            _updateHorizontalPageTurn(
+              deltaX: travel.dx - 9 * travel.dx.sign,
+              width: width,
+            );
+          }
         } else if (_simulationTurnActive) {
           _readingTapMoved = true;
-          _updateHorizontalPageTurn(
-            deltaX: event.localPosition.dx - lastPosition.dx,
-            width: width,
-          );
+          if (_turnsWithPageCurl) {
+            _updateSimulationCurl(event.localPosition, width, height);
+          } else {
+            _updateHorizontalPageTurn(
+              deltaX: event.localPosition.dx - lastPosition.dx,
+              width: width,
+            );
+          }
         }
       }
       _simulationTurnLastPosition = event.localPosition;
@@ -2442,6 +2478,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _clearSimulationTurnPointer() {
     _simulationTurnPointer = null;
     _simulationTurnOrigin = null;
+    _simulationTurnAnchor = null;
     _simulationTurnLastPosition = null;
     _simulationTurnVelocityTracker = null;
     _simulationTurnActive = false;
@@ -2527,19 +2564,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     final proposed = (_pageDragOffset + deltaX).clamp(-width, width);
 
     if (_settings.readingMode == ReaderReadingMode.simulation) {
-      final goingNext = proposed < 0;
-      final target = proposed == 0
-          ? null
-          : _simulationTargetForDirection(goingNext: goingNext);
-      if (target == null) {
-        _replaceSimulationPageTarget(null);
-        _setPageDragOffset(proposed * 0.14);
-        return;
-      }
-      _replaceSimulationPageTarget(target, hideOverlay: true);
-      _setPageDragOffset(
-        goingNext ? proposed.clamp(-width, 0.0) : proposed.clamp(0.0, width),
-      );
+      final offset = _resolveSimulationDrag(proposed, width);
+      if (offset != null) _setPageDragOffset(offset);
       return;
     }
 
@@ -2562,6 +2588,71 @@ class _ReaderScreenState extends State<ReaderScreen>
     _setPageDragOffset(
       goingNext ? proposed.clamp(-width, 0.0) : proposed.clamp(0.0, width),
     );
+  }
+
+  bool get _turnsWithPageCurl =>
+      _settings.readingMode == ReaderReadingMode.simulation &&
+      _settings.simulationPageTurnEffect == SimulationPageTurnEffect.simulation;
+
+  /// Picks the page a simulation drag of [proposed] reveals and returns the
+  /// offset the leaf should take. Returns null at the book's ends, where the
+  /// drag only rubber-bands.
+  double? _resolveSimulationDrag(double proposed, double width) {
+    final goingNext = proposed < 0;
+    final target = proposed == 0
+        ? null
+        : _simulationTargetForDirection(goingNext: goingNext);
+    if (target == null) {
+      _replaceSimulationPageTarget(null);
+      _setPageDragOffset(proposed * 0.14);
+      return null;
+    }
+    _replaceSimulationPageTarget(target, hideOverlay: true);
+    return goingNext
+        ? proposed.clamp(-width, 0.0).toDouble()
+        : proposed.clamp(0.0, width).toDouble();
+  }
+
+  /// Moves a curling leaf with the finger at [position], in the reading
+  /// surface's coordinates.
+  void _updateSimulationCurl(Offset position, double width, double height) {
+    final anchor = _simulationTurnAnchor;
+    if (anchor == null || width <= 0 || height <= 0) return;
+    if (_pageTurnSnapshot == null) unawaited(_capturePageTurnSnapshot());
+    final proposed = (position.dx - anchor.dx).clamp(-width, width).toDouble();
+    final resolved = _resolveSimulationDrag(proposed, width);
+    if (resolved == null || resolved >= 0) {
+      // Backward turns bring the previous leaf back on an upright fold.
+      _pageCurlLiftNotifier.value = 0;
+      if (resolved != null) _setPageDragOffset(resolved);
+      return;
+    }
+    final inset = _readerViewPadding.left;
+    // The corner leaves its edge at twice the finger's pace. Once it has
+    // caught up with the finger it stays under it.
+    final offset = math
+        .max(resolved, (position.dx - inset - width) / 2)
+        .clamp(-width, 0.0)
+        .toDouble();
+    var lift = 0.0;
+    final corner = _pageCurlCorner;
+    if (corner != PageCurlCorner.middle) {
+      final cornerY = corner == PageCurlCorner.top ? 0.0 : height;
+      final gap = width - (anchor.dx - inset);
+      // Vertical movement carries over from the start. The corner's height
+      // converges on the finger as the corner closes the horizontal gap.
+      final attached = gap <= 1
+          ? 1.0
+          : (-resolved / gap).clamp(0.0, 1.0).toDouble();
+      lift = PageCurlGeometry.constrainLift(
+        position.dy - anchor.dy + (anchor.dy - cornerY) * attached,
+        corner: corner,
+        travel: -2 * offset,
+        size: Size(width, height),
+      );
+    }
+    _pageCurlLiftNotifier.value = lift;
+    _setPageDragOffset(offset);
   }
 
   int? _targetIndexForOffset(double offset) {
@@ -2774,13 +2865,19 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageTurnController.reset();
     _commitPageTurnWhenSettled = commit;
     final serial = ++_pageTurnSerial;
-    _pageTurnAnimation = Tween<double>(begin: _pageDragOffset, end: endOffset)
-        .animate(
-          CurvedAnimation(
-            parent: _pageTurnController,
-            curve: AppMotion.standard,
-          ),
-        );
+    final curve = CurvedAnimation(
+      parent: _pageTurnController,
+      curve: AppMotion.standard,
+    );
+    _pageTurnAnimation = Tween<double>(
+      begin: _pageDragOffset,
+      end: endOffset,
+    ).animate(curve);
+    // The corner settles back onto its edge as the leaf lands on either side.
+    final lift = _pageCurlLiftNotifier.value;
+    _pageCurlLiftAnimation = lift == 0
+        ? null
+        : Tween<double>(begin: lift, end: 0).animate(curve);
     _pageTurnController.forward().then((_) {
       if (!mounted || serial != _pageTurnSerial) return;
       if (_commitPageTurnWhenSettled && simulationTarget != null) {
@@ -3790,7 +3887,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                     behavior: HitTestBehavior.opaque,
                     onPointerDown: _handleReadingPointerDown,
                     onPointerMove: (event) =>
-                        _handleReadingPointerMove(event, width),
+                        _handleReadingPointerMove(event, width, readerHeight),
                     onPointerUp: (event) =>
                         _handleReadingPointerUp(event, width),
                     onPointerCancel: _handleReadingPointerCancel,
@@ -4432,13 +4529,17 @@ class _ReaderScreenState extends State<ReaderScreen>
       );
     }
 
-    return ValueListenableBuilder<double>(
-      valueListenable: _pageDragOffsetNotifier,
-      builder: (context, offset, _) {
+    return ListenableBuilder(
+      listenable: _pageTurnPose,
+      builder: (context, _) {
+        final offset = _pageDragOffsetNotifier.value;
         return switch (_settings.simulationPageTurnEffect) {
-          SimulationPageTurnEffect.simulation => StraightBookTurnPages(
+          SimulationPageTurnEffect.simulation => CurlBookTurnPages(
             width: width,
+            height: height,
             dragOffset: offset,
+            curlLift: _pageCurlLiftNotifier.value,
+            curlCorner: _pageCurlCorner,
             currentPage: currentPage,
             previousPage: previousPage,
             nextPage: nextPage,

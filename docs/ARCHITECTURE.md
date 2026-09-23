@@ -237,7 +237,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | 文件 | 作用 |
 |---|---|
 | `library_screen.dart` | 书架页。书架网格与拖动排序区在底部留出系统手势条高度，内容滚动到手势条之下。经三个可注入依赖（仓库、更新器、导出器）初始化门面服务；负责书籍装载与串号保护、文件选择导入、外部来书导入、开书（含封面截屏快照与书香开页路由）、长按动作面板（改名/排序/删除/导出）、按宽度推导列数的响应式书架与同规格拖动排序网格（`_shelfMetrics` 为两者唯一来源）、搜索与筛选、维护调度、更新检查（3 秒后台静默检查、 dismissed 三天静默）与全局设置侧栏、四种空态（无书/无结果/导入中/打开中）与入场动画。导入按钮显示当前步骤与保存百分比；导入被“静默看门狗”看管，连续 100 秒没有任何进度回报即以中文提示结束等待并恢复书架，长书只要还在推进就不会被打断。 |
-| `reader_screen.dart` | 文字阅读页（核心）。三种阅读模式：分章（横滑切章、可编辑）、滚动（跨章连续）、仿真（整页分页、仿真/平滑翻页）。职责涵盖：设置装载与防抖持久化（键盘瞬时内嵌不触发重排）、阅读进度记录与恢复（文字锚点与偏移多通道）、书签与笔记（顶栏开关、列表面板、选区写笔记、锚点跳转，开关状态缓存以免每帧重排版）、EPUB 站内链接与脚注就地展开、目录/搜索/书签/编辑/设置五面板联动、翻页拖拽手势与速度惯性、相邻页与相邻章预热渲染、顶部进度条与沉浸式系统栏、阅读菜单边缘对齐行界（展开时遍历可见 `RenderParagraph` 找出被顶栏或底栏切开的行，用栏内留白补到行边界，仿真页按 strut 行盒计算，滚动停止后重算）、字体加载回退、Epub 排版委托与保活保留选区等。状态编排分散于五个 controller，滚动控制器重建与预加载缓存集中在本 State。 |
+| `reader_screen.dart` | 文字阅读页（核心）。三种阅读模式：分章（横滑切章、可编辑）、滚动（跨章连续）、仿真（整页分页、仿真/平滑翻页）。职责涵盖：设置装载与防抖持久化（键盘瞬时内嵌不触发重排）、阅读进度记录与恢复（文字锚点与偏移多通道）、书签与笔记（顶栏开关、列表面板、选区写笔记、锚点跳转，开关状态缓存以免每帧重排版）、EPUB 站内链接与脚注就地展开、目录/搜索/书签/编辑/设置五面板联动、翻页拖拽手势与速度惯性、仿真卷页的页角跟随（页角按起手高度选定，先以两倍速度追上手指，再停在指尖下方）、相邻页与相邻章预热渲染、顶部进度条与沉浸式系统栏、阅读菜单边缘对齐行界（展开时遍历可见 `RenderParagraph` 找出被顶栏或底栏切开的行，用栏内留白补到行边界，仿真页按 strut 行盒计算，滚动停止后重算）、字体加载回退、Epub 排版委托与保活保留选区等。状态编排分散于五个 controller，滚动控制器重建与预加载缓存集中在本 State。 |
 | `pdf_reader_screen.dart` | PDF 阅读页。加载进度、书签、笔记、显示主题与内嵌批注五源合并；`PageView` 翻页配双指缩放（缩放页横向拖动锁定为平移）、进度滑杆、跳页对话框、书签笔记列表、大纲（缩进层级）、双通道搜索（文件文本或逐页 OCR，OCR 结果做空白规范化）、本页文字面板（优先文字层、缺失时回退 OCR）、显示主题切换与源文件丢失兜底删除；渲染任务按 `页:宽度` 去重并限在途 18 个。 |
 
 ### lib/screens/reader/
@@ -245,7 +245,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | 文件 | 作用 |
 |---|---|
 | `reader_epub_layout.dart` | EPUB 排版引擎。测量（按基行数取整的块高）、锚点映射（标题优先的章内定位）、渲染（富文本块到 Widget：安全对比度前景色、混合出版商背景、图片高度钳制与替代文本兜底）；含链接的块改由 `_EpubLinkedText` 有状态渲染，它持有并释放 `TapGestureRecognizer`，测量路径不生成识别器；行高基准由仿真模式下注入的函数解析，与用户的字体设置联乘。 |
-| `reader_pagination_support.dart` | 分页与翻页支持（16 类）。`SimulationLayoutSignature` 判定布局参数变化；`ExactScrollExtentSliverChildBuilderDelegate` 把未知章尾的滚动估值锁到精确页高，避免最后页“回跳”；`FullViewportPagingScrollController` 把滚动范围补齐整页（补尾空白纸）；`SelectionAwareScrollController` 在选区存在时保持滚动位置不丢失；`ReadingTextAnchor`/`ScrollSnapshot` 描述恢复锚点；`SmoothTurnPages` 与 `StraightBookTurnPages` 分别实现位移翻页与直页书翻页（含页叶裁剪 `_StraightLeafFrontClipper`、背面绘制 `StraightPaperPainter` 与 `StraightLeafGeometry` 翻页几何）。 |
+| `reader_pagination_support.dart` | 分页与翻页支持（15 类）。`SimulationLayoutSignature` 判定布局参数变化；`ExactScrollExtentSliverChildBuilderDelegate` 把未知章尾的滚动估值锁到精确页高，避免最后页“回跳”；`FullViewportPagingScrollController` 把滚动范围补齐整页（补尾空白纸）；`SelectionAwareScrollController` 在选区存在时保持滚动位置不丢失；`ReadingTextAnchor`/`ScrollSnapshot` 描述恢复锚点；`SmoothTurnPages` 与 `CurlBookTurnPages` 分别实现位移翻页，以及跟随手指卷起页角的仿真翻页。卷页几何 `PageCurlGeometry` 在折痕坐标系中构造平铺正面、纸背与下层页三块区域，并按带宽裁剪来避开竖直折痕的无穷远控制点。`PageCurlClipper` 负责裁出平铺正面与纸背，供页面和镜像背面使用。`PageCurlPainter` 在底层绘制下层阴影与纸色，再在顶层叠上卷曲高光。 |
 | `reader_layout_cache.dart` | 阅读会话缓存。以章节序号（而非 Chapter 对象）为键缓存段落与测量高度，容量受章节数与字符数双上限约束；正文变化整体失效，排版与宽度签名单独失效已测高度。 |
 | `reader_selection_support.dart` | 文字选区组件。`ReaderSelectionArea` 包裹正文并为长按/双击选区定制工具栏：折叠或超界时换到安全位置，菜单提供复制、分享、全选与六个受控翻译/搜索目标（AI 图标置入，记住默认目标可勾选），选择“记住”后下次直达；边缘拖选经 `ReaderSelectionEdgeScroller` 协同，模态打开即挂起选区。 |
 | `reader_selection_edge_scroller.dart` | 边缘拖选自动滚动。手柄或拖选位置进入上下 56px 边缘带时，以 Ticker 驱动最高 420px/s 的速度滚动；由选区状态启动停止、按键与机型顶栏变化重算夹持，`_EdgeSelectionDelegate` 替换 SelectionArea 的默认边缘行为。 |

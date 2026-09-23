@@ -445,9 +445,16 @@ class SmoothTurnPages extends StatelessWidget {
   }
 }
 
-class StraightBookTurnPages extends StatelessWidget {
+/// Where a simulated turn lifts the leaf. The middle band folds the page
+/// upright from its bottom corner.
+enum PageCurlCorner { top, bottom, middle }
+
+class CurlBookTurnPages extends StatelessWidget {
   final double width;
+  final double height;
   final double dragOffset;
+  final double curlLift;
+  final PageCurlCorner curlCorner;
   final Widget currentPage;
   final Widget? previousPage;
   final Widget? nextPage;
@@ -458,10 +465,13 @@ class StraightBookTurnPages extends StatelessWidget {
   final ui.Image? pageTurnSnapshot;
   final ui.Image? reversePageTurnSnapshot;
 
-  const StraightBookTurnPages({
+  const CurlBookTurnPages({
     super.key,
     required this.width,
+    required this.height,
     required this.dragOffset,
+    required this.curlLift,
+    required this.curlCorner,
     required this.currentPage,
     required this.previousPage,
     required this.nextPage,
@@ -490,10 +500,11 @@ class StraightBookTurnPages extends StatelessWidget {
       );
     }
     final resolvedTargetPage = targetPage;
-    final leafProgress = goingNext ? progress : 1 - progress;
-    final geometry = StraightLeafGeometry.calculate(
-      size: Size(width, 1),
-      progress: leafProgress,
+    final geometry = PageCurlGeometry.forDrag(
+      size: Size(width, height),
+      dragOffset: dragOffset,
+      corner: curlCorner,
+      lift: curlLift,
     );
     final movingPage = goingNext ? currentPage : resolvedTargetPage;
     final paperBackSnapshot = goingNext
@@ -536,30 +547,37 @@ class StraightBookTurnPages extends StatelessWidget {
                 : 'physical-reversed-forward-sheet',
           ),
           child: ClipPath(
-            clipper: StraightLeafFrontClipper(progress: leafProgress),
+            clipper: PageCurlClipper(
+              geometry: geometry,
+              region: PageCurlRegion.front,
+            ),
             child: goingNext ? movingPage : _inactivePage(movingPage),
           ),
         ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: CustomPaint(
-              painter: StraightPaperPainter(
-                progress: leafProgress,
-                pageColor: themeColors.background,
-                layer: StraightPaperPaintLayer.base,
+        if (geometry != null) ...[
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: PageCurlPainter(
+                  geometry: geometry,
+                  pageColor: themeColors.background,
+                  layer: PageCurlPaintLayer.base,
+                ),
               ),
             ),
           ),
-        ),
-        if (paperBackSource != null)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: ClipPath(
-                clipper: StraightLeafBackClipper(progress: leafProgress),
-                child: Transform.translate(
-                  offset: Offset(geometry.creaseX * 2 - width, 0),
-                  child: Transform.flip(
-                    flipX: true,
+          if (paperBackSource != null)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: ClipPath(
+                  clipper: PageCurlClipper(
+                    geometry: geometry,
+                    region: PageCurlRegion.back,
+                  ),
+                  // The back shows the leaf's own print mirrored across the
+                  // fold, faint as ink seen through paper.
+                  child: Transform(
+                    transform: geometry.backTransform,
                     child: Opacity(
                       opacity: inkTransmission,
                       child: _inactivePage(paperBackSource),
@@ -568,18 +586,18 @@ class StraightBookTurnPages extends StatelessWidget {
                 ),
               ),
             ),
-          ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: CustomPaint(
-              painter: StraightPaperPainter(
-                progress: leafProgress,
-                pageColor: themeColors.background,
-                layer: StraightPaperPaintLayer.lighting,
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: PageCurlPainter(
+                  geometry: geometry,
+                  pageColor: themeColors.background,
+                  layer: PageCurlPaintLayer.lighting,
+                ),
               ),
             ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -589,45 +607,43 @@ Widget _inactivePage(Widget child) {
   return ExcludeSemantics(child: IgnorePointer(child: child));
 }
 
-enum StraightPaperPaintLayer { base, lighting }
+enum PageCurlRegion { front, back }
 
-class StraightLeafFrontClipper extends CustomClipper<Path> {
-  final double progress;
+class PageCurlClipper extends CustomClipper<Path> {
+  final PageCurlGeometry? geometry;
+  final PageCurlRegion region;
 
-  const StraightLeafFrontClipper({required this.progress});
-
-  @override
-  Path getClip(Size size) =>
-      StraightLeafGeometry.calculate(size: size, progress: progress).frontPath;
+  const PageCurlClipper({required this.geometry, required this.region});
 
   @override
-  bool shouldReclip(covariant StraightLeafFrontClipper oldClipper) {
-    return oldClipper.progress != progress;
+  Path getClip(Size size) {
+    final geometry = this.geometry;
+    if (geometry == null) {
+      return region == PageCurlRegion.front
+          ? (Path()..addRect(Offset.zero & size))
+          : Path();
+    }
+    return region == PageCurlRegion.front
+        ? geometry.frontPath
+        : geometry.backPath;
+  }
+
+  @override
+  bool shouldReclip(covariant PageCurlClipper oldClipper) {
+    return !identical(oldClipper.geometry, geometry) ||
+        oldClipper.region != region;
   }
 }
 
-class StraightLeafBackClipper extends CustomClipper<Path> {
-  final double progress;
+enum PageCurlPaintLayer { base, lighting }
 
-  const StraightLeafBackClipper({required this.progress});
-
-  @override
-  Path getClip(Size size) =>
-      StraightLeafGeometry.calculate(size: size, progress: progress).backPath;
-
-  @override
-  bool shouldReclip(covariant StraightLeafBackClipper oldClipper) {
-    return oldClipper.progress != progress;
-  }
-}
-
-class StraightPaperPainter extends CustomPainter {
-  final double progress;
+class PageCurlPainter extends CustomPainter {
+  final PageCurlGeometry geometry;
   final Color pageColor;
-  final StraightPaperPaintLayer layer;
+  final PageCurlPaintLayer layer;
 
-  const StraightPaperPainter({
-    required this.progress,
+  const PageCurlPainter({
+    required this.geometry,
     required this.pageColor,
     required this.layer,
   });
@@ -635,117 +651,283 @@ class StraightPaperPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (size.isEmpty) return;
-    final p = progress.clamp(0.0, 1.0).toDouble();
-    if (p <= 0 || p >= 1) return;
-    final geometry = StraightLeafGeometry.calculate(size: size, progress: p);
-    final strength = geometry.foldStrength;
-    final visibleBounds = geometry.backPath.getBounds().intersect(
-      Offset.zero & size,
-    );
-    if (visibleBounds.width <= 0.1) return;
-
-    final isDarkPage = pageColor.computeLuminance() < 0.25;
-    if (layer == StraightPaperPaintLayer.base) {
-      canvas.drawShadow(
-        geometry.backPath,
-        Colors.black.withValues(alpha: 0.30 * strength),
-        12 + 8 * strength,
-        false,
-      );
+    final curl = geometry;
+    final strength = curl.strength;
+    final crest = curl.pointAt(PageCurlGeometry.crest);
+    canvas
+      ..save()
+      ..clipRect(Offset.zero & size);
+    if (layer == PageCurlPaintLayer.base) {
+      // The rolled paper shades the page it uncovers, darkest at the roll.
+      final shadeWidth = (curl.reach * 0.2).clamp(6.0, 72.0).toDouble();
+      canvas
+        ..save()
+        ..clipPath(curl.underPath)
+        ..drawPaint(
+          Paint()
+            ..shader =
+                ui.Gradient.linear(crest, crest - curl.direction * shadeWidth, [
+                  Colors.black.withValues(alpha: 0.32 * strength),
+                  Colors.black.withValues(alpha: 0),
+                ]),
+        )
+        ..restore();
+      // The lifted flap casts a soft shadow onto the part still lying flat.
+      canvas
+        ..save()
+        ..clipPath(curl.frontPath)
+        ..drawPath(
+          curl.backPath.shift(curl.direction * 2),
+          Paint()
+            ..color = Colors.black.withValues(alpha: 0.26 * strength)
+            ..maskFilter = MaskFilter.blur(BlurStyle.normal, 3 + 5 * strength),
+        )
+        ..restore();
+      final isDarkPage = pageColor.computeLuminance() < 0.25;
       final paper = Color.lerp(
         pageColor,
         Colors.white,
         isDarkPage ? 0.02 : 0.045,
       )!;
-      canvas.drawPath(geometry.backPath, Paint()..color = paper);
-      return;
+      canvas.drawPath(curl.backPath, Paint()..color = paper);
+    } else {
+      canvas
+        ..save()
+        ..clipPath(curl.backPath)
+        ..drawPaint(
+          Paint()
+            ..shader = ui.Gradient.linear(
+              crest,
+              curl.pointAt(1),
+              [
+                Colors.black.withValues(alpha: 0.16 * strength),
+                Colors.white.withValues(alpha: 0.12 * strength),
+                Colors.white.withValues(alpha: 0),
+                Colors.black.withValues(alpha: 0.10 * strength),
+              ],
+              const [0, 0.14, 0.55, 1],
+            ),
+        )
+        ..restore();
     }
-
-    final lighting = LinearGradient(
-      colors: [
-        Colors.black.withValues(alpha: 0.10 * strength),
-        Colors.white.withValues(alpha: 0.11 * strength),
-        Colors.transparent,
-        Colors.black.withValues(alpha: 0.14 * strength),
-      ],
-      stops: const [0, 0.22, 0.70, 1],
-    ).createShader(visibleBounds);
-    canvas
-      ..save()
-      ..clipPath(geometry.backPath)
-      ..drawRect(visibleBounds, Paint()..shader = lighting)
-      ..restore();
-
-    canvas.drawLine(
-      Offset(geometry.outerEdgeX, 0),
-      Offset(geometry.outerEdgeX, size.height),
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.20 * strength)
-        ..strokeWidth = 1.25,
-    );
-    canvas.drawLine(
-      Offset(geometry.creaseX, 0),
-      Offset(geometry.creaseX, size.height),
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.18 * strength)
-        ..strokeWidth = 2
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.8),
-    );
-    canvas.drawLine(
-      Offset(geometry.creaseX - 0.75, 0),
-      Offset(geometry.creaseX - 0.75, size.height),
-      Paint()
-        ..color = Colors.white.withValues(alpha: 0.32 * strength)
-        ..strokeWidth = 1,
-    );
+    canvas.restore();
   }
 
   @override
-  bool shouldRepaint(covariant StraightPaperPainter oldDelegate) {
-    return oldDelegate.progress != progress ||
+  bool shouldRepaint(covariant PageCurlPainter oldDelegate) {
+    return !identical(oldDelegate.geometry, geometry) ||
         oldDelegate.pageColor != pageColor ||
         oldDelegate.layer != layer;
   }
 }
 
-class StraightLeafGeometry {
-  final Path frontPath;
-  final Path backPath;
-  final double creaseX;
-  final double outerEdgeX;
-  final double foldStrength;
+/// A leaf lifted by one corner and rolled back over itself.
+///
+/// The fold is the perpendicular bisector between the corner and the lifted
+/// tip. Each flank of the roll is a quadratic curve from the page edge to the
+/// flap's side. In fold coordinates, with `s` measured from the corner toward
+/// the tip and `t` along the fold, both flanks trace the same parabola whose
+/// vertex sits at [crest] of the reach. The regions are built in that frame
+/// and cut to a band around the page, so an upright fold never produces the
+/// far-away control points the page-space construction needs.
+class PageCurlGeometry {
+  /// Where the roll's crest sits, as a fraction of the corner-to-tip reach.
+  static const double crest = 0.625;
+  static const double _far = 1e9;
+  static const int _flankSegments = 12;
 
-  const StraightLeafGeometry({
+  /// The part of the turning page still lying flat.
+  final Path frontPath;
+
+  /// The leaf's back where it has rolled over the page.
+  final Path backPath;
+
+  /// The page underneath, uncovered between the corner and the roll.
+  final Path underPath;
+
+  /// Mirrors the turning page across the fold onto its own back.
+  final Matrix4 backTransform;
+  final Offset corner;
+
+  /// Unit vector from the corner toward the lifted tip.
+  final Offset direction;
+  final double reach;
+
+  const PageCurlGeometry._({
     required this.frontPath,
     required this.backPath,
-    required this.creaseX,
-    required this.outerEdgeX,
-    required this.foldStrength,
+    required this.underPath,
+    required this.backTransform,
+    required this.corner,
+    required this.direction,
+    required this.reach,
   });
 
-  static StraightLeafGeometry calculate({
+  /// Eases shadows in while the lift is still shallow.
+  double get strength => (reach / 36).clamp(0.0, 1.0).toDouble();
+
+  Offset pointAt(double fraction) => corner + direction * (reach * fraction);
+
+  /// The pose for a horizontal drag. A forward turn carries the corner twice
+  /// as far as the drag, so the fold tracks the finger. A backward turn
+  /// returns the previous leaf upright with the roll's crest at the drag.
+  static PageCurlGeometry? forDrag({
     required Size size,
-    required double progress,
+    required double dragOffset,
+    required PageCurlCorner corner,
+    required double lift,
   }) {
-    final p = progress.clamp(0.0, 1.0).toDouble();
-    final creaseX = size.width * (1 - p);
-    final outerEdgeX = creaseX * 2 - size.width;
-    final front = Path()..addRect(Rect.fromLTRB(0, 0, creaseX, size.height));
-    final back = Path()
-      ..addRect(
-        Rect.fromLTRB(
-          math.min(outerEdgeX, creaseX),
-          0,
-          math.max(outerEdgeX, creaseX),
-          size.height,
-        ),
+    final width = size.width;
+    if (dragOffset <= 0) {
+      final cornerY = corner == PageCurlCorner.top ? 0.0 : size.height;
+      return calculate(
+        size: size,
+        corner: corner,
+        touch: Offset(width + 2 * dragOffset, cornerY + lift),
       );
-    return StraightLeafGeometry(
-      frontPath: front,
-      backPath: back,
-      creaseX: creaseX,
-      outerEdgeX: outerEdgeX,
-      foldStrength: math.sin(math.pi * p).clamp(0.0, 1.0).toDouble(),
+    }
+    return calculate(
+      size: size,
+      corner: PageCurlCorner.middle,
+      touch: Offset(width - (width - dragOffset) / crest, size.height),
     );
+  }
+
+  /// Limits how far the corner may rise for a given horizontal [travel].
+  /// The leaf is bound at its left edge, so the roll must start on the page's
+  /// own top or bottom edge, and the tip stays within the page height.
+  static double constrainLift(
+    double lift, {
+    required PageCurlCorner corner,
+    required double travel,
+    required Size size,
+  }) {
+    if (corner == PageCurlCorner.middle) return 0;
+    // The roll meets that edge 0.75 * reach² / travel from the corner.
+    // Keeping it within the page width bounds reach² by travel * width / 0.75.
+    final bound = math.sqrt(
+      math.max(0.0, travel * (size.width / 0.75 - travel)),
+    );
+    final limit = math.min(bound, size.height);
+    return corner == PageCurlCorner.top
+        ? lift.clamp(0.0, limit).toDouble()
+        : lift.clamp(-limit, 0.0).toDouble();
+  }
+
+  static PageCurlGeometry? calculate({
+    required Size size,
+    required PageCurlCorner corner,
+    required Offset touch,
+  }) {
+    final width = size.width;
+    final height = size.height;
+    if (width <= 0 || height <= 0) return null;
+    final cornerPoint = Offset(
+      width,
+      corner == PageCurlCorner.top ? 0.0 : height,
+    );
+    final travel = (cornerPoint.dx - touch.dx).clamp(0.0, width * 2).toDouble();
+    final lift = constrainLift(
+      touch.dy - cornerPoint.dy,
+      corner: corner,
+      travel: travel,
+      size: size,
+    );
+    final reach = math.sqrt(travel * travel + lift * lift);
+    if (reach < 0.5) return null;
+    final along = Offset(-travel / reach, lift / reach);
+    final across = Offset(-along.dy, along.dx);
+
+    // Where the straight fold meets the page edge running from the corner
+    // in [edge], as a coordinate along the fold.
+    double foot(Offset edge) {
+      final towardTip = edge.dx * along.dx + edge.dy * along.dy;
+      final alongFold = edge.dx * across.dx + edge.dy * across.dy;
+      if (towardTip.abs() < 1e-9) return alongFold.sign * _far;
+      return reach / 2 * alongFold / towardTip;
+    }
+
+    final horizontalFoot = foot(const Offset(-1, 0));
+    final verticalFoot = foot(Offset(0, corner == PageCurlCorner.top ? 1 : -1));
+
+    void addFlank(List<Offset> points, double foot, double from, double to) {
+      for (var i = 0; i <= _flankSegments; i++) {
+        final w = from + (to - from) * i / _flankSegments;
+        points.add(Offset(reach * (crest + 0.5 * (w - 1) * (w - 1)), foot * w));
+      }
+    }
+
+    final curl = <Offset>[Offset.zero];
+    addFlank(curl, horizontalFoot, 1.5, 0.5);
+    curl.add(Offset(reach, 0));
+    addFlank(curl, verticalFoot, 0.5, 1.5);
+
+    final back = <Offset>[];
+    addFlank(back, horizontalFoot, 1, 0.5);
+    back.add(Offset(reach, 0));
+    addFlank(back, verticalFoot, 0.5, 1);
+
+    final under = <Offset>[Offset.zero];
+    addFlank(under, horizontalFoot, 1.5, 1);
+    addFlank(under, verticalFoot, 1, 1.5);
+
+    final band = (width + height) * 2;
+    List<Offset> onPage(List<Offset> foldPoints) => [
+      for (final point in _clipBand(foldPoints, band))
+        cornerPoint + along * point.dx + across * point.dy,
+    ];
+
+    final curlPoints = onPage(curl);
+    final frontPath = Path()
+      ..fillType = PathFillType.evenOdd
+      ..addRect(Offset.zero & size)
+      ..addPolygon(curlPoints, true);
+
+    // Reflection across the fold: p' = p - 2((p - m) . u) u, with m on the
+    // fold. Its determinant is -1, which mirrors the print.
+    final foldDistance =
+        cornerPoint.dx * along.dx + cornerPoint.dy * along.dy + reach / 2;
+    final backTransform = Matrix4.identity()
+      ..setEntry(0, 0, 1 - 2 * along.dx * along.dx)
+      ..setEntry(0, 1, -2 * along.dx * along.dy)
+      ..setEntry(1, 0, -2 * along.dx * along.dy)
+      ..setEntry(1, 1, 1 - 2 * along.dy * along.dy)
+      ..setEntry(0, 3, 2 * foldDistance * along.dx)
+      ..setEntry(1, 3, 2 * foldDistance * along.dy);
+
+    return PageCurlGeometry._(
+      frontPath: frontPath,
+      backPath: Path()..addPolygon(onPage(back), true),
+      underPath: Path()..addPolygon(onPage(under), true),
+      backTransform: backTransform,
+      corner: cornerPoint,
+      direction: along,
+      reach: reach,
+    );
+  }
+
+  static List<Offset> _clipBand(List<Offset> polygon, double limit) {
+    return _clipHalf(_clipHalf(polygon, limit), -limit);
+  }
+
+  /// Keeps the part of [polygon] on the near side of the line `y = edge`:
+  /// below it for a positive edge, above it for a negative one.
+  static List<Offset> _clipHalf(List<Offset> polygon, double edge) {
+    if (polygon.isEmpty) return polygon;
+    bool inside(Offset point) => edge > 0 ? point.dy <= edge : point.dy >= edge;
+    final clipped = <Offset>[];
+    var previous = polygon.last;
+    var previousInside = inside(previous);
+    for (final point in polygon) {
+      final pointInside = inside(point);
+      if (pointInside != previousInside) {
+        final t = (edge - previous.dy) / (point.dy - previous.dy);
+        clipped.add(Offset(previous.dx + (point.dx - previous.dx) * t, edge));
+      }
+      if (pointInside) clipped.add(point);
+      previous = point;
+      previousInside = pointInside;
+    }
+    return clipped;
   }
 }
