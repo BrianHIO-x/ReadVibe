@@ -220,7 +220,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `app_popup_menu.dart` | 主题化弹出菜单。`AppPopupMenuButton` 自行计算锚点矩形后调用 `showMenu`，限定宽度并绘制选中态（勾选图标与强调底色）；可选的 `menuRightInset` 把菜单右缘钉在距屏幕右边固定距离处，用于与下方内容列对齐；`AppMenuEntry` 携带值、标签、图标与选中标记。 |
 | `pressable_scale.dart` | 纯视觉按压缩放反馈。用 Listener 监听原始指针事件，不注册手势识别器，可包裹 InkWell/按钮而不劫持点击；禁用态自动复位。 |
 | `book_card.dart` | 书架书卡。封面区域复现背景书脊与渐变遮罩（三明治分层供开书动画采样），显示封面图或首字占位；以章节进度与章内进度折算整体百分比，PDF 显示页数口径；可用性受损时角标提示丢失原因；语义化拼接无障碍标签。 |
-| `chapter_list.dart` | 全屏目录面板。列表底部按系统手势条高度补白，章节行可滚动至手势条之下。`_TocDirectory` 把章节组织为两级卷目录（卷标题聚合、导语类与卷间散章分区），无卷则退化为平铺列表；卷头为 pinned 固定头可折叠并回传展开状态；行尾显示逐章字数（监听 `chapterWordCounts`）；打开时按当前章定位可见行并保持卷头可见。 |
+| `chapter_list.dart` | 全屏目录面板。列表底部按系统手势条高度补白，章节行可滚动至手势条之下。`_TocDirectory` 把章节组织为两级卷目录（卷标题聚合、导语类与卷间散章分区），无卷则退化为平铺列表；卷头为 pinned 固定头可折叠并回传展开状态；行尾显示逐章字数（监听 `chapterWordCounts`）；章节行与卷头都使用固定行高，并随系统字号同步增大。打开目录或点“回到当前章”时，当前章节会按行高算出精确位置并居中显示。当前章位于展开的卷内时，居中只计算固定卷头下方的空间。 |
 | `chapter_editor_sheet.dart` | 章节编辑器。顶栏由关闭键、章节标题输入框、查找替换开关与保存按钮组成；正文框不自动聚焦，打开时按 `initialAnchorOffset` 把阅读所在行钉到视口顶部（读取 `RenderEditable` 的光标矩形，天然对齐整行）；查找替换面板在当前章内定位匹配，`_FindHighlightController` 直接在文本跨度上着色，因此未聚焦也能看到命中，支持上一个、下一个、单次替换与全部替换（上限 500 处）；深度处理 Android 系统栏：键盘弹出时恢复编辑区、路由非当前或退后台时暂停，并以 1.1 秒延时重试恢复；富文本章节保存前弹确认（本章转纯文本）；脏内容关闭时询问放弃；保存失败原样展示错误。 |
 | `reader_bookmark_sheet.dart` | 文字书书签列表面板。按正文顺序展示章节、摘录、笔记、章内百分比与时间；行尾菜单可补写笔记或删除。自身不做持久化，全部经回调交回阅读页，保证书签列表只有一个写入方。同文件的 `showReaderNoteDialog` 负责新建与编辑笔记，返回空串表示清除笔记但保留书签。 |
 | `pdf_page_text_sheet.dart` | PDF 单页文字面板。PDF 按位图渲染，页面本身无法承载选区；该面板把同一页的文字放进普通 `SelectionArea`，恢复复制、分享与系统文字动作，并标明来源是文字层还是识别结果，附带整页复制。 |
@@ -249,7 +249,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `reader_layout_cache.dart` | 阅读会话缓存。以章节序号（而非 Chapter 对象）为键缓存段落与测量高度，容量受章节数与字符数双上限约束；正文变化整体失效，排版与宽度签名单独失效已测高度。 |
 | `reader_selection_support.dart` | 文字选区组件。`ReaderSelectionArea` 包裹正文并为长按/双击选区定制工具栏：折叠或超界时换到安全位置，菜单提供复制、分享、全选与六个受控翻译/搜索目标（AI 图标置入，记住默认目标可勾选），选择“记住”后下次直达；边缘拖选经 `ReaderSelectionEdgeScroller` 协同，模态打开即挂起选区。 |
 | `reader_selection_edge_scroller.dart` | 边缘拖选自动滚动。手柄或拖选位置进入上下 56px 边缘带时，以 Ticker 驱动最高 420px/s 的速度滚动；由选区状态启动停止、按键与机型顶栏变化重算夹持，`_EdgeSelectionDelegate` 替换 SelectionArea 的默认边缘行为。 |
-| `reader_selectable_block.dart` | 保活选区块。实现 `SelectionRegistrar` 透传注册并监听所有子文本Selectable，被选中内容（含屏外端点）由 `AutomaticKeepAliveClientMixin` 保留，防止 sliver 回收导致选区断裂；取消选择即释放缓存。 |
+| `reader_selectable_block.dart` | 保活选区块。实现 `SelectionRegistrar` 透传注册并监听所有子文本Selectable，被选中内容（含屏外端点）由 `AutomaticKeepAliveClientMixin` 保留，防止 sliver 回收导致选区断裂；取消选择即释放缓存。它还负责绘制选区高亮，并把段落自带的高亮设为透明。选中的每一行会合并成一条色带，并以该行最宽的字体段作为高度。遇到回退字体渲染的标点时，色带也保持同一高度。 |
 
 ---
 

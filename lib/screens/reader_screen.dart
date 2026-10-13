@@ -4799,7 +4799,10 @@ class _ReaderScreenState extends State<ReaderScreen>
         padding: scrollViewPadding,
         semanticChildCount: itemCount,
         childrenDelegate: ExactScrollExtentSliverChildBuilderDelegate(
-          buildItem,
+          (context, index) => ReaderSelectableBlock(
+            retainSelection: false,
+            child: buildItem(context, index),
+          ),
           childCount: itemCount,
           exactScrollExtent: exactScrollExtent,
         ),

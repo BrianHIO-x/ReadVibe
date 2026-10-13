@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart' show ValueListenable, setEquals;
 import 'package:flutter/material.dart';
 
@@ -48,6 +50,9 @@ class ChapterListSheet extends StatefulWidget {
 class _ChapterListSheetState extends State<ChapterListSheet> {
   late Set<String> _collapsedGroupIds;
   bool _initialScrollScheduled = false;
+  // Every row has a fixed height, so the offset of any chapter is exact
+  // arithmetic instead of an estimate over rows that were never laid out.
+  late _TocExtents _extents;
   late _TocDirectory _directory;
   final _searchController = TextEditingController();
   String _query = '';
@@ -122,6 +127,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
 
   @override
   Widget build(BuildContext context) {
+    _extents = _TocExtents.of(context);
     if (_query.isEmpty) _scheduleInitialScroll(_directory);
 
     return AppSheetSurface(
@@ -231,7 +237,8 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
                   if (_query.isEmpty)
                     ..._buildDirectorySlivers(_directory)
                   else
-                    SliverList.builder(
+                    SliverFixedExtentList.builder(
+                      itemExtent: _extents.row,
                       itemCount: _searchResults.length,
                       itemBuilder: (_, index) =>
                           _buildChapterRow(_searchResults[index]),
@@ -257,7 +264,8 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
       if (direct.isEmpty) return;
       final indexes = direct;
       slivers.add(
-        SliverList.builder(
+        SliverFixedExtentList.builder(
+          itemExtent: _extents.row,
           itemCount: indexes.length,
           itemBuilder: (_, index) => _buildChapterRow(
             indexes[index],
@@ -288,11 +296,13 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
         SliverPersistentHeader(
           pinned: true,
           delegate: _TocVolumeHeaderDelegate(
+            extent: _extents.header,
             child: _buildVolumeRow(entry, expanded),
           ),
         ),
         if (expanded)
-          SliverList.builder(
+          SliverFixedExtentList.builder(
+            itemExtent: _extents.row,
             itemCount: entry.chapterIndexes.length,
             itemBuilder: (context, index) => _buildChapterRow(
               entry.chapterIndexes[index],
@@ -372,6 +382,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
       child: Material(
         color: Colors.transparent,
         child: ListTile(
+          minTileHeight: _extents.row,
           contentPadding: EdgeInsets.only(
             left: isTopLevel ? 20 : (volumeTitle == null ? 16 : 44),
             right: 20,
@@ -447,37 +458,59 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
     widget.onGroupExpansionChanged(groupId, expanded);
   }
 
+  /// Brings the current chapter to the middle of the list. A collapsed
+  /// volume shows its header in place of the chapter.
   void _scheduleInitialScroll(_TocDirectory directory) {
     if (_initialScrollScheduled) return;
     _initialScrollScheduled = true;
-    final rowIndex = directory.visibleRowForChapter(
+    final extents = _extents;
+    final rowTop = directory.offsetForChapter(
       widget.currentChapter,
       _collapsedGroupIds,
+      extents,
     );
-    final keepVolumeHeaderVisible = directory.isChapterInExpandedVolume(
-      widget.currentChapter,
-      _collapsedGroupIds,
-    );
+    // Inside an expanded volume the pinned header covers the top of the
+    // list, so only the space below it counts.
+    final covered =
+        directory.isChapterInExpandedVolume(
+          widget.currentChapter,
+          _collapsedGroupIds,
+        )
+        ? extents.header
+        : 0.0;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !widget.scrollController.hasClients) return;
-      final desiredOffset =
-          (rowIndex - (keepVolumeHeaderVisible ? 1 : 0)) * 56.0;
-      widget.scrollController.jumpTo(
-        desiredOffset.clamp(
-          0.0,
-          widget.scrollController.position.maxScrollExtent,
-        ),
+      final position = widget.scrollController.position;
+      final visible = position.viewportDimension - covered;
+      final target = rowTop - covered - (visible - extents.row) / 2;
+      position.jumpTo(
+        target
+            .clamp(position.minScrollExtent, position.maxScrollExtent)
+            .toDouble(),
       );
     });
   }
 }
 
-class _TocVolumeHeaderDelegate extends SliverPersistentHeaderDelegate {
-  static const double extent = 56;
+/// Fixed row heights for the directory. They grow with the system font size
+/// so a scaled title still fits its row.
+class _TocExtents {
+  final double row;
+  final double header;
 
+  const _TocExtents({required this.row, required this.header});
+
+  factory _TocExtents.of(BuildContext context) {
+    final row = math.max(52.0, MediaQuery.textScalerOf(context).scale(16) + 28);
+    return _TocExtents(row: row, header: row + 4);
+  }
+}
+
+class _TocVolumeHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final double extent;
   final Widget child;
 
-  const _TocVolumeHeaderDelegate({required this.child});
+  const _TocVolumeHeaderDelegate({required this.extent, required this.child});
 
   @override
   double get minExtent => extent;
@@ -494,7 +527,7 @@ class _TocVolumeHeaderDelegate extends SliverPersistentHeaderDelegate {
 
   @override
   bool shouldRebuild(covariant _TocVolumeHeaderDelegate oldDelegate) =>
-      oldDelegate.child != child;
+      oldDelegate.child != child || oldDelegate.extent != extent;
 }
 
 sealed class _TocEntry {
@@ -592,24 +625,30 @@ class _TocDirectory {
     );
   }
 
-  int visibleRowForChapter(int chapterIndex, Set<String> collapsedGroupIds) {
-    var row = 0;
+  /// Scroll offset of the row that stands for [chapterIndex]: the chapter
+  /// itself, or its volume header while that volume is collapsed.
+  double offsetForChapter(
+    int chapterIndex,
+    Set<String> collapsedGroupIds,
+    _TocExtents extents,
+  ) {
+    var offset = 0.0;
     for (final entry in entries) {
       switch (entry) {
         case _TocDirectEntry(chapterIndex: final index):
-          if (index == chapterIndex) return row;
-          row++;
+          if (index == chapterIndex) return offset;
+          offset += extents.row;
         case _TocVolumeEntry():
-          if (entry.chapterIndexes.contains(chapterIndex)) {
-            if (collapsedGroupIds.contains(entry.id)) return row;
-            final childIndex = entry.chapterIndexes.indexOf(chapterIndex);
-            return row + 1 + childIndex;
+          final collapsed = collapsedGroupIds.contains(entry.id);
+          final childIndex = entry.chapterIndexes.indexOf(chapterIndex);
+          if (childIndex >= 0) {
+            return collapsed
+                ? offset
+                : offset + extents.header + childIndex * extents.row;
           }
-          row +=
-              1 +
-              (collapsedGroupIds.contains(entry.id)
-                  ? 0
-                  : entry.chapterIndexes.length);
+          offset +=
+              extents.header +
+              (collapsed ? 0 : entry.chapterIndexes.length * extents.row);
       }
     }
     return 0;
