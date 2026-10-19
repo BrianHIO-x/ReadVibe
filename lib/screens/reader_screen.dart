@@ -2987,7 +2987,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
           ),
           child: DraggableScrollableSheet(
-            initialChildSize: 0.75,
+            initialChildSize: 0.95,
             maxChildSize: 0.95,
             minChildSize: 0.3,
             builder: (_, scrollController) => ChapterListSheet(

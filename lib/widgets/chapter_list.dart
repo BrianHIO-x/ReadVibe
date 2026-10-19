@@ -13,6 +13,11 @@ import '../services/chinese_text.dart';
 
 typedef TocGroupExpansionChanged = void Function(String groupId, bool expanded);
 
+// Small type keeps a typical chapter title on one line beside its word count.
+const double _tocTitleSize = 14;
+const double _tocVolumeTitleSize = 15;
+const double _tocCountSize = 11;
+
 /// Full-screen chapter list modal.
 ///
 /// Books with explicit volume markers use a two-level directory. Books without
@@ -154,7 +159,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
                         Text(
                           '目录',
                           style: TextStyle(
-                            fontSize: 18,
+                            fontSize: 16,
                             fontWeight: FontWeight.w600,
                             color: widget.colors.text,
                           ),
@@ -328,7 +333,8 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
       child: Material(
         color: Colors.transparent,
         child: ListTile(
-          contentPadding: const EdgeInsets.only(left: 16, right: 20),
+          contentPadding: const EdgeInsets.only(left: 16, right: 16),
+          horizontalTitleGap: 8,
           leading: AnimatedRotation(
             turns: expanded ? 0.25 : 0,
             duration: AppMotion.control,
@@ -345,14 +351,17 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              fontSize: 16,
+              fontSize: _tocVolumeTitleSize,
               fontWeight: FontWeight.w600,
               color: containsActive ? widget.colors.accent : widget.colors.text,
             ),
           ),
           trailing: Text(
             '${entry.chapterIndexes.length} 项',
-            style: TextStyle(fontSize: 12, color: widget.colors.secondary),
+            style: TextStyle(
+              fontSize: _tocCountSize,
+              color: widget.colors.secondary,
+            ),
           ),
           onTap: () => _toggleVolume(entry.id, expanded),
         ),
@@ -383,12 +392,14 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
         color: Colors.transparent,
         child: ListTile(
           minTileHeight: _extents.row,
+          // Volume chapters line up with the volume title, which starts
+          // right after the header's chevron.
           contentPadding: EdgeInsets.only(
-            left: isTopLevel ? 20 : (volumeTitle == null ? 16 : 44),
-            right: 20,
+            left: isTopLevel || volumeTitle == null ? 16 : 34,
+            right: 16,
           ),
           minLeadingWidth: isTopLevel ? 18 : 6,
-          horizontalTitleGap: isTopLevel ? 12 : 8,
+          horizontalTitleGap: isTopLevel ? 10 : 8,
           leading: isTopLevel
               ? Icon(
                   Icons.description_outlined,
@@ -403,7 +414,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              fontSize: 16,
+              fontSize: _tocTitleSize,
               color: isActive ? widget.colors.accent : widget.colors.text,
               fontWeight: isTopLevel || isActive
                   ? FontWeight.w500
@@ -411,7 +422,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
             ),
           ),
           trailing: SizedBox(
-            width: 84,
+            width: 64,
             child: ValueListenableBuilder<List<int>?>(
               valueListenable: widget.chapterWordCountsListenable,
               builder: (context, chapterWordCounts, _) {
@@ -427,7 +438,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
                   softWrap: false,
                   textAlign: TextAlign.end,
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: _tocCountSize,
                     color: isActive
                         ? widget.colors.accent
                         : widget.colors.secondary,
@@ -458,8 +469,8 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
     widget.onGroupExpansionChanged(groupId, expanded);
   }
 
-  /// Brings the current chapter to the middle of the list. A collapsed
-  /// volume shows its header in place of the chapter.
+  /// Brings the current chapter to the top of the list. A collapsed volume
+  /// shows its header in place of the chapter.
   void _scheduleInitialScroll(_TocDirectory directory) {
     if (_initialScrollScheduled) return;
     _initialScrollScheduled = true;
@@ -470,7 +481,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
       extents,
     );
     // Inside an expanded volume the pinned header covers the top of the
-    // list, so only the space below it counts.
+    // list, so the chapter settles just below it.
     final covered =
         directory.isChapterInExpandedVolume(
           widget.currentChapter,
@@ -481,10 +492,8 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !widget.scrollController.hasClients) return;
       final position = widget.scrollController.position;
-      final visible = position.viewportDimension - covered;
-      final target = rowTop - covered - (visible - extents.row) / 2;
       position.jumpTo(
-        target
+        (rowTop - covered)
             .clamp(position.minScrollExtent, position.maxScrollExtent)
             .toDouble(),
       );
@@ -501,7 +510,9 @@ class _TocExtents {
   const _TocExtents({required this.row, required this.header});
 
   factory _TocExtents.of(BuildContext context) {
-    final row = math.max(52.0, MediaQuery.textScalerOf(context).scale(16) + 28);
+    // A title line is 1.5 times its font size under the overlay theme.
+    final line = MediaQuery.textScalerOf(context).scale(_tocTitleSize) * 1.5;
+    final row = math.max(48.0, line + 24);
     return _TocExtents(row: row, header: row + 4);
   }
 }
