@@ -60,6 +60,7 @@ class MainActivity : FlutterActivity() {
     private var updateHandler: AppUpdateHandler? = null
     private var readerWindow: ReaderWindowHandler? = null
     private var biometricHandler: BiometricHandler? = null
+    private var motionHandler: MotionHandler? = null
 
     private val documentExecutor = Executors.newSingleThreadExecutor()
     private val incomingFileExecutor = Executors.newSingleThreadExecutor()
@@ -82,6 +83,7 @@ class MainActivity : FlutterActivity() {
         pdfHandler = PdfChannelHandler(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
         updateHandler = AppUpdateHandler(this, flutterEngine.dartExecutor.binaryMessenger)
         biometricHandler = BiometricHandler(this, flutterEngine.dartExecutor.binaryMessenger)
+        motionHandler = MotionHandler(this, flutterEngine.dartExecutor.binaryMessenger)
         incomingFileChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             INCOMING_FILE_CHANNEL,
@@ -651,6 +653,8 @@ class MainActivity : FlutterActivity() {
         readerWindow = null
         biometricHandler?.dispose()
         biometricHandler = null
+        motionHandler?.dispose()
+        motionHandler = null
         updateHandler?.dispose()
         updateHandler = null
         bookExporter?.dispose()

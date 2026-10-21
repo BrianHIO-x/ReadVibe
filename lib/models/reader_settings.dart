@@ -2,7 +2,7 @@
 
 import 'package:flutter/material.dart';
 
-enum ReaderThemeMode { system, light, warm, dark }
+enum ReaderThemeMode { system, light, warm, dark, black }
 
 enum ReaderPageMargin { compact, medium, wide }
 
@@ -20,6 +20,7 @@ extension ReaderThemeModeInfo on ReaderThemeMode {
     ReaderThemeMode.light => '浅色',
     ReaderThemeMode.warm => '暖色',
     ReaderThemeMode.dark => '深色',
+    ReaderThemeMode.black => '纯黑',
   };
 }
 

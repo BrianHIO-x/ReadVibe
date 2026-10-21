@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import 'app_sheet.dart';
@@ -13,12 +14,16 @@ class ReaderSettingsSheet extends StatelessWidget {
   final ReaderThemeColors colors;
   final Future<void> Function() onImportFont;
 
+  /// Whether battery saver is on, which draws curl turns as slides.
+  final ValueListenable<bool>? powerSaveMode;
+
   const ReaderSettingsSheet({
     super.key,
     required this.settings,
     required this.onChange,
     required this.colors,
     required this.onImportFont,
+    this.powerSaveMode,
   });
 
   @override
@@ -165,6 +170,7 @@ class ReaderSettingsSheet extends StatelessWidget {
                                   ),
                                 ),
                               ),
+                              _buildPowerSaveNote(),
                             ],
                           ),
                         )
@@ -187,6 +193,32 @@ class ReaderSettingsSheet extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildPowerSaveNote() {
+    final saver = powerSaveMode;
+    if (saver == null) return const SizedBox.shrink();
+    return ValueListenableBuilder<bool>(
+      valueListenable: saver,
+      builder: (context, saving, _) {
+        if (!saving ||
+            settings.simulationPageTurnEffect !=
+                SimulationPageTurnEffect.simulation) {
+          return const SizedBox.shrink();
+        }
+        return Padding(
+          padding: const EdgeInsets.only(top: AppSpacing.xs),
+          child: Text(
+            '系统省电模式开启期间，暂以平滑翻页显示',
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.25,
+              color: colors.secondary,
+            ),
+          ),
+        );
+      },
     );
   }
 

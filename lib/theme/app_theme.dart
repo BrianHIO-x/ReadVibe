@@ -62,6 +62,16 @@ class AppTheme {
       border: Color(0xFF3A3530),
       accent: Color(0xFFE3936F),
     ),
+    // OLED panels leave black pixels unlit. The text is a shade dimmer than
+    // the dark theme's so it does not bloom against the black.
+    ReaderThemeMode.black: ReaderThemeColors(
+      background: Color(0xFF000000),
+      text: Color(0xFFD8CFC4),
+      secondary: Color(0xFF8F867E),
+      headerBg: Color(0xFF0D0C0B),
+      border: Color(0xFF2B2724),
+      accent: Color(0xFFE3936F),
+    ),
   };
 
   static ReaderThemeColors getReaderTheme(

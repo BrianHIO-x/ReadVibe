@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter/rendering.dart'
     show
         RenderAbstractViewport,
@@ -25,6 +26,7 @@ import '../models/reading_paragraph.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/font_service.dart';
 import '../services/book_search_service.dart';
+import '../services/motion_service.dart';
 import '../services/storage_service.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/app_sheet.dart';
@@ -105,6 +107,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageDragOffsetNotifier,
     _pageCurlLiftNotifier,
   ]);
+  // What this reader holds the display's fast refresh rate for: a finger on
+  // the page, and a leaf that is off its resting place.
+  final Object _touchMotion = Object();
+  final Object _pageMotion = Object();
   late final AnimationController _pageTurnController;
   Animation<double>? _pageTurnAnimation;
   Animation<double>? _pageCurlLiftAnimation;
@@ -232,6 +238,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     // animation has fully settled.
     _showLibrarySystemBars();
     _hideStatusBarTimer = Timer(AppMotion.bookOpen, _hideStatusBarForReader);
+    MotionService.holdFor(AppMotion.bookOpen);
+    _pageDragOffsetNotifier.addListener(_holdPageMotion);
+    MotionService.powerSaveMode.addListener(_handlePowerSaveModeChanged);
     _pageTurnController =
         AnimationController(vsync: this, duration: AppMotion.pageTurn)
           ..addListener(() {
@@ -461,6 +470,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!mounted) return;
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return;
+    MotionService.holdFor(AppMotion.bookClose);
     Navigator.of(context).pop();
   }
 
@@ -946,6 +956,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     _discardPageTurnSnapshot();
     _discardReversePageTurnSnapshot();
     _wordCountController.dispose();
+    MotionService.powerSaveMode.removeListener(_handlePowerSaveModeChanged);
+    MotionService.release(_touchMotion);
+    MotionService.release(_pageMotion);
     _pageTurnController.dispose();
     _pageDragOffsetNotifier.dispose();
     _pageCurlLiftNotifier.dispose();
@@ -1560,6 +1573,30 @@ class _ReaderScreenState extends State<ReaderScreen>
     return cursor;
   }
 
+  void _holdPageMotion() {
+    if (_pageDragOffsetNotifier.value == 0) {
+      MotionService.release(_pageMotion);
+    } else {
+      MotionService.hold(_pageMotion);
+    }
+  }
+
+  /// Battery saver swaps the curl for a slide, so the turn being drawn must
+  /// start over in the new effect.
+  void _handlePowerSaveModeChanged() {
+    if (!mounted) return;
+    if (_pageDragOffset != 0 ||
+        _pageTurnController.isAnimating ||
+        _simulationPageTarget != null) {
+      _resetPageDrag();
+    } else {
+      _discardPageTurnSnapshot();
+      _discardReversePageTurnSnapshot();
+      setState(() {});
+      _scheduleSimulationSnapshotWarmup();
+    }
+  }
+
   void _setPageDragOffset(double value) {
     // A page lying flat has no lifted corner.
     if (value == 0) _pageCurlLiftNotifier.value = 0;
@@ -1573,8 +1610,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _readerModalOpen ||
         _selectionController.active.value ||
         _settings.readingMode != ReaderReadingMode.simulation ||
-        _settings.simulationPageTurnEffect !=
-            SimulationPageTurnEffect.simulation) {
+        _pageTurnEffect != SimulationPageTurnEffect.simulation) {
       return Future<bool>.value(false);
     }
     if (_pageTurnSnapshot != null) return Future<bool>.value(true);
@@ -1610,8 +1646,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             serial != _pageTurnSnapshotSerial ||
             chapterIndex != _chapterIndex ||
             _settings.readingMode != ReaderReadingMode.simulation ||
-            _settings.simulationPageTurnEffect !=
-                SimulationPageTurnEffect.simulation) {
+            _pageTurnEffect != SimulationPageTurnEffect.simulation) {
           return false;
         }
         final renderObject = _currentPageBoundaryKey.currentContext
@@ -1633,8 +1668,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           serial != _pageTurnSnapshotSerial ||
           chapterIndex != _chapterIndex ||
           _settings.readingMode != ReaderReadingMode.simulation ||
-          _settings.simulationPageTurnEffect !=
-              SimulationPageTurnEffect.simulation) {
+          _pageTurnEffect != SimulationPageTurnEffect.simulation) {
         image.dispose();
         return false;
       }
@@ -1666,8 +1700,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _selectionController.active.value ||
         target.goingNext ||
         _settings.readingMode != ReaderReadingMode.simulation ||
-        _settings.simulationPageTurnEffect !=
-            SimulationPageTurnEffect.simulation) {
+        _pageTurnEffect != SimulationPageTurnEffect.simulation) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1778,8 +1811,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _selectionController.active.value ||
         !_settingsLoaded ||
         _settings.readingMode != ReaderReadingMode.simulation ||
-        _settings.simulationPageTurnEffect !=
-            SimulationPageTurnEffect.simulation ||
+        _pageTurnEffect != SimulationPageTurnEffect.simulation ||
         _pageTurnSnapshot != null ||
         _pageTurnSnapshotCapture != null) {
       return;
@@ -1789,8 +1821,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           _readerModalOpen ||
           _selectionController.active.value ||
           _settings.readingMode != ReaderReadingMode.simulation ||
-          _settings.simulationPageTurnEffect !=
-              SimulationPageTurnEffect.simulation ||
+          _pageTurnEffect != SimulationPageTurnEffect.simulation ||
           _pageDragOffset != 0 ||
           _pageTurnController.isAnimating ||
           _pageTurnSnapshot != null) {
@@ -2342,6 +2373,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _handleReadingPointerDown(PointerDownEvent event) {
     if (_readingTapPointer != null) return;
+    MotionService.hold(_touchMotion);
     _readingTapPointer = event.pointer;
     _readingTapOrigin = event.position;
     _readingTapStartedAt = event.timeStamp;
@@ -2353,8 +2385,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _simulationTurnVelocityTracker = VelocityTracker.withKind(event.kind)
         ..addPosition(event.timeStamp, event.position);
       _simulationTurnActive = false;
-      if (_settings.simulationPageTurnEffect ==
-          SimulationPageTurnEffect.simulation) {
+      if (_pageTurnEffect == SimulationPageTurnEffect.simulation) {
         unawaited(_capturePageTurnSnapshot());
       }
     }
@@ -2432,6 +2463,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _handleReadingPointerUp(PointerUpEvent event, double width) {
     if (event.pointer != _readingTapPointer) return;
+    MotionService.release(_touchMotion);
     final simulationTurnWasActive =
         event.pointer == _simulationTurnPointer && _simulationTurnActive;
     var simulationVelocity = 0.0;
@@ -2459,6 +2491,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _handleReadingPointerCancel(PointerCancelEvent event) {
+    if (event.pointer == _readingTapPointer) {
+      MotionService.release(_touchMotion);
+    }
     if (event.pointer == _simulationTurnPointer) {
       final simulationTurnWasActive = _simulationTurnActive;
       _clearSimulationTurnPointer();
@@ -2523,8 +2558,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageTurnController.stop();
     _pageTurnAnimation = null;
     if (_settings.readingMode == ReaderReadingMode.simulation &&
-        _settings.simulationPageTurnEffect ==
-            SimulationPageTurnEffect.simulation &&
+        _pageTurnEffect == SimulationPageTurnEffect.simulation &&
         _pageTurnSnapshot == null) {
       unawaited(_capturePageTurnSnapshot());
     }
@@ -2548,8 +2582,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       return;
     }
     if (_settings.readingMode == ReaderReadingMode.simulation &&
-        _settings.simulationPageTurnEffect ==
-            SimulationPageTurnEffect.simulation &&
+        _pageTurnEffect == SimulationPageTurnEffect.simulation &&
         _pageTurnSnapshot == null) {
       unawaited(_capturePageTurnSnapshot());
     }
@@ -2584,7 +2617,14 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   bool get _turnsWithPageCurl =>
       _settings.readingMode == ReaderReadingMode.simulation &&
-      _settings.simulationPageTurnEffect == SimulationPageTurnEffect.simulation;
+      _pageTurnEffect == SimulationPageTurnEffect.simulation;
+
+  /// The turn effect actually drawn. Battery saver swaps the curl for a
+  /// slide, which paints far less on every frame of a turn.
+  SimulationPageTurnEffect get _pageTurnEffect =>
+      MotionService.powerSaveMode.value
+      ? SimulationPageTurnEffect.smooth
+      : _settings.simulationPageTurnEffect;
 
   /// Picks the page a simulation drag of [proposed] reveals and returns the
   /// offset the leaf should take. Returns null at the book's ends, where the
@@ -2788,8 +2828,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       );
     }
     if (target != null &&
-        _settings.simulationPageTurnEffect ==
-            SimulationPageTurnEffect.simulation) {
+        _pageTurnEffect == SimulationPageTurnEffect.simulation) {
       final movingPageOffset = target.goingNext
           ? (_pageTurnOriginSnapshot ?? _currentScrollSnapshot()).offset
           : target.offset;
@@ -2838,7 +2877,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         (goingNext && velocity < -260) || (!goingNext && velocity > 260);
     final shouldCommit = progress > 0.16 || velocityCommits;
     final endOffset = shouldCommit ? (goingNext ? -width : width) : 0.0;
-    _animatePageDragTo(endOffset, commit: shouldCommit);
+    _animatePageDragTo(endOffset, commit: shouldCommit, velocity: velocity);
   }
 
   void _handleHorizontalDragCancel() {
@@ -2850,27 +2889,38 @@ class _ReaderScreenState extends State<ReaderScreen>
     _animatePageDragTo(0, commit: false);
   }
 
-  void _animatePageDragTo(double endOffset, {required bool commit}) {
+  void _animatePageDragTo(
+    double endOffset, {
+    required bool commit,
+    double velocity = 0,
+  }) {
     final targetIndex = _pageDragTargetIndex;
     final simulationTarget = _simulationPageTarget;
     _pageTurnController.stop();
     _pageTurnController.reset();
     _commitPageTurnWhenSettled = commit;
     final serial = ++_pageTurnSerial;
-    final curve = CurvedAnimation(
-      parent: _pageTurnController,
-      curve: AppMotion.standard,
-    );
+    final travel = endOffset - _pageDragOffset;
+    final spring = _pageSettleSpring(travel, velocity);
+    final Animation<double> settle = spring == null
+        ? CurvedAnimation(
+            parent: _pageTurnController,
+            curve: AppMotion.standard,
+          )
+        : _pageTurnController;
     _pageTurnAnimation = Tween<double>(
       begin: _pageDragOffset,
       end: endOffset,
-    ).animate(curve);
+    ).animate(settle);
     // The corner settles back onto its edge as the leaf lands on either side.
     final lift = _pageCurlLiftNotifier.value;
     _pageCurlLiftAnimation = lift == 0
         ? null
-        : Tween<double>(begin: lift, end: 0).animate(curve);
-    _pageTurnController.forward().then((_) {
+        : Tween<double>(begin: lift, end: 0).animate(settle);
+    final landing = spring == null
+        ? _pageTurnController.forward()
+        : _pageTurnController.animateWith(spring);
+    landing.then((_) {
       if (!mounted || serial != _pageTurnSerial) return;
       if (_commitPageTurnWhenSettled && simulationTarget != null) {
         _finishSimulationPageTurn(simulationTarget);
@@ -2880,6 +2930,43 @@ class _ReaderScreenState extends State<ReaderScreen>
         _resetPageDrag();
       }
     });
+  }
+
+  /// How quickly a released leaf closes on its resting place, in travels per
+  /// second. Critically damped at this rate it lands in about the time the
+  /// old fixed settle took.
+  static const double _pageSettleRate = 28;
+
+  /// A spring that carries the leaf from the finger's release [velocity] to
+  /// the end of [travel], over the controller's 0 to 1.
+  ///
+  /// Critical damping never bounces, and a start no faster than the closing
+  /// rate never overshoots, so the leaf can't swing past the page edge or
+  /// back across its resting place. A release moving away from the target
+  /// starts from rest. Null where the timed settle stays: a leaf already in
+  /// place, and when the system asks for reduced motion, which shortens that
+  /// settle further.
+  Simulation? _pageSettleSpring(double travel, double velocity) {
+    if (travel.abs() < 0.5 || MediaQuery.disableAnimationsOf(context)) {
+      return null;
+    }
+    final distance = travel.abs();
+    final start = (velocity * travel.sign / distance)
+        .clamp(0.0, _pageSettleRate)
+        .toDouble();
+    return SpringSimulation(
+      SpringDescription(
+        mass: 1,
+        stiffness: _pageSettleRate * _pageSettleRate,
+        damping: 2 * _pageSettleRate,
+      ),
+      0,
+      1,
+      start,
+      // Done once the leaf is within half a pixel and barely moving, so the
+      // settle stops drawing frames as soon as nothing visibly changes.
+      tolerance: Tolerance(distance: 0.5 / distance, velocity: 20 / distance),
+    );
   }
 
   void _finishPageTurn(int targetIndex) {
@@ -3470,6 +3557,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             return ReaderSettingsSheet(
               settings: sheetSettings,
               colors: themeColors,
+              powerSaveMode: MotionService.powerSaveMode,
               onChange: (newSettings) {
                 setSheetState(() => sheetSettings = newSettings);
                 _queueSettingsApply(newSettings);
@@ -4511,7 +4599,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       listenable: _pageTurnPose,
       builder: (context, _) {
         final offset = _pageDragOffsetNotifier.value;
-        return switch (_settings.simulationPageTurnEffect) {
+        return switch (_pageTurnEffect) {
           SimulationPageTurnEffect.simulation => CurlBookTurnPages(
             width: width,
             height: height,
