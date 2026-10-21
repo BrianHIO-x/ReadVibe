@@ -73,16 +73,17 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `AndroidManifest.xml` | 主清单。声明 `INTERNET` 与 `REQUEST_INSTALL_PACKAGES` 两项权限，后者供应用内安装更新包使用；注册不导出的 FileProvider（授权 `${applicationId}.updates`，范围见 `xml/update_paths.xml`）把下载好的安装包临时授权给系统安装程序；MainActivity 以 `singleTop` 启动，注册两组 ACTION_VIEW intent-filter 实现外部“用其他应用打开”：一组匹配声明了真实类型的发送方（含 AZW3 专属类型），另一组匹配把电子书报成 `application/octet-stream` 的文件管理器，并要求文件名以受支持扩展名结尾，避免认领任意未知文件；`<queries>` 中显式列出允许的六个 AI 翻译应用与两个浏览器包名。 |
+| `AndroidManifest.xml` | 主清单。声明 `INTERNET`、`REQUEST_INSTALL_PACKAGES` 与 `USE_BIOMETRIC` 三项权限，分别用于联网检查更新、应用内安装更新包和隐私书架的生物验证；注册不导出的 FileProvider（授权 `${applicationId}.updates`，范围见 `xml/update_paths.xml`）把下载好的安装包临时授权给系统安装程序；MainActivity 以 `singleTop` 启动，注册两组 ACTION_VIEW intent-filter 实现外部“用其他应用打开”：一组匹配声明了真实类型的发送方（含 AZW3 专属类型），另一组匹配把电子书报成 `application/octet-stream` 的文件管理器，并要求文件名以受支持扩展名结尾，避免认领任意未知文件；`<queries>` 中显式列出允许的六个 AI 翻译应用与两个浏览器包名。 |
 | `java/.../GeneratedPluginRegistrant.java` | Flutter 自动生成的插件注册类，勿手工编辑。 |
 
 ## android/app/src/main/kotlin/com/readvibe/app/（原生代码）
 
 | 文件 | 作用 |
 |---|---|
-| `MainActivity.kt` | 原生宿主 Activity。注册四个 MethodChannel：`incoming_file`（串行消费外部 ACTION_VIEW 文件并复制到应用缓存）、`book_picker`（`ACTION_OPEN_DOCUMENT` 选书，复制走独立线程池，回到前台时若请求还悬着即按取消作答，复制连续 45 秒没有新字节即以中文错误结束）、`system_text_actions`（查询并启动系统翻译/搜索目标）、`document_parser`（经单线程执行器调用 Apache POI 提取旧版 DOC 正文），更新安装通道交给 `AppUpdateHandler`。内含 AI 与浏览器包名白名单，换用显式组件启动防劫持。 |
+| `MainActivity.kt` | 原生宿主 Activity。注册四个 MethodChannel：`incoming_file`（串行消费外部 ACTION_VIEW 文件并复制到应用缓存）、`book_picker`（`ACTION_OPEN_DOCUMENT` 选书，复制走独立线程池，回到前台时若请求还悬着即按取消作答，复制连续 45 秒没有新字节即以中文错误结束）、`system_text_actions`（查询并启动系统翻译/搜索目标）、`document_parser`（经单线程执行器调用 Apache POI 提取旧版 DOC 正文），更新安装通道交给 `AppUpdateHandler`。至于隐私书架的生物验证，则由 `BiometricHandler` 负责。内含 AI 与浏览器包名白名单，换用显式组件启动防劫持。 |
 | `BookImportProbe.kt` | 选书前的轻量嗅探。只读 SAF 文件的头部与 ZIP 中央目录判别类型，安装包在复制前即被拒，复制时按字节回报进度供上层判断是否仍在推进。 |
 | `AppUpdateHandler.kt` | 更新安装通道 `app_update`。校验放在后台执行器：安装包须位于缓存内的更新目录、包名与版本名同更新信息一致、构建号高于已安装版本、签名与当前应用相同；通过后按需引导用户开启未知来源安装权限，或经 FileProvider 授权打开系统安装程序，校验期间重复调用返回 `UPDATE_BUSY`。 |
+| `BiometricHandler.kt` | 隐私书架的生物验证通道 `biometric`。`capabilities` 返回指纹与人脸硬件是否向应用开放，并用 `BiometricManager` 判断系统里是否录入了可用的生物信息。`authenticate` 调起框架自带的 `BiometricPrompt`，不需要把宿主改成 `FragmentActivity`。从 Android 11 开始，验证框会接受二类生物信息，从而覆盖常见的人脸解锁。点击验证框里的“使用密码”时，结果会以 `fallback` 回传。通道同一时间只受理一次验证，并把重复的调用直接按取消作答。 |
 | `BookExportHandler.kt` | 导出通道 `book_export`。把应用私有暂存文件写入用户经系统界面选定的位置；来源限定在导出缓存目录内，单次导出串行，重复调用返回 `EXPORT_BUSY`。 |
 | `BackgroundTaskRunner.kt` | 通用后台任务边界。把工作提交到 worker 执行器、把成功与异常回传到 UI 执行器，支持 isActive 开关在销毁后抑制排队任务与迟到回调。 |
 | `PdfChannelHandler.kt` | PDF 通道适配层。解析方法调用为不可变 `PdfRequest`，按操作类型分发到渲染或分析两个单线程池，`InvalidPasswordException` 统一映射为 `PDF_PASSWORD_REQUIRED` 错误码；自身不含文档逻辑。 |
@@ -141,7 +142,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `book.dart` | 全部书籍相关模型。定义 `BookFormat`、`BookAvailability`（含丢失原因中文标签）、EPUB 富文本四件套 `EpubContentStyle`/`EpubTextRun`/`EpubContentBlock`/`EpubLinkTarget`、出版社样式安全对比度判断；`EpubTextRun.link` 记录站内跳转目标，`EpubContentBlock.anchorIds` 保存该块覆盖的元素 id 供片段定位；`Chapter` 刻意保持同一性相等（正文惰性加载，值相等要么加载全部载荷要么误判），需要稳定键的调用方使用 `index`；`Chapter` 支持延迟加载代理与 EPUB 块计数存储；`Book` 持有元数据、字数摘要、封面路径与内嵌字体映射，提供 JSON 编解码与 `copyWith`。另暴露三组章节标题判定函数（卷标题、导语类、独立尾章类）与正则，供 TXT 解析与目录分组复用；`currentTxtParserVersion` 驱动旧书重新解析。 |
+| `book.dart` | 全部书籍相关模型。定义 `BookFormat`、`BookAvailability`（含丢失原因中文标签）、EPUB 富文本四件套 `EpubContentStyle`/`EpubTextRun`/`EpubContentBlock`/`EpubLinkTarget`、出版社样式安全对比度判断；`EpubTextRun.link` 记录站内跳转目标，`EpubContentBlock.anchorIds` 保存该块覆盖的元素 id 供片段定位；`Chapter` 刻意保持同一性相等（正文惰性加载，值相等要么加载全部载荷要么误判），需要稳定键的调用方使用 `index`；`Chapter` 支持延迟加载代理与 EPUB 块计数存储；`Book` 持有元数据、字数摘要、封面路径、内嵌字体映射与隐私书架标记 `isPrivate`，提供 JSON 编解码与 `copyWith`。另暴露三组章节标题判定函数（卷标题、导语类、独立尾章类）与正则，供 TXT 解析与目录分组复用；`currentTxtParserVersion` 驱动旧书重新解析。 |
 | `reader_bookmark.dart` | 文字书的书签与笔记模型。`ReaderBookmark` 以（章节、段落、字符）三元组锚定，与阅读位置恢复和搜索跳转共用同一套坐标，因此换字体或切模式后仍指向原句；携带摘录、笔记、章内百分比与时间。`fromJson` 对损坏记录返回 null 而非修复，`clampBookmarkText` 截断时不切开代理对，`sortedReaderBookmarks` 按正文顺序排列。上限 500 条/本。 |
 | `book_content_revision.dart` | 正文修订号与冲突类型。`readContentRevision` 归一化持久化的修订号（旧书从零开始），`BookEditConflict` 表示保存时正文已被其他改动推进。 |
 | `reader_settings.dart` | 阅读设置与进度模型。`ReaderSettings`（schema v6）涵盖字号、行高、主题、粗细、字体（系统/内置宋体/导入）、页边距、段距、阅读模式与自动检查更新，含旧版本字段迁移与字体粗细针对内置静态宋体的特殊映射（w300/w600/w900 叠加同色阴影）；`ReadingProgress` 保存章节进度、偏移与逐章快照；`PdfReadingProgress` 与 `PdfDisplayTheme` 独立于章节体系，`toShelfProgress()` 供书架卡片复用。 |
@@ -155,7 +156,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `reader_repositories.dart` | 全部持久化接口定义（8 个抽象接口）。`LibraryRepository`（书架：列表、可用性、信息修改、排序、删除、孤儿数据回收、书架进度与设置）、`ReaderRepository`（文字阅读：进度、目录折叠组、章节替换、字数保存、删除）、`PdfReaderRepository`（PDF 进度、书签、笔记、显示主题）、`ReaderRepository` 另含文字书书签读写、`LibraryMaintenanceRepository` 另含 `measureStorageUsage`/`clearTemporaryCaches` 与返回类型 `StorageUsageReport`、`BookImportStore`、`AppDataDirectoryProvider`、`ImportedFontStore`、`ImportedPdfStore` 与返回类型 `StorageCleanupResult`。实体类 `StorageService` 同时实现前三个大接口，各消费者按需依赖窄接口。 |
+| `reader_repositories.dart` | 全部持久化接口定义（8 个抽象接口）。`LibraryRepository`（书架：列表、可用性、信息修改、排序、隐私书架归属、删除、孤儿数据回收、书架进度与设置）、`ReaderRepository`（文字阅读：进度、目录折叠组、章节替换、字数保存、删除）、`PdfReaderRepository`（PDF 进度、书签、笔记、显示主题）、`ReaderRepository` 另含文字书书签读写、`LibraryMaintenanceRepository` 另含 `measureStorageUsage`/`clearTemporaryCaches` 与返回类型 `StorageUsageReport`、`BookImportStore`、`AppDataDirectoryProvider`、`ImportedFontStore`、`ImportedPdfStore` 与返回类型 `StorageCleanupResult`。实体类 `StorageService` 同时实现前三个大接口，各消费者按需依赖窄接口。 |
 
 ### lib/controllers/（状态编排）
 
@@ -175,7 +176,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `storage_service.dart` | 持久化实现核心。书架元数据存于应用数据目录的 `library.json`（tmp/bak/rename 原子提交，静态按根目录缓存解码结果，首次读取时从旧的 `readvibe_books` 偏好键一次性迁移并删除该键）——Android 每次提交都会重写整份偏好 XML，把书架移出后，阅读中高频的进度写入不再连带重写整个书架；小状态仍入 SharedPreferences，章节正文按章节落为独立 JSON 文件（30 秒 IO 超时、SHA-256 校验、带大小上限的 LRU 章节缓存）；每批章节的编码、摘要与落盘都在 worker isolate 内同步完成，正文只跨 isolate 一次，章节文件不再逐个 flush——批次大小按章节总数推导，worker 次数与进度回报次数都不随书变长而增长，`saveBook` 沿 `onChapterProgress` 逐批回报已落盘章节数；暂存目录经 rename 才成为该书，清单里的长度与摘要负责识别写到一半的载荷，连载长篇导入因此不再按章节数量支付平台往返；`_LazyChapter` 让大书只有被阅读到的章节才解码，载荷一次读为字节后直接校验摘要（不再解码再重编码），且每章每会话只校验一次，因为该路径运行在 UI isolate 上。另提供 `measureStorageUsage`/`clearTemporaryCaches`（目录遍历在 isolate 中完成）与 `resetLibraryCache`。写路径用全局队列串行化书架级操作与逐书章节写入，删除书时联动清理字体、PDF 源与渲染缓存，并复用 `ReaderPreferencesStore` 与 `ManagedBookResources`。实现上同时满足书架、阅读、PDF 三个仓库接口，并 `export` 出 `StorageCleanupResult`。 |
+| `storage_service.dart` | 持久化实现核心。书架元数据存于应用数据目录的 `library.json`（tmp/bak/rename 原子提交，静态按根目录缓存解码结果，首次读取时从旧的 `readvibe_books` 偏好键一次性迁移并删除该键）——Android 每次提交都会重写整份偏好 XML，把书架移出后，阅读中高频的进度写入不再连带重写整个书架；小状态仍入 SharedPreferences，章节正文按章节落为独立 JSON 文件（30 秒 IO 超时、SHA-256 校验、带大小上限的 LRU 章节缓存）；每批章节的编码、摘要与落盘都在 worker isolate 内同步完成，正文只跨 isolate 一次，章节文件不再逐个 flush——批次大小按章节总数推导，worker 次数与进度回报次数都不随书变长而增长，`saveBook` 沿 `onChapterProgress` 逐批回报已落盘章节数；暂存目录经 rename 才成为该书，清单里的长度与摘要负责识别写到一半的载荷，连载长篇导入因此不再按章节数量支付平台往返；`_LazyChapter` 让大书只有被阅读到的章节才解码，载荷一次读为字节后直接校验摘要（不再解码再重编码），且每章每会话只校验一次，因为该路径运行在 UI isolate 上。另提供 `measureStorageUsage`/`clearTemporaryCaches`（目录遍历在 isolate 中完成）与 `resetLibraryCache`。写路径用全局队列串行化书架级操作与逐书章节写入，删除书时联动清理字体、PDF 源与渲染缓存，并复用 `ReaderPreferencesStore` 与 `ManagedBookResources`。实现上同时满足书架、阅读、PDF 三个仓库接口，并 `export` 出 `StorageCleanupResult`。`setBooksPrivate` 只改写书架元数据里的隐私标记，不会触碰章节载荷。改写已有书籍时，`saveBook` 会沿用原来的标记，导入新书时只在同一书架内为重名书籍编号。 |
+| `private_shelf_lock.dart` | 隐私书架的密码与验证设置。6 位数字密码只以加盐的 PBKDF2-HMAC-SHA256 摘要保存在偏好里，并在 `Isolate.run` 中完成派生计算。连续输错 5 次以后，密码键盘会锁定 30 秒。此后每次输错，锁定时间都会加倍，最长为 15 分钟。错误次数会持久保存，重启应用之后依然有效。`PrivateShelfConfig` 记录已开启的指纹、人脸，以及解锁时默认使用的一种。调起生物验证的时候，请求会经 `biometric` 通道交给原生层。 |
 | `reader_preferences_store.dart` | SharedPreferences 中的阅读态存取。管理文字进度、文字书书签与笔记、PDF 进度（含旧记录一次性迁移）、PDF 书签、笔记、显示主题、目录折叠组与阅读设置；静态写版本队列保证旧写不会覆盖新写，已删书的读取一律短路返回空。 |
 | `managed_book_resources.dart` | 导入二进制资源的生命周期。提供字体保存（.ttf/.otf、64MB 上限、文件名消毒）、PDF 副本保存（1GB 上限、原子 tmp 重命名）与删除；删除 PDF 源前先经网关清渲染缓存，路径白名单限定在应用私有目录内，防止误删兄弟资源。 |
 | `book_id.dart` | 导入书籍的身份。`nextBookId` 在时钟重复或回拨时仍产出唯一 id（进程内单调序号加随机后缀），因为 id 同时用作章节目录、PDF 副本、内嵌字体族和阅读状态的键；`uniqueLibraryTitle` 为重复导入的同名书编号，不超过重命名上限且不切开代理对。 |
@@ -227,7 +229,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `book_search_sheet.dart` | 书内搜索面板。泛型绑定 `SearchMatch`，防重复提交与过期回包（串号丢弃）；按命中区间绘制加粗高亮片段；结果为空、尚未搜索或出错分态展示，达上限提示缩小关键词。 |
 | `reader_settings_sheet.dart` | 阅读设置面板。字号、行高、字体（组合 `FontSettingsSection`）、粗细、页边距、段距、阅读模式与翻页效果、主题全部用自绘滑块式分段控件（高亮块以 `TweenAnimationBuilder` 平移切换）；`_RollingModeDescription` 用于阅读模式说明的上下滚动切换；仿真模式才显示翻页效果选项。 |
 | `font_settings_section.dart` | 字体选择区。系统/宋体/导入三选一卡片加导入按钮，导入卡副标题显示字体名并在无导入字体时禁用，选中卡片微放大并描边强调。 |
-| `global_settings_sheet.dart` | 全局设置侧栏（书架右上打开）。字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口、存储空间区与开源许可页入口；版本号由书架层传入。同文件的 `StorageUsageSection` 自行异步统计并展示分类占用，提供清理缓存与重新统计；`formatStorageBytes` 负责字节展示。 |
+| `global_settings_sheet.dart` | 全局设置侧栏（书架右上打开）。隐私书架入口（设置、进入或锁上，以及验证方式与密码）、字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口、存储空间区与开源许可页入口；版本号由书架层传入。同文件的 `StorageUsageSection` 自行异步统计并展示分类占用，提供清理缓存与重新统计；`formatStorageBytes` 负责字节展示。 |
+| `private_shelf_sheets.dart` | 隐私书架的交互面板。`_PinSheet` 自绘 6 位数字键盘，同时承担创建密码和验证密码两种用途。由于键盘是自绘的，系统输入法接触不到密码。`unlockPrivateShelf` 先调起默认的生物验证，失败或取消后再显示密码键盘。忘记密码的时候，已开启的生物验证可以用来重设密码。两种验证都没开启时，只能交由调用方清空隐私书架。`showPrivateShelfSettings` 负责开关指纹和人脸、选择默认方式、修改密码与关闭隐私书架，开启某一种之前会先验证一次。 |
 | `library_search_controls.dart` | 书架搜索与筛选用控件。`LibraryFilterButton` 弹出筛选菜单（当前项在菜单中打勾），菜单右缘与书架网格右边线对齐；`LibrarySearchControls` 组合圆角搜索框（可清除）与激活筛选 `InputChip`。 |
 | `app_update_dialog.dart` | 新版本对话框。展示安装包体积与发布说明（限高滚动），一个按钮串起下载、校验与调起安装三步；测速阶段显示不定进度条，下载中显示线路、百分比与实时速率且可随时取消；下载成功后失败重试不再重复下载，安装权限缺失时提示去系统设置开启后直接重试。 |
 
@@ -235,7 +238,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `library_screen.dart` | 书架页。书架网格与拖动排序区在底部留出系统手势条高度，内容滚动到手势条之下。经三个可注入依赖（仓库、更新器、导出器）初始化门面服务；负责书籍装载与串号保护、文件选择导入、外部来书导入、开书（含封面截屏快照与书香开页路由）、长按动作面板（改名/排序/删除/导出）、按宽度推导列数的响应式书架与同规格拖动排序网格（`_shelfMetrics` 为两者唯一来源）、搜索与筛选、维护调度、更新检查（3 秒后台静默检查、 dismissed 三天静默）与全局设置侧栏、四种空态（无书/无结果/导入中/打开中）与入场动画。导入按钮显示当前步骤与保存百分比；导入被“静默看门狗”看管，连续 100 秒没有任何进度回报即以中文提示结束等待并恢复书架，长书只要还在推进就不会被打断。 |
+| `library_screen.dart` | 书架页。书架网格与拖动排序区在底部留出系统手势条高度，内容滚动到手势条之下。经四个可注入依赖（仓库、更新器、导出器、隐私书架锁）初始化门面服务；负责书籍装载与串号保护、文件选择导入、外部来书导入、开书（含封面截屏快照与书香开页路由）、长按动作面板（改名/排序/移入或移出隐私书架/删除/导出）、按宽度推导列数的响应式书架与同规格拖动排序网格（`_shelfMetrics` 为两者唯一来源）、搜索与筛选、维护调度、更新检查（3 秒后台静默检查、 dismissed 三天静默）与全局设置侧栏、四种空态（无书/无结果/导入中/打开中）与入场动画。导入按钮显示当前步骤与保存百分比；导入被“静默看门狗”看管，连续 100 秒没有任何进度回报即以中文提示结束等待并恢复书架，长书只要还在推进就不会被打断。隐私书架模式只在本次使用期间有效，离开应用（系统选择器与保存界面除外）即自动锁上，并关闭从书架弹出的面板。`_books` 始终保存全部书籍，从而让排序和维护看到整个书库。显示书架网格和拖动排序时，页面只取当前书架的子集。在隐私书架里导入的书籍，会直接写成隐私书籍。 |
 | `reader_screen.dart` | 文字阅读页（核心）。三种阅读模式：分章（横滑切章、可编辑）、滚动（跨章连续）、仿真（整页分页、仿真/平滑翻页）。职责涵盖：设置装载与防抖持久化（键盘瞬时内嵌不触发重排）、阅读进度记录与恢复（文字锚点与偏移多通道）、书签与笔记（顶栏开关、列表面板、选区写笔记、锚点跳转，开关状态缓存以免每帧重排版）、EPUB 站内链接与脚注就地展开、目录/搜索/书签/编辑/设置五面板联动、翻页拖拽手势与速度惯性、仿真卷页的页角跟随（页角按起手高度选定，先以两倍速度追上手指，再停在指尖下方）、相邻页与相邻章预热渲染、沉浸式系统栏（纸面铺满到屏幕顶边，顶端不叠加常驻元素）、阅读菜单边缘对齐行界（展开时遍历可见 `RenderParagraph` 找出被顶栏或底栏切开的行，用栏内留白补到行边界，仿真页按 strut 行盒计算，滚动停止后重算）、字体加载回退、Epub 排版委托与保活保留选区等。状态编排分散于五个 controller，滚动控制器重建与预加载缓存集中在本 State。 |
 | `pdf_reader_screen.dart` | PDF 阅读页。加载进度、书签、笔记、显示主题与内嵌批注五源合并；`PageView` 翻页配双指缩放（缩放页横向拖动锁定为平移）、进度滑杆、跳页对话框、书签笔记列表、大纲（缩进层级）、双通道搜索（文件文本或逐页 OCR，OCR 结果做空白规范化）、本页文字面板（优先文字层、缺失时回退 OCR）、显示主题切换与源文件丢失兜底删除；渲染任务按 `页:宽度` 去重并限在途 18 个。 |
 

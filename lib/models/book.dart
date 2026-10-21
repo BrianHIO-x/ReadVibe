@@ -237,6 +237,10 @@ class Book {
   final int? pageCount;
   final Map<String, String> embeddedFonts;
 
+  /// Shown only on the private shelf. Shelf membership is changed through
+  /// the library, never by saving a book's content.
+  final bool isPrivate;
+
   const Book({
     required this.id,
     required this.title,
@@ -254,6 +258,7 @@ class Book {
     this.coverImagePath,
     this.pageCount,
     this.embeddedFonts = const <String, String>{},
+    this.isPrivate = false,
   }) : _storedChapterCount = chapterCount;
 
   bool get isPdf => format == BookFormat.pdf;
@@ -278,6 +283,7 @@ class Book {
     if (coverImagePath != null) 'coverImagePath': coverImagePath,
     if (pageCount != null) 'pageCount': pageCount,
     if (embeddedFonts.isNotEmpty) 'embeddedFonts': embeddedFonts,
+    if (isPrivate) 'private': true,
     // Note: chapters are stored separately to reduce JSON size
     'chapterCount': chapterCount,
   };
@@ -293,6 +299,7 @@ class Book {
     String? coverImagePath,
     int? pageCount,
     Map<String, String>? embeddedFonts,
+    bool? isPrivate,
     bool clearWordCounts = false,
   }) {
     final nextChapters = chapters ?? this.chapters;
@@ -315,6 +322,7 @@ class Book {
       coverImagePath: coverImagePath ?? this.coverImagePath,
       pageCount: pageCount ?? this.pageCount,
       embeddedFonts: embeddedFonts ?? this.embeddedFonts,
+      isPrivate: isPrivate ?? this.isPrivate,
     );
   }
 
@@ -414,6 +422,7 @@ class Book {
       coverImagePath: coverImagePath,
       pageCount: pageCount,
       embeddedFonts: Map<String, String>.unmodifiable(embeddedFonts),
+      isPrivate: json['private'] == true,
     );
   }
 }

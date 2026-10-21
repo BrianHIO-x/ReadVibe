@@ -189,6 +189,7 @@ Book upgradeLegacyTxtBook(Book book) {
     importDate: book.importDate,
     fileSize: book.fileSize,
     txtParserVersion: currentTxtParserVersion,
+    isPrivate: book.isPrivate,
   );
 }
 

@@ -19,6 +19,12 @@ class GlobalSettingsSheet extends StatelessWidget {
   final Future<StorageUsageReport> Function() onMeasureStorage;
   final Future<int> Function() onClearCaches;
   final String applicationVersion;
+  final bool privateShelfConfigured;
+  final bool privateShelfOpen;
+
+  /// Sets up, enters or locks the private shelf, depending on its state.
+  final VoidCallback onPrivateShelf;
+  final VoidCallback onPrivateShelfSettings;
 
   const GlobalSettingsSheet({
     super.key,
@@ -30,6 +36,10 @@ class GlobalSettingsSheet extends StatelessWidget {
     required this.onMeasureStorage,
     required this.onClearCaches,
     required this.applicationVersion,
+    required this.privateShelfConfigured,
+    required this.privateShelfOpen,
+    required this.onPrivateShelf,
+    required this.onPrivateShelfSettings,
   });
 
   @override
@@ -84,6 +94,61 @@ class GlobalSettingsSheet extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    Text(
+                      '隐私书架',
+                      style: TextStyle(
+                        color: colors.text,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    Text(
+                      !privateShelfConfigured
+                          ? '设置 6 位数字密码之后，就可以把书籍移入隐私书架。'
+                          : privateShelfOpen
+                          ? '离开应用以后，隐私书架会自动锁上。'
+                          : '进入隐私书架之前，需要验证密码或已开启的指纹、人脸。',
+                      style: TextStyle(
+                        color: colors.secondary,
+                        fontSize: 12,
+                        height: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    Wrap(
+                      spacing: AppSpacing.sm,
+                      runSpacing: AppSpacing.xs,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: onPrivateShelf,
+                          icon: Icon(
+                            privateShelfOpen
+                                ? Icons.lock_rounded
+                                : Icons.lock_outline_rounded,
+                            size: 18,
+                          ),
+                          label: Text(
+                            !privateShelfConfigured
+                                ? '设置隐私书架'
+                                : privateShelfOpen
+                                ? '锁上隐私书架'
+                                : '进入隐私书架',
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: colors.accent,
+                            side: BorderSide(color: colors.border),
+                          ),
+                        ),
+                        if (privateShelfConfigured)
+                          TextButton(
+                            onPressed: onPrivateShelfSettings,
+                            child: const Text('验证方式与密码'),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: AppSpacing.xl),
                     FontSettingsSection(
                       settings: settings,
                       colors: colors,
@@ -222,7 +287,6 @@ class GlobalSettingsSheet extends StatelessWidget {
     );
   }
 }
-
 
 /// Shows what ReadVibe occupies and offers the one reclaim that is always safe.
 ///

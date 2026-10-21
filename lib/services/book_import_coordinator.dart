@@ -75,6 +75,7 @@ class BookImportCoordinator {
     required PdfPasswordProvider requestPdfPassword,
     BookImportProgressReporter? onProgress,
     bool Function()? isCancelled,
+    bool isPrivate = false,
   }) async {
     void checkActive() {
       if (isCancelled?.call() == true) {
@@ -119,7 +120,9 @@ class BookImportCoordinator {
         ),
       );
       final committed = await _storage.saveBook(
-        importedBook,
+        // Committed straight onto its shelf, so a private import is never
+        // listed on the normal shelf, not even for a moment.
+        isPrivate ? importedBook.copyWith(isPrivate: true) : importedBook,
         onChapterProgress: (written, count) {
           checkActive();
           onProgress?.call(

@@ -125,6 +125,12 @@ abstract interface class LibraryRepository
 
   Future<void> saveBookOrder(List<String> bookIds);
 
+  /// Moves books onto or off the private shelf.
+  Future<void> setBooksPrivate(
+    Iterable<String> bookIds, {
+    required bool private,
+  });
+
   Future<void> deleteBook(String bookId);
 
   Future<ReadingProgress?> getShelfProgress(Book book);

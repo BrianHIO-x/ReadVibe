@@ -380,18 +380,28 @@ class StorageService
               readContentRevision(metadata[existingIndex]['contentRevision']) +
                   1,
             );
+      // Rewriting content never moves a book between shelves. A legacy
+      // reparse builds a fresh Book, and it must not lose the private flag.
+      final isPrivate = existingIndex >= 0
+          ? metadata[existingIndex]['private'] == true
+          : book.isPrivate;
       // Importing the same file again is deliberate and keeps its own entry.
       // Only the shelf label is numbered, so two copies stay tellable apart
-      // while their ids, payloads and reader state remain independent.
+      // while their ids, payloads and reader state remain independent. Only
+      // titles on the same shelf count, so a private book never shows up as
+      // a number on the normal shelf.
       final displayTitle = existingIndex >= 0
           ? book.title
           : uniqueLibraryTitle(book.title, <String>{
               for (final item in metadata)
-                if (item['title'] is String) item['title'] as String,
+                if (item['title'] is String &&
+                    (item['private'] == true) == isPrivate)
+                  item['title'] as String,
             });
       final committedBook = book.copyWith(
         contentRevision: revision,
         title: displayTitle == book.title ? null : displayTitle,
+        isPrivate: isPrivate,
       );
       // Save the large payload first. The shelf metadata is only committed
       // after the chapter file is safely in place.
@@ -650,6 +660,29 @@ class StorageService
         if (remaining != null) reordered.add(remaining);
       }
       await _writeBookMetadata(reordered);
+    });
+  }
+
+  @override
+  Future<void> setBooksPrivate(
+    Iterable<String> bookIds, {
+    required bool private,
+  }) async {
+    final ids = bookIds.where((id) => id.isNotEmpty).toSet();
+    if (ids.isEmpty) return;
+    await _enqueueLibraryMutation(() async {
+      final metadata = await _readBookMetadata();
+      var changed = false;
+      for (final book in metadata) {
+        if (!ids.contains(book['id'])) continue;
+        if (private) {
+          changed |= book['private'] != true;
+          book['private'] = true;
+        } else {
+          changed |= book.remove('private') != null;
+        }
+      }
+      if (changed) await _writeBookMetadata(metadata);
     });
   }
 
