@@ -34,7 +34,6 @@ import '../widgets/chapter_editor_sheet.dart';
 import '../widgets/book_search_sheet.dart';
 import '../widgets/reader_settings_sheet.dart';
 import '../widgets/pressable_scale.dart';
-import '../widgets/reading_progress_bar.dart';
 import '../controllers/chapter_editing_controller.dart';
 import '../controllers/reader_progress_controller.dart';
 import '../controllers/reader_search_controller.dart';
@@ -187,7 +186,6 @@ class _ReaderScreenState extends State<ReaderScreen>
   ScrollController? _simulationPreviewController;
   ScrollController? _simulationPaperBackController;
   late final ReaderWordCountController _wordCountController;
-  late final ValueNotifier<double> _visibleProgressNotifier;
   ScrollSnapshot _lastScrollSnapshot = const ScrollSnapshot(
     offset: 0,
     progress: 0,
@@ -219,7 +217,6 @@ class _ReaderScreenState extends State<ReaderScreen>
       growable: false,
     );
     _wordCountController = ReaderWordCountController(_storage, _book);
-    _visibleProgressNotifier = ValueNotifier<double>(0);
     _scrollController = _createScrollController();
     _selectionController.active.addListener(
       _handleTextSelectionActivityChanged,
@@ -568,7 +565,6 @@ class _ReaderScreenState extends State<ReaderScreen>
       progress: safeRestoredProgress,
     );
     _continuousAnchorChapterIndex = _chapterIndex;
-    _visibleProgressNotifier.value = safeRestoredProgress;
     _currentProgress = ReadingProgress(
       bookId: _book.id,
       chapterIndex: _chapterIndex,
@@ -950,7 +946,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     _discardPageTurnSnapshot();
     _discardReversePageTurnSnapshot();
     _wordCountController.dispose();
-    _visibleProgressNotifier.dispose();
     _pageTurnController.dispose();
     _pageDragOffsetNotifier.dispose();
     _pageCurlLiftNotifier.dispose();
@@ -1039,7 +1034,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     _currentProgress = updated;
     _lastScrollSnapshot = snapshot;
-    _visibleProgressNotifier.value = snapshot.progress;
     return updated;
   }
 
@@ -2021,7 +2015,6 @@ class _ReaderScreenState extends State<ReaderScreen>
       offset: targetOffset,
       progress: targetProgress,
     );
-    _visibleProgressNotifier.value = targetProgress;
 
     final previousController = _scrollController;
     previousController.removeListener(_scheduleProgressSave);
@@ -2107,7 +2100,6 @@ class _ReaderScreenState extends State<ReaderScreen>
       offset: targetOffset,
       progress: targetProgress,
     );
-    _visibleProgressNotifier.value = targetProgress;
 
     final previousController = _scrollController;
     previousController.removeListener(_scheduleProgressSave);
@@ -3954,20 +3946,6 @@ class _ReaderScreenState extends State<ReaderScreen>
                     ),
                   );
                 },
-              ),
-            ),
-
-            // ── Reading progress ─────────────────────
-            // Always visible, independent of _showOverlay — gives a sense of
-            // progress without needing to summon the header/footer bars.
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: ReadingProgressBar(
-                progress: _visibleProgressNotifier,
-                trackColor: themeColors.border,
-                fillColor: AppTheme.accent,
               ),
             ),
 
