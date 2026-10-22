@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -8,12 +10,16 @@ import 'screens/reader_screen.dart';
 import 'screens/pdf_reader_screen.dart';
 import 'models/book.dart';
 import 'models/reader_launch_args.dart';
+import 'services/frame_activity_log.dart';
+import 'services/motion_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   // Draw behind the status and navigation bars everywhere, so every screen can
   // run its own surface under the gesture bar instead of leaving a blank strip.
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  unawaited(MotionService.start());
+  FrameActivityLog.start();
   runApp(const ReadVibeApp());
 }
 
@@ -28,6 +34,12 @@ class ReadVibeApp extends StatelessWidget {
       theme: AppTheme.theme,
       darkTheme: AppTheme.darkTheme,
       themeMode: ThemeMode.system,
+      // Every route's lists report their scrolling here, so the display runs
+      // at its fastest rate only while something actually moves.
+      builder: (context, child) => NotificationListener<ScrollNotification>(
+        onNotification: MotionService.handleScroll,
+        child: child ?? const SizedBox.shrink(),
+      ),
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,

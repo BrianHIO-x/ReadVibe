@@ -126,6 +126,8 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   late final AnimationController _gridEntranceController;
   late final AnimationController _emptyIconController;
+  // The shelf (private or not) whose empty state has already floated its icon.
+  bool? _floatedEmptyShelf;
 
   final _gridScrollController = ScrollController();
   static const _minShelfColumns = 3;
@@ -432,15 +434,31 @@ class _LibraryScreenState extends State<LibraryScreen>
   void _syncShelfAnimations() {
     if (_shelfBooks.isNotEmpty) {
       _emptyIconController.stop();
+      _floatedEmptyShelf = null;
       if (_gridEntranceController.status == AnimationStatus.dismissed) {
         _gridEntranceController.forward();
       }
     } else {
       _gridEntranceController.reset();
-      if (!_emptyIconController.isAnimating) {
-        _emptyIconController.repeat(reverse: true);
-      }
+      _floatEmptyIcon();
     }
+  }
+
+  /// Floats the empty-shelf icon twice when that empty state appears, then
+  /// rests it. An endless loop would keep the whole screen redrawing for as
+  /// long as the empty shelf stayed open.
+  void _floatEmptyIcon() {
+    if (_floatedEmptyShelf == _privateMode) return;
+    _floatedEmptyShelf = _privateMode;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _emptyIconController.value = 0;
+      return;
+    }
+    unawaited(
+      _emptyIconController.repeat(reverse: true, count: 4).then((_) {
+        if (mounted) _emptyIconController.value = 0;
+      }),
+    );
   }
 
   void _persistSettings(ReaderSettings settings) {

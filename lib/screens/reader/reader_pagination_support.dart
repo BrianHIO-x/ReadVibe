@@ -673,16 +673,14 @@ class PageCurlPainter extends CustomPainter {
         )
         ..restore();
       // The lifted flap casts a soft shadow onto the part still lying flat.
-      canvas
-        ..save()
-        ..clipPath(curl.frontPath)
-        ..drawPath(
-          curl.backPath.shift(curl.direction * 2),
-          Paint()
-            ..color = Colors.black.withValues(alpha: 0.26 * strength)
-            ..maskFilter = MaskFilter.blur(BlurStyle.normal, 3 + 5 * strength),
-        )
-        ..restore();
+      _paintFlapShadow(
+        canvas,
+        curl,
+        clip: curl.frontPath,
+        rollEdge: crest,
+        sigma: 3 + 5 * strength,
+        alpha: 0.26 * strength,
+      );
       final isDarkPage = pageColor.computeLuminance() < 0.25;
       final paper = Color.lerp(
         pageColor,
@@ -719,6 +717,208 @@ class PageCurlPainter extends CustomPainter {
         oldDelegate.pageColor != pageColor ||
         oldDelegate.layer != layer;
   }
+
+  /// How far from the roll, in sigmas, the flap is thick enough to cast its
+  /// full shadow.
+  static const _flapShadowFade = 1.5;
+
+  /// How far around the tip, in sigmas, the shadow eases to the corner's
+  /// share.
+  static const _flapShadowTip = 1.5;
+
+  /// How many sigmas the flap must measure from roll to tip to cast its full
+  /// shadow.
+  static const _flapShadowSmall = 2.0;
+
+  /// How far the shadow is offset toward the tip, in logical pixels.
+  static const _flapShadowShift = 2.0;
+
+  /// Distances from the flap's edge, in sigmas, of the rings of the shadow
+  /// mesh. Between rings the falloff is interpolated, so they sit closest
+  /// where the gaussian bends most.
+  static const _flapShadowRings = <double>[0, 0.4, 0.8, 1.2, 1.7, 2.3, 3.0];
+
+  /// The gaussian blur of the flap, shifted toward its tip, as a mesh.
+  ///
+  /// The flap's flanks curve inward, and a mask blur on a concave path costs
+  /// an offscreen render and two blur passes on every frame of a turn. A
+  /// ribbon of triangles along the flap's free edge, coloured with the blur's
+  /// falloff at each ring, draws the same shadow in one pass. The flap is
+  /// painted over its inner edge afterwards.
+  ///
+  /// A blur is also weaker where little paper lies behind the edge. Toward
+  /// the roll the flap thins out, so the shadow fades in from [rollEdge]. At
+  /// the tip only the wedge inside the corner casts, the share of a straight
+  /// edge that the corner's angle is of a half turn, and the shadow eases to
+  /// that share around it.
+  static void _paintFlapShadow(
+    Canvas canvas,
+    PageCurlGeometry curl, {
+    required Path clip,
+    required Offset rollEdge,
+    required double sigma,
+    required double alpha,
+  }) {
+    final points = curl.backEdge;
+    if (points.length < 2) return;
+    final tip = curl.pointAt(1);
+    final direction = curl.direction;
+    // A flap narrower than the blur spreads what little shadow it casts thin.
+    final flapLength = (tip - rollEdge).distance;
+    final peak = alpha * (flapLength / (sigma * _flapShadowSmall)).clamp(0, 1);
+    if (peak <= 0) return;
+    final shift = direction * _flapShadowShift;
+    final tipShare = (curl.tipAngle / math.pi).clamp(0.0, 1.0);
+
+    // The outward side follows from which way the outline winds.
+    var area = 0.0;
+    for (var i = 0; i < points.length; i++) {
+      final a = points[i];
+      final b = points[(i + 1) % points.length];
+      area += a.dx * b.dy - b.dx * a.dy;
+    }
+    final outwardSign = area > 0 ? 1.0 : -1.0;
+    Offset outward(Offset from, Offset to) {
+      final along = to - from;
+      final length = along.distance;
+      if (length < 1e-6) return Offset.zero;
+      return Offset(along.dy, -along.dx) * (outwardSign / length);
+    }
+
+    double fromRoll(Offset at) =>
+        (at - rollEdge).dx * direction.dx + (at - rollEdge).dy * direction.dy;
+    final fadeLength = sigma * _flapShadowFade;
+    final tipRadius = sigma * _flapShadowTip;
+    bool eased(Offset at) =>
+        fromRoll(at) < fadeLength || (at - tip).distance < tipRadius;
+
+    // Each spine sample stands at a point of the edge facing one way. A
+    // corner turning outward gets a fan of samples so the shadow rounds it.
+    final spine = <({Offset at, Offset normal, double miter})>[];
+    void addCorner(int i) {
+      final at = points[i];
+      final before = i > 0 ? outward(points[i - 1], at) : null;
+      final after = i < points.length - 1 ? outward(at, points[i + 1]) : null;
+      if (before == null || after == null) {
+        final normal = before ?? after!;
+        if (normal != Offset.zero) {
+          spine.add((at: at, normal: normal, miter: 1));
+        }
+        return;
+      }
+      if (before == Offset.zero || after == Offset.zero) return;
+      final turn = math.atan2(
+        before.dx * after.dy - before.dy * after.dx,
+        before.dx * after.dx + before.dy * after.dy,
+      );
+      final next = points[i + 1] - at;
+      final convex = next.dx * before.dx + next.dy * before.dy < 0;
+      if (convex && turn.abs() > math.pi / 18) {
+        final steps = (turn.abs() / (math.pi / 12)).ceil();
+        for (var step = 0; step <= steps; step++) {
+          final angle = turn * step / steps;
+          final cos = math.cos(angle);
+          final sin = math.sin(angle);
+          spine.add((
+            at: at,
+            normal: Offset(
+              before.dx * cos - before.dy * sin,
+              before.dx * sin + before.dy * cos,
+            ),
+            miter: 1,
+          ));
+        }
+      } else {
+        final sum = before + after;
+        final normal = sum / sum.distance;
+        final cos = normal.dx * before.dx + normal.dy * before.dy;
+        spine.add((at: at, normal: normal, miter: 1 / math.max(cos, 0.5)));
+      }
+    }
+
+    // The shadow's strength is interpolated between samples, which is exact
+    // along a straight run except where it eases near the roll or the tip.
+    // Runs get extra samples there, and one either side of those stretches.
+    final step = sigma * 0.75;
+    for (var i = 0; i < points.length; i++) {
+      addCorner(i);
+      if (i == points.length - 1) break;
+      final from = points[i];
+      final run = points[i + 1] - from;
+      final length = run.distance;
+      final normal = outward(from, points[i + 1]);
+      if (normal == Offset.zero) continue;
+      Offset at(double distance) => from + run * (distance / length);
+      for (
+        var distance = step;
+        distance < length - step / 2;
+        distance += step
+      ) {
+        if (eased(at(distance - step)) ||
+            eased(at(distance)) ||
+            eased(at(distance + step))) {
+          spine.add((at: at(distance), normal: normal, miter: 1));
+        }
+      }
+    }
+    if (spine.length < 2) return;
+
+    final rings = _flapShadowRings.length;
+    final positions = <Offset>[];
+    final colors = <Color>[];
+    for (final sample in spine) {
+      final thickness = (fromRoll(sample.at) / fadeLength).clamp(0.0, 1.0);
+      final nearTip = ((sample.at - tip).distance / tipRadius).clamp(0.0, 1.0);
+      final strength = peak * thickness * (tipShare + (1 - tipShare) * nearTip);
+      final shiftOut =
+          shift.dx * sample.normal.dx + shift.dy * sample.normal.dy;
+      for (var ring = 0; ring < rings; ring++) {
+        final distance = _flapShadowRings[ring] * sigma;
+        positions.add(sample.at + sample.normal * (distance * sample.miter));
+        final opacity = ring == rings - 1
+            ? 0.0
+            : strength * _gaussianTail((distance - shiftOut) / sigma);
+        colors.add(Colors.black.withValues(alpha: opacity));
+      }
+    }
+    final indices = <int>[];
+    for (var j = 0; j < spine.length - 1; j++) {
+      for (var ring = 0; ring < rings - 1; ring++) {
+        final here = j * rings + ring;
+        final next = here + rings;
+        indices.addAll([here, next, next + 1, here, next + 1, here + 1]);
+      }
+    }
+    canvas
+      ..save()
+      ..clipPath(clip)
+      ..drawVertices(
+        ui.Vertices(
+          ui.VertexMode.triangles,
+          positions,
+          colors: colors,
+          indices: indices,
+        ),
+        BlendMode.dst,
+        Paint(),
+      )
+      ..restore();
+  }
+
+  /// The share of a unit gaussian lying more than [x] deviations above its
+  /// mean (Abramowitz and Stegun 7.1.26).
+  static double _gaussianTail(double x) {
+    final z = x.abs() / math.sqrt2;
+    final t = 1 / (1 + 0.3275911 * z);
+    final erfc =
+        t *
+        (0.254829592 +
+            t *
+                (-0.284496736 +
+                    t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))) *
+        math.exp(-z * z);
+    return x >= 0 ? erfc / 2 : 1 - erfc / 2;
+  }
 }
 
 /// A leaf lifted by one corner and rolled back over itself.
@@ -742,6 +942,13 @@ class PageCurlGeometry {
   /// The leaf's back where it has rolled over the page.
   final Path backPath;
 
+  /// The free edge of [backPath] in order, without the side that runs along
+  /// the roll.
+  final List<Offset> backEdge;
+
+  /// The flap's angle at its tip, in radians; pi when the tip is no corner.
+  final double tipAngle;
+
   /// The page underneath, uncovered between the corner and the roll.
   final Path underPath;
 
@@ -756,6 +963,8 @@ class PageCurlGeometry {
   const PageCurlGeometry._({
     required this.frontPath,
     required this.backPath,
+    required this.backEdge,
+    required this.tipAngle,
     required this.underPath,
     required this.backTransform,
     required this.corner,
@@ -895,9 +1104,20 @@ class PageCurlGeometry {
       ..setEntry(0, 3, 2 * foldDistance * along.dx)
       ..setEntry(1, 3, 2 * foldDistance * along.dy);
 
+    final backPoints = onPage(back);
+    // Each flank ends half a foot to the side of the axis, a quarter of the
+    // reach short of the tip, and runs straight to the tip from there.
+    final towardTip = reach * (1 - crest - 0.125);
+    final tipAngle =
+        (math.atan2(horizontalFoot.abs() / 2, towardTip) +
+                math.atan2(verticalFoot.abs() / 2, towardTip))
+            .clamp(0.0, math.pi)
+            .toDouble();
     return PageCurlGeometry._(
       frontPath: frontPath,
-      backPath: Path()..addPolygon(onPage(back), true),
+      backPath: Path()..addPolygon(backPoints, true),
+      backEdge: backPoints,
+      tipAngle: tipAngle,
       underPath: Path()..addPolygon(onPage(under), true),
       backTransform: backTransform,
       corner: cornerPoint,

@@ -80,10 +80,11 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `MainActivity.kt` | 原生宿主 Activity。注册四个 MethodChannel：`incoming_file`（串行消费外部 ACTION_VIEW 文件并复制到应用缓存）、`book_picker`（`ACTION_OPEN_DOCUMENT` 选书，复制走独立线程池，回到前台时若请求还悬着即按取消作答，复制连续 45 秒没有新字节即以中文错误结束）、`system_text_actions`（查询并启动系统翻译/搜索目标）、`document_parser`（经单线程执行器调用 Apache POI 提取旧版 DOC 正文），更新安装通道交给 `AppUpdateHandler`。至于隐私书架的生物验证，则由 `BiometricHandler` 负责。内含 AI 与浏览器包名白名单，换用显式组件启动防劫持。 |
+| `MainActivity.kt` | 原生宿主 Activity。注册四个 MethodChannel：`incoming_file`（串行消费外部 ACTION_VIEW 文件并复制到应用缓存）、`book_picker`（`ACTION_OPEN_DOCUMENT` 选书，复制走独立线程池，回到前台时若请求还悬着即按取消作答，复制连续 45 秒没有新字节即以中文错误结束）、`system_text_actions`（查询并启动系统翻译/搜索目标）、`document_parser`（经单线程执行器调用 Apache POI 提取旧版 DOC 正文），更新安装通道交给 `AppUpdateHandler`。至于隐私书架的生物验证，则由 `BiometricHandler` 负责。动效期间的刷新率请求与系统省电模式状态由 `MotionHandler` 负责。内含 AI 与浏览器包名白名单，换用显式组件启动防劫持。 |
 | `BookImportProbe.kt` | 选书前的轻量嗅探。只读 SAF 文件的头部与 ZIP 中央目录判别类型，安装包在复制前即被拒，复制时按字节回报进度供上层判断是否仍在推进。 |
 | `AppUpdateHandler.kt` | 更新安装通道 `app_update`。校验放在后台执行器：安装包须位于缓存内的更新目录、包名与版本名同更新信息一致、构建号高于已安装版本、签名与当前应用相同；通过后按需引导用户开启未知来源安装权限，或经 FileProvider 授权打开系统安装程序，校验期间重复调用返回 `UPDATE_BUSY`。 |
 | `BiometricHandler.kt` | 隐私书架的生物验证通道 `biometric`。`capabilities` 返回指纹与人脸硬件是否向应用开放，并用 `BiometricManager` 判断系统里是否录入了可用的生物信息。`authenticate` 调起框架自带的 `BiometricPrompt`，不需要把宿主改成 `FragmentActivity`。从 Android 11 开始，验证框会接受二类生物信息，从而覆盖常见的人脸解锁。点击验证框里的“使用密码”时，结果会以 `fallback` 回传。通道同一时间只受理一次验证，并把重复的调用直接按取消作答。 |
+| `MotionHandler.kt` | 动效通道 `motion`。`setHighRefreshRate` 在画面运动期间把窗口的首选显示模式设为当前分辨率下刷新率最高的一档，运动结束后改回无偏好，让系统在画面静止时降到空闲刷新率；系统省电模式开启时不发出请求。`isPowerSaveMode` 返回省电模式状态，`ACTION_POWER_SAVE_MODE_CHANGED` 广播到达时以 `powerSaveModeChanged` 通知 Dart 端。 |
 | `BookExportHandler.kt` | 导出通道 `book_export`。把应用私有暂存文件写入用户经系统界面选定的位置；来源限定在导出缓存目录内，单次导出串行，重复调用返回 `EXPORT_BUSY`。 |
 | `BackgroundTaskRunner.kt` | 通用后台任务边界。把工作提交到 worker 执行器、把成功与异常回传到 UI 执行器，支持 isActive 开关在销毁后抑制排队任务与迟到回调。 |
 | `PdfChannelHandler.kt` | PDF 通道适配层。解析方法调用为不可变 `PdfRequest`，按操作类型分发到渲染或分析两个单线程池，`InvalidPasswordException` 统一映射为 `PDF_PASSWORD_REQUIRED` 错误码；自身不含文档逻辑。 |
@@ -136,7 +137,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `main.dart` | 应用入口。初始化 Flutter 绑定、切换到 `SystemUiMode.edgeToEdge` 让所有页面自绘到系统栏之下，随后启动 `ReadVibeApp`；配置 MaterialApp 的亮暗主题、锁定到 `zh-Hans-CN` 的本地化（同时决定汉字字形取简体形，避免系统语言为日文或繁体时共用码位被塑形成他区字形）与 `onGenerateRoute` 路由表：`/` 进书架，`/reader` 依据 `ReaderLaunchArgs`（或裸 `Book`）携带的封面快照与起始矩形构建书香开页过渡，PDF 书走 `PdfReaderScreen`，其余走 `ReaderScreen`。 |
+| `main.dart` | 应用入口。初始化 Flutter 绑定、切换到 `SystemUiMode.edgeToEdge` 让所有页面自绘到系统栏之下，随后启动 `ReadVibeApp`；配置 MaterialApp 的亮暗主题、锁定到 `zh-Hans-CN` 的本地化（同时决定汉字字形取简体形，避免系统语言为日文或繁体时共用码位被塑形成他区字形）与 `onGenerateRoute` 路由表：`/` 进书架，`/reader` 依据 `ReaderLaunchArgs`（或裸 `Book`）携带的封面快照与起始矩形构建书香开页过渡，PDF 书走 `PdfReaderScreen`，其余走 `ReaderScreen`。启动时一并开启 `MotionService` 与 profile 构建专用的 `FrameActivityLog`，并在 MaterialApp 的 `builder` 中接收全应用的滚动通知，作为高刷请求的依据。 |
 
 ### lib/models/（纯数据模型，零框架依赖或仅 Material 枚举展示）
 
@@ -178,6 +179,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 |---|---|
 | `storage_service.dart` | 持久化实现核心。书架元数据存于应用数据目录的 `library.json`（tmp/bak/rename 原子提交，静态按根目录缓存解码结果，首次读取时从旧的 `readvibe_books` 偏好键一次性迁移并删除该键）——Android 每次提交都会重写整份偏好 XML，把书架移出后，阅读中高频的进度写入不再连带重写整个书架；小状态仍入 SharedPreferences，章节正文按章节落为独立 JSON 文件（30 秒 IO 超时、SHA-256 校验、带大小上限的 LRU 章节缓存）；每批章节的编码、摘要与落盘都在 worker isolate 内同步完成，正文只跨 isolate 一次，章节文件不再逐个 flush——批次大小按章节总数推导，worker 次数与进度回报次数都不随书变长而增长，`saveBook` 沿 `onChapterProgress` 逐批回报已落盘章节数；暂存目录经 rename 才成为该书，清单里的长度与摘要负责识别写到一半的载荷，连载长篇导入因此不再按章节数量支付平台往返；`_LazyChapter` 让大书只有被阅读到的章节才解码，载荷一次读为字节后直接校验摘要（不再解码再重编码），且每章每会话只校验一次，因为该路径运行在 UI isolate 上。另提供 `measureStorageUsage`/`clearTemporaryCaches`（目录遍历在 isolate 中完成）与 `resetLibraryCache`。写路径用全局队列串行化书架级操作与逐书章节写入，删除书时联动清理字体、PDF 源与渲染缓存，并复用 `ReaderPreferencesStore` 与 `ManagedBookResources`。实现上同时满足书架、阅读、PDF 三个仓库接口，并 `export` 出 `StorageCleanupResult`。`setBooksPrivate` 只改写书架元数据里的隐私标记，不会触碰章节载荷。改写已有书籍时，`saveBook` 会沿用原来的标记，导入新书时只在同一书架内为重名书籍编号。 |
 | `private_shelf_lock.dart` | 隐私书架的密码与验证设置。6 位数字密码只以加盐的 PBKDF2-HMAC-SHA256 摘要保存在偏好里，并在 `Isolate.run` 中完成派生计算。连续输错 5 次以后，密码键盘会锁定 30 秒。此后每次输错，锁定时间都会加倍，最长为 15 分钟。错误次数会持久保存，重启应用之后依然有效。`PrivateShelfConfig` 记录已开启的指纹、人脸，以及解锁时默认使用的一种。调起生物验证的时候，请求会经 `biometric` 通道交给原生层。 |
+| `motion_service.dart` | 动效的显示与电源提示。任何运动的部件在运动期间持有一个理由，至少有一个理由时请求最高刷新率，最后一个理由释放 0.6 秒后撤回请求；理由 1.5 秒内未续期即自动过期，到期时间按单调时钟计算，系统改时间也不会让请求滞留。`handleScroll` 处理全应用的滚动通知，`powerSaveMode` 对外提供系统省电模式状态。原生对应 `MotionHandler.kt`。 |
+| `frame_activity_log.dart` | profile 构建的帧数日志。每 10 秒输出一次这段时间绘制的帧数与最慢的构建、光栅耗时，画面静止时没有输出；release 与 debug 构建不启动。 |
 | `reader_preferences_store.dart` | SharedPreferences 中的阅读态存取。管理文字进度、文字书书签与笔记、PDF 进度（含旧记录一次性迁移）、PDF 书签、笔记、显示主题、目录折叠组与阅读设置；静态写版本队列保证旧写不会覆盖新写，已删书的读取一律短路返回空。 |
 | `managed_book_resources.dart` | 导入二进制资源的生命周期。提供字体保存（.ttf/.otf、64MB 上限、文件名消毒）、PDF 副本保存（1GB 上限、原子 tmp 重命名）与删除；删除 PDF 源前先经网关清渲染缓存，路径白名单限定在应用私有目录内，防止误删兄弟资源。 |
 | `book_id.dart` | 导入书籍的身份。`nextBookId` 在时钟重复或回拨时仍产出唯一 id（进程内单调序号加随机后缀），因为 id 同时用作章节目录、PDF 副本、内嵌字体族和阅读状态的键；`uniqueLibraryTitle` 为重复导入的同名书编号，不超过重命名上限且不切开代理对。 |
@@ -207,8 +210,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `app_theme.dart` | 全局设计系统。定义暖米色调色板常量、四种阅读主题色 `ReaderThemeColors`（背景/正文/次级/头部/边框/强调）、`getReaderTheme`（系统主题解析）、`systemUiOverlayStyle`（透明状态栏与导航栏，按背景亮度选择图标亮度），以及完整亮/暗两套 `ThemeData`（无水波纹、自绘 SnackBar 透明）。 |
-| `app_motion.dart` | 动效令牌与开书过渡。集中全部时长与曲线令牌（按压 96ms、书架重排、菜单、底部抽屉、翻 300ms、开书 680ms 等）；`buildFadeScaleRoute` 实现三阶段书香开页路由：封面快照提起放大、单页绕左缘翻开、阅读面接管，关闭为逐帧倒放；内部 `_BookRouteTransition`、`_BookRouteFrame`、`_OpeningPage` 管理阴影、圆角、折页阴影与封面 RawImage。 |
+| `app_theme.dart` | 全局设计系统。定义暖米色调色板常量、阅读主题色 `ReaderThemeColors`（背景/正文/次级/头部/边框/强调；浅色、暖色、深色与 OLED 纯黑四套，跟随系统时在暖色与深色之间选择）、`getReaderTheme`（系统主题解析）、`systemUiOverlayStyle`（透明状态栏与导航栏，按背景亮度选择图标亮度），以及完整亮/暗两套 `ThemeData`（无水波纹、自绘 SnackBar 透明）。 |
+| `app_motion.dart` | 动效令牌与开书过渡。集中全部时长与曲线令牌，例如按压 96ms、翻页 300ms、开书 680ms 与合书 540ms；`buildFadeScaleRoute` 实现三阶段书香开页路由：封面快照提起放大、单页绕左缘翻开、阅读面接管，关闭按同一时间线倒放，时长为开书的 0.8 倍。路由本身不透明：开合动画进行时书架照常露出，停稳后书架退出画面、其动画暂停，过渡层也不再绘制暗化层、外阴影、底色与圆角裁剪；内部 `_BookRouteTransition`、`_BookRouteFrame`、`_OpeningPage` 管理阴影、圆角、折页阴影与封面 RawImage。 |
 | `app_overlay_theme.dart` | 阅读主题下的界面覆盖层。`AppOverlayTheme` 依据 `ReaderThemeColors` 现场派生整套主题（按钮、输入框、对话框、抽屉、菜单、Tooltip、滑条、ListTile），并提供 `isDark`、`danger`、`barrier`、`shape` 静态助手，保证任何页面上浮出的控件与当前阅读纸色一致。 |
 | `app_spacing.dart` | 间距与圆角令牌。`AppSpacing`（4/8/12/16/24/32）与 `AppRadius`（8/12/16/24 胶囊）。 |
 
@@ -227,7 +230,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `reader_bookmark_sheet.dart` | 文字书书签列表面板。按正文顺序展示章节、摘录、笔记、章内百分比与时间；行尾菜单可补写笔记或删除。自身不做持久化，全部经回调交回阅读页，保证书签列表只有一个写入方。同文件的 `showReaderNoteDialog` 负责新建与编辑笔记，返回空串表示清除笔记但保留书签。 |
 | `pdf_page_text_sheet.dart` | PDF 单页文字面板。PDF 按位图渲染，页面本身无法承载选区；该面板把同一页的文字放进普通 `SelectionArea`，恢复复制、分享与系统文字动作，并标明来源是文字层还是识别结果，附带整页复制。 |
 | `book_search_sheet.dart` | 书内搜索面板。泛型绑定 `SearchMatch`，防重复提交与过期回包（串号丢弃）；按命中区间绘制加粗高亮片段；结果为空、尚未搜索或出错分态展示，达上限提示缩小关键词。 |
-| `reader_settings_sheet.dart` | 阅读设置面板。字号、行高、字体（组合 `FontSettingsSection`）、粗细、页边距、段距、阅读模式与翻页效果、主题全部用自绘滑块式分段控件（高亮块以 `TweenAnimationBuilder` 平移切换）；`_RollingModeDescription` 用于阅读模式说明的上下滚动切换；仿真模式才显示翻页效果选项。 |
+| `reader_settings_sheet.dart` | 阅读设置面板。字号、行高、字体（组合 `FontSettingsSection`）、粗细、页边距、段距、阅读模式与翻页效果、主题全部用自绘滑块式分段控件（高亮块以 `TweenAnimationBuilder` 平移切换）；`_RollingModeDescription` 用于阅读模式说明的上下滚动切换；仿真模式才显示翻页效果选项。系统省电模式开启且选中仿真翻页时，翻页效果下方提示暂以平滑翻页显示。 |
 | `font_settings_section.dart` | 字体选择区。系统/宋体/导入三选一卡片加导入按钮，导入卡副标题显示字体名并在无导入字体时禁用，选中卡片微放大并描边强调。 |
 | `global_settings_sheet.dart` | 全局设置侧栏（书架右上打开）。隐私书架入口（设置、进入或锁上，以及验证方式与密码）、字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口、存储空间区与开源许可页入口；版本号由书架层传入。同文件的 `StorageUsageSection` 自行异步统计并展示分类占用，提供清理缓存与重新统计；`formatStorageBytes` 负责字节展示。 |
 | `private_shelf_sheets.dart` | 隐私书架的交互面板。`_PinSheet` 自绘 6 位数字键盘，同时承担创建密码和验证密码两种用途。由于键盘是自绘的，系统输入法接触不到密码。`unlockPrivateShelf` 先调起默认的生物验证，失败或取消后再显示密码键盘。忘记密码的时候，已开启的生物验证可以用来重设密码。两种验证都没开启时，只能交由调用方清空隐私书架。`showPrivateShelfSettings` 负责开关指纹和人脸、选择默认方式、修改密码与关闭隐私书架，开启某一种之前会先验证一次。 |
@@ -238,8 +241,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `library_screen.dart` | 书架页。书架网格与拖动排序区在底部留出系统手势条高度，内容滚动到手势条之下。经四个可注入依赖（仓库、更新器、导出器、隐私书架锁）初始化门面服务；负责书籍装载与串号保护、文件选择导入、外部来书导入、开书（含封面截屏快照与书香开页路由）、长按动作面板（改名/排序/移入或移出隐私书架/删除/导出）、按宽度推导列数的响应式书架与同规格拖动排序网格（`_shelfMetrics` 为两者唯一来源）、搜索与筛选、维护调度、更新检查（3 秒后台静默检查、 dismissed 三天静默）与全局设置侧栏、四种空态（无书/无结果/导入中/打开中）与入场动画。导入按钮显示当前步骤与保存百分比；导入被“静默看门狗”看管，连续 100 秒没有任何进度回报即以中文提示结束等待并恢复书架，长书只要还在推进就不会被打断。隐私书架模式只在本次使用期间有效，离开应用（系统选择器与保存界面除外）即自动锁上，并关闭从书架弹出的面板。`_books` 始终保存全部书籍，从而让排序和维护看到整个书库。显示书架网格和拖动排序时，页面只取当前书架的子集。在隐私书架里导入的书籍，会直接写成隐私书籍。 |
-| `reader_screen.dart` | 文字阅读页（核心）。三种阅读模式：分章（横滑切章、可编辑）、滚动（跨章连续）、仿真（整页分页、仿真/平滑翻页）。职责涵盖：设置装载与防抖持久化（键盘瞬时内嵌不触发重排）、阅读进度记录与恢复（文字锚点与偏移多通道）、书签与笔记（顶栏开关、列表面板、选区写笔记、锚点跳转，开关状态缓存以免每帧重排版）、EPUB 站内链接与脚注就地展开、目录/搜索/书签/编辑/设置五面板联动、翻页拖拽手势与速度惯性、仿真卷页的页角跟随（页角按起手高度选定，先以两倍速度追上手指，再停在指尖下方）、相邻页与相邻章预热渲染、沉浸式系统栏（纸面铺满到屏幕顶边，顶端不叠加常驻元素）、阅读菜单边缘对齐行界（展开时遍历可见 `RenderParagraph` 找出被顶栏或底栏切开的行，用栏内留白补到行边界，仿真页按 strut 行盒计算，滚动停止后重算）、字体加载回退、Epub 排版委托与保活保留选区等。状态编排分散于五个 controller，滚动控制器重建与预加载缓存集中在本 State。 |
+| `library_screen.dart` | 书架页。书架网格与拖动排序区在底部留出系统手势条高度，内容滚动到手势条之下。经四个可注入依赖（仓库、更新器、导出器、隐私书架锁）初始化门面服务；负责书籍装载与串号保护、文件选择导入、外部来书导入、开书（含封面截屏快照与书香开页路由）、长按动作面板（改名/排序/移入或移出隐私书架/删除/导出）、按宽度推导列数的响应式书架与同规格拖动排序网格（`_shelfMetrics` 为两者唯一来源）、搜索与筛选、维护调度、更新检查（3 秒后台静默检查、 dismissed 三天静默）与全局设置侧栏、四种空态（无书/无结果/导入中/打开中）与入场动画，空态图标在出现时浮动两个来回后静止。导入按钮显示当前步骤与保存百分比；导入被“静默看门狗”看管，连续 100 秒没有任何进度回报即以中文提示结束等待并恢复书架，长书只要还在推进就不会被打断。隐私书架模式只在本次使用期间有效，离开应用（系统选择器与保存界面除外）即自动锁上，并关闭从书架弹出的面板。`_books` 始终保存全部书籍，从而让排序和维护看到整个书库。显示书架网格和拖动排序时，页面只取当前书架的子集。在隐私书架里导入的书籍，会直接写成隐私书籍。 |
+| `reader_screen.dart` | 文字阅读页（核心）。三种阅读模式：分章（横滑切章、可编辑）、滚动（跨章连续）、仿真（整页分页、仿真/平滑翻页）。职责涵盖：设置装载与防抖持久化（键盘瞬时内嵌不触发重排）、阅读进度记录与恢复（文字锚点与偏移多通道）、书签与笔记（顶栏开关、列表面板、选区写笔记、锚点跳转，开关状态缓存以免每帧重排版）、EPUB 站内链接与脚注就地展开、目录/搜索/书签/编辑/设置五面板联动、翻页拖拽手势与速度惯性（松手后以手指速度起步的临界阻尼弹簧落定，系统要求减少动画时沿用定时落定）、系统省电模式下仿真翻页改用平滑翻页、仿真卷页的页角跟随（页角按起手高度选定，先以两倍速度追上手指，再停在指尖下方）、相邻页与相邻章预热渲染、沉浸式系统栏（纸面铺满到屏幕顶边，顶端不叠加常驻元素）、阅读菜单边缘对齐行界（展开时遍历可见 `RenderParagraph` 找出被顶栏或底栏切开的行，用栏内留白补到行边界，仿真页按 strut 行盒计算，滚动停止后重算）、字体加载回退、Epub 排版委托与保活保留选区等。状态编排分散于五个 controller，滚动控制器重建与预加载缓存集中在本 State。 |
 | `pdf_reader_screen.dart` | PDF 阅读页。加载进度、书签、笔记、显示主题与内嵌批注五源合并；`PageView` 翻页配双指缩放（缩放页横向拖动锁定为平移）、进度滑杆、跳页对话框、书签笔记列表、大纲（缩进层级）、双通道搜索（文件文本或逐页 OCR，OCR 结果做空白规范化）、本页文字面板（优先文字层、缺失时回退 OCR）、显示主题切换与源文件丢失兜底删除；渲染任务按 `页:宽度` 去重并限在途 18 个。 |
 
 ### lib/screens/reader/
@@ -247,7 +250,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | 文件 | 作用 |
 |---|---|
 | `reader_epub_layout.dart` | EPUB 排版引擎。测量（按基行数取整的块高）、锚点映射（标题优先的章内定位）、渲染（富文本块到 Widget：安全对比度前景色、混合出版商背景、图片高度钳制与替代文本兜底）；含链接的块改由 `_EpubLinkedText` 有状态渲染，它持有并释放 `TapGestureRecognizer`，测量路径不生成识别器；行高基准由仿真模式下注入的函数解析，与用户的字体设置联乘。 |
-| `reader_pagination_support.dart` | 分页与翻页支持（15 类）。`SimulationLayoutSignature` 判定布局参数变化；`ExactScrollExtentSliverChildBuilderDelegate` 把未知章尾的滚动估值锁到精确页高，避免最后页“回跳”；`FullViewportPagingScrollController` 把滚动范围补齐整页（补尾空白纸）；`SelectionAwareScrollController` 在选区存在时保持滚动位置不丢失；`ReadingTextAnchor`/`ScrollSnapshot` 描述恢复锚点；`SmoothTurnPages` 与 `CurlBookTurnPages` 分别实现位移翻页，以及跟随手指卷起页角的仿真翻页。卷页几何 `PageCurlGeometry` 在折痕坐标系中构造平铺正面、纸背与下层页三块区域，并按带宽裁剪来避开竖直折痕的无穷远控制点。`PageCurlClipper` 负责裁出平铺正面与纸背，供页面和镜像背面使用。`PageCurlPainter` 在底层绘制下层阴影与纸色，再在顶层叠上卷曲高光。 |
+| `reader_pagination_support.dart` | 分页与翻页支持（15 类）。`SimulationLayoutSignature` 判定布局参数变化；`ExactScrollExtentSliverChildBuilderDelegate` 把未知章尾的滚动估值锁到精确页高，避免最后页“回跳”；`FullViewportPagingScrollController` 把滚动范围补齐整页（补尾空白纸）；`SelectionAwareScrollController` 在选区存在时保持滚动位置不丢失；`ReadingTextAnchor`/`ScrollSnapshot` 描述恢复锚点；`SmoothTurnPages` 与 `CurlBookTurnPages` 分别实现位移翻页，以及跟随手指卷起页角的仿真翻页。卷页几何 `PageCurlGeometry` 在折痕坐标系中构造平铺正面、纸背与下层页三块区域，并按带宽裁剪来避开竖直折痕的无穷远控制点。`PageCurlClipper` 负责裁出平铺正面与纸背，供页面和镜像背面使用。`PageCurlPainter` 在底层绘制下层阴影与纸色，再在顶层叠上卷曲高光。翻起页投在平铺页上的影子由沿其自由边铺开的顶点条带一次绘出：各圈顶点的透明度按高斯衰减计算，在卷折附近与尖角处按纸片厚度和角度减弱，因此不需要离屏模糊。 |
 | `reader_layout_cache.dart` | 阅读会话缓存。以章节序号（而非 Chapter 对象）为键缓存段落与测量高度，容量受章节数与字符数双上限约束；正文变化整体失效，排版与宽度签名单独失效已测高度。 |
 | `reader_selection_support.dart` | 文字选区组件。`ReaderSelectionArea` 包裹正文并为长按/双击选区定制工具栏：折叠或超界时换到安全位置，菜单提供复制、分享、全选与六个受控翻译/搜索目标（AI 图标置入，记住默认目标可勾选），选择“记住”后下次直达；边缘拖选经 `ReaderSelectionEdgeScroller` 协同，模态打开即挂起选区。 |
 | `reader_selection_edge_scroller.dart` | 边缘拖选自动滚动。手柄或拖选位置进入上下 56px 边缘带时，以 Ticker 驱动最高 420px/s 的速度滚动；由选区状态启动停止、按键与机型顶栏变化重算夹持，`_EdgeSelectionDelegate` 替换 SelectionArea 的默认边缘行为。 |
@@ -281,7 +284,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 ## 命名与协作速查
 
-- **协议通道**：`com.readvibe.app/` 前缀下的 `incoming_file`、`book_picker`、`system_text_actions`、`document_parser`、`app_update`、`book_export`、`pdf_renderer` 分别承载平台能力；`reader_window` 由阅读窗口协调器访问。
+- **协议通道**：`com.readvibe.app/` 前缀下的 `incoming_file`、`book_picker`、`system_text_actions`、`document_parser`、`app_update`、`book_export`、`pdf_renderer`、`biometric`、`motion` 分别承载平台能力；`reader_window` 由阅读窗口协调器访问。
 - **文档级不变量**：正文与解析全部本地执行；章节编辑只改私有副本；导出位置由用户经系统界面选择；签名材料不入库。
 - **worker 闭包**：交给 `Isolate.run` 的闭包一律写在顶层或类级函数里，参数只收可传递的值。写在方法体内会与该方法的捕获上下文共用，凡是那里放着的回调、Future、Timer 或界面状态都会被一起发送，AOT 正式包因此抛 `Illegal argument in isolate message`，且只在真机或模拟器的 release 构建上暴露。
 - **版本约定**：当前公开版本系列为 `0.7.X`，Android 内部构建号同步递增，唯一来源为 `pubspec.yaml`；release 构建缺 `key.properties` 即失败。

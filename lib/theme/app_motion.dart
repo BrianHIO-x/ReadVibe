@@ -60,9 +60,10 @@ class AppMotion {
   /// the book is the emotional centre of the reader.
   static const bookOpen = Duration(milliseconds: 680);
 
-  /// Book closing route transition. It deliberately uses the exact opening
-  /// duration so popping the route is a frame-for-frame reverse timeline.
-  static const bookClose = bookOpen;
+  /// Book closing route transition. Popping plays the opening timeline
+  /// backwards, a fifth quicker: someone closing a book is usually on their
+  /// way back to the shelf.
+  static const bookClose = Duration(milliseconds: 540);
 
   /// Low-frequency route/dialog transition.
   static const slow = Duration(milliseconds: 360);
@@ -104,6 +105,10 @@ class AppMotion {
 ///
 /// Popping the route runs the same timeline backwards, so closing feels like
 /// folding that page shut and returning it to the shelf.
+///
+/// The route is opaque. Flutter lets the shelf show through only while the
+/// page is opening or closing; once it rests open the shelf leaves the frame
+/// and its tickers pause, and the transition paints nothing of its own.
 PageRouteBuilder<T> buildFadeScaleRoute<T>(
   WidgetBuilder builder, {
   RouteSettings? settings,
@@ -113,7 +118,6 @@ PageRouteBuilder<T> buildFadeScaleRoute<T>(
 }) {
   return PageRouteBuilder<T>(
     settings: settings,
-    opaque: false,
     transitionDuration: AppMotion.bookOpen,
     reverseTransitionDuration: AppMotion.bookClose,
     pageBuilder: (context, animation, secondaryAnimation) => builder(context),
@@ -162,6 +166,10 @@ class _BookRouteTransition extends StatelessWidget {
         }
 
         final progress = _clamp01(animation.value);
+        // Fully open, the reader covers the screen by itself. Every layer of
+        // the transition stays in place with nothing to paint, so the reader
+        // below is never reparented.
+        final atRest = progress >= 1.0;
         final fullRect = Offset.zero & screenSize;
         final startRect = _resolveStartRect(sourceRect, fullRect);
         final routeColors = transitionColors?.value;
@@ -224,9 +232,11 @@ class _BookRouteTransition extends StatelessWidget {
             clipBehavior: Clip.hardEdge,
             children: [
               IgnorePointer(
-                child: ColoredBox(
-                  color: Colors.black.withValues(alpha: dimOpacity),
-                ),
+                child: atRest
+                    ? const SizedBox.expand()
+                    : ColoredBox(
+                        color: Colors.black.withValues(alpha: dimOpacity),
+                      ),
               ),
               Positioned.fromRect(
                 rect: rect,
@@ -234,17 +244,25 @@ class _BookRouteTransition extends StatelessWidget {
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(radius),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: shadowOpacity),
-                          blurRadius: _lerpDouble(18, 44, liftShadow),
-                          spreadRadius: _lerpDouble(0, 2, liftShadow),
-                          offset: Offset(0, _lerpDouble(8, 22, liftShadow)),
-                        ),
-                      ],
+                      boxShadow: atRest
+                          ? const <BoxShadow>[]
+                          : [
+                              BoxShadow(
+                                color: Colors.black.withValues(
+                                  alpha: shadowOpacity,
+                                ),
+                                blurRadius: _lerpDouble(18, 44, liftShadow),
+                                spreadRadius: _lerpDouble(0, 2, liftShadow),
+                                offset: Offset(
+                                  0,
+                                  _lerpDouble(8, 22, liftShadow),
+                                ),
+                              ),
+                            ],
                     ),
                     child: _BookRouteFrame(
                       screenSize: screenSize,
+                      atRest: atRest,
                       radius: radius,
                       contentProgress: contentProgress,
                       coverOpenProgress: coverOpenProgress,
@@ -268,6 +286,7 @@ class _BookRouteTransition extends StatelessWidget {
 
 class _BookRouteFrame extends StatelessWidget {
   final Size screenSize;
+  final bool atRest;
   final double radius;
   final double contentProgress;
   final double coverOpenProgress;
@@ -280,6 +299,7 @@ class _BookRouteFrame extends StatelessWidget {
 
   const _BookRouteFrame({
     required this.screenSize,
+    required this.atRest,
     required this.radius,
     required this.contentProgress,
     required this.coverOpenProgress,
@@ -299,8 +319,11 @@ class _BookRouteFrame extends StatelessWidget {
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
-      child: ColoredBox(
-        color: backgroundColor,
+      clipBehavior: radius > 0 ? Clip.antiAlias : Clip.none,
+      // ColoredBox draws even a transparent colour, a decoration without one
+      // draws nothing.
+      child: DecoratedBox(
+        decoration: BoxDecoration(color: atRest ? null : backgroundColor),
         child: Stack(
           fit: StackFit.expand,
           clipBehavior: Clip.hardEdge,
