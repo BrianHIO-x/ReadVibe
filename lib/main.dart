@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart'
+    show LicenseEntry, LicenseEntryWithLineBreaks, LicenseRegistry;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -20,7 +22,16 @@ void main() {
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   unawaited(MotionService.start());
   FrameActivityLog.start();
+  LicenseRegistry.addLicense(_bundledFontLicenses);
   runApp(const ReadVibeApp());
+}
+
+/// The Arphic Public License asks for its text to travel with the Kaiti
+/// font, so it is listed beside the package licenses.
+Stream<LicenseEntry> _bundledFontLicenses() async* {
+  yield LicenseEntryWithLineBreaks(const [
+    'AR PL KaitiM GB（文鼎 PL 简中楷）',
+  ], await rootBundle.loadString('assets/licenses/arphic-public-license.txt'));
 }
 
 class ReadVibeApp extends StatelessWidget {
@@ -49,11 +60,13 @@ class ReadVibeApp extends StatelessWidget {
       // also settles Han glyph selection: without them a device set to
       // Japanese or Traditional Chinese can shape shared codepoints with the
       // wrong regional forms.
-      supportedLocales: const [Locale.fromSubtags(
-        languageCode: 'zh',
-        scriptCode: 'Hans',
-        countryCode: 'CN',
-      )],
+      supportedLocales: const [
+        Locale.fromSubtags(
+          languageCode: 'zh',
+          scriptCode: 'Hans',
+          countryCode: 'CN',
+        ),
+      ],
       locale: const Locale.fromSubtags(
         languageCode: 'zh',
         scriptCode: 'Hans',

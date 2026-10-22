@@ -157,7 +157,7 @@ class GlobalSettingsSheet extends StatelessWidget {
                     ),
                     const SizedBox(height: AppSpacing.md),
                     Text(
-                      '可选择系统字体、内置宋体或自定义导入字体。这里的字体设置会作为全局阅读字体使用。',
+                      '除了系统字体，还可以选择内置的宋体、楷体或导入的字体。这里选定的字体，会作为全局阅读字体使用。',
                       style: TextStyle(
                         color: colors.secondary,
                         fontSize: 12,

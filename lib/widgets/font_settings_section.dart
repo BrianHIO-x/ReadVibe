@@ -57,10 +57,22 @@ class FontSettingsSection extends StatelessWidget {
             const SizedBox(width: AppSpacing.sm),
             Expanded(
               child: _FontChoice(
+                label: '楷体',
+                selected: settings.usesBuiltinKaiti,
+                colors: colors,
+                onTap: () => onChange(
+                  settings.copyWith(
+                    fontFamily: ReaderSettings.builtinKaitiFamily,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            Expanded(
+              child: _FontChoice(
                 label: '导入',
                 subtitle: importedFontName,
-                selected:
-                    !settings.usesSystemFont && !settings.usesBuiltinSerif,
+                selected: !settings.usesSystemFont && !settings.usesBundledFont,
                 enabled: settings.hasImportedFont,
                 colors: colors,
                 onTap: settings.hasImportedFont

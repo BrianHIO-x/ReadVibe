@@ -118,6 +118,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | 文件 | 作用 |
 |---|---|
 | `fonts/SourceHanSerifSC-Regular.ttf` | 内置完整思源宋体常规字库，作为阅读页“宋体”选项与离线渲染兜底。 |
+| `fonts/ARPLKaitiMGB-Regular.ttf` | 内置文鼎 PL 简中楷（AR PL KaitiM GB）原版字库，作为“楷体”选项。字库覆盖 GB2312 的全部汉字、ASCII 与常用中文标点，并把缺失的字形交给系统字体补上。 |
+| `licenses/arphic-public-license.txt` | 文鼎公众授权书原文。文本直接取自楷体字库的 name 表，由 `main.dart` 注册到开源许可页。 |
 | `images/ai/deepseek.webp`、`chatgpt.webp`、`claude.webp`、`copilot.webp`、`gemini.webp`、`perplexity.webp` | 六个受支持 AI 翻译应用的图标，选区菜单用它标识翻译目标。 |
 
 ---
@@ -137,7 +139,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `main.dart` | 应用入口。初始化 Flutter 绑定、切换到 `SystemUiMode.edgeToEdge` 让所有页面自绘到系统栏之下，随后启动 `ReadVibeApp`；配置 MaterialApp 的亮暗主题、锁定到 `zh-Hans-CN` 的本地化（同时决定汉字字形取简体形，避免系统语言为日文或繁体时共用码位被塑形成他区字形）与 `onGenerateRoute` 路由表：`/` 进书架，`/reader` 依据 `ReaderLaunchArgs`（或裸 `Book`）携带的封面快照与起始矩形构建书香开页过渡，PDF 书走 `PdfReaderScreen`，其余走 `ReaderScreen`。启动时一并开启 `MotionService` 与 profile 构建专用的 `FrameActivityLog`，并在 MaterialApp 的 `builder` 中接收全应用的滚动通知，作为高刷请求的依据。 |
+| `main.dart` | 应用入口。初始化 Flutter 绑定、切换到 `SystemUiMode.edgeToEdge` 让所有页面自绘到系统栏之下，随后启动 `ReadVibeApp`；配置 MaterialApp 的亮暗主题、锁定到 `zh-Hans-CN` 的本地化（同时决定汉字字形取简体形，避免系统语言为日文或繁体时共用码位被塑形成他区字形）与 `onGenerateRoute` 路由表：`/` 进书架，`/reader` 依据 `ReaderLaunchArgs`（或裸 `Book`）携带的封面快照与起始矩形构建书香开页过渡，PDF 书走 `PdfReaderScreen`，其余走 `ReaderScreen`。启动时一并开启 `MotionService` 与 profile 构建专用的 `FrameActivityLog`，并在 MaterialApp 的 `builder` 中接收全应用的滚动通知，作为高刷请求的依据。启动的时候，还会把楷体字库附带的文鼎公众授权书注册到开源许可页。 |
 
 ### lib/models/（纯数据模型，零框架依赖或仅 Material 枚举展示）
 
@@ -146,7 +148,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `book.dart` | 全部书籍相关模型。定义 `BookFormat`、`BookAvailability`（含丢失原因中文标签）、EPUB 富文本四件套 `EpubContentStyle`/`EpubTextRun`/`EpubContentBlock`/`EpubLinkTarget`、出版社样式安全对比度判断；`EpubTextRun.link` 记录站内跳转目标，`EpubContentBlock.anchorIds` 保存该块覆盖的元素 id 供片段定位；`Chapter` 刻意保持同一性相等（正文惰性加载，值相等要么加载全部载荷要么误判），需要稳定键的调用方使用 `index`；`Chapter` 支持延迟加载代理与 EPUB 块计数存储；`Book` 持有元数据、字数摘要、封面路径、内嵌字体映射与隐私书架标记 `isPrivate`，提供 JSON 编解码与 `copyWith`。另暴露三组章节标题判定函数（卷标题、导语类、独立尾章类）与正则，供 TXT 解析与目录分组复用；`currentTxtParserVersion` 驱动旧书重新解析。 |
 | `reader_bookmark.dart` | 文字书的书签与笔记模型。`ReaderBookmark` 以（章节、段落、字符）三元组锚定，与阅读位置恢复和搜索跳转共用同一套坐标，因此换字体或切模式后仍指向原句；携带摘录、笔记、章内百分比与时间。`fromJson` 对损坏记录返回 null 而非修复，`clampBookmarkText` 截断时不切开代理对，`sortedReaderBookmarks` 按正文顺序排列。上限 500 条/本。 |
 | `book_content_revision.dart` | 正文修订号与冲突类型。`readContentRevision` 归一化持久化的修订号（旧书从零开始），`BookEditConflict` 表示保存时正文已被其他改动推进。 |
-| `reader_settings.dart` | 阅读设置与进度模型。`ReaderSettings`（schema v6）涵盖字号、行高、主题、粗细、字体（系统/内置宋体/导入）、页边距、段距、阅读模式与自动检查更新，含旧版本字段迁移与字体粗细针对内置静态宋体的特殊映射（w300/w600/w900 叠加同色阴影）；`ReadingProgress` 保存章节进度、偏移与逐章快照；`PdfReadingProgress` 与 `PdfDisplayTheme` 独立于章节体系，`toShelfProgress()` 供书架卡片复用。 |
+| `reader_settings.dart` | 阅读设置与进度模型。`ReaderSettings`（schema v6）涵盖字号、行高、主题、粗细、字体（系统/内置宋体/内置楷体/导入）、页边距、段距、阅读模式与自动检查更新，含旧版本字段迁移与字体粗细针对内置静态字体的特殊映射（w300/w600/w900 叠加同色阴影，宋体与楷体共用）；`ReadingProgress` 保存章节进度、偏移与逐章快照；`PdfReadingProgress` 与 `PdfDisplayTheme` 独立于章节体系，`toShelfProgress()` 供书架卡片复用。 |
 | `reading_paragraph.dart` | 阅读与搜索共用的段落投影。`readingParagraphs()` 统一纯文本与 EPUB 富文本两种章节为相同顺序的可见段落流；`ReadingParagraph` 携带正文与首行缩进前缀，`visibleParagraphBody()` 清理段首空隙；`contentOffsetForReadingParagraph()` 按顺序回查段落正文，把阅读坐标折回 `Chapter.content` 的字符偏移，供编辑器定位阅读行。禁止依赖 IO 与 Flutter。 |
 | `search_match.dart` | 搜索结果展示契约。`SearchMatch` 接口约定标题、片段、命中文本与高亮区间，`BookSearchResult`（章节坐标）与 `PdfTextSearchResult`（页码坐标，可标 OCR）各自实现；`maxDocumentSearchResults = 500` 为统一上限，供搜索面板直接渲染。 |
 
@@ -231,7 +233,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `pdf_page_text_sheet.dart` | PDF 单页文字面板。PDF 按位图渲染，页面本身无法承载选区；该面板把同一页的文字放进普通 `SelectionArea`，恢复复制、分享与系统文字动作，并标明来源是文字层还是识别结果，附带整页复制。 |
 | `book_search_sheet.dart` | 书内搜索面板。泛型绑定 `SearchMatch`，防重复提交与过期回包（串号丢弃）；按命中区间绘制加粗高亮片段；结果为空、尚未搜索或出错分态展示，达上限提示缩小关键词。 |
 | `reader_settings_sheet.dart` | 阅读设置面板。字号、行高、字体（组合 `FontSettingsSection`）、粗细、页边距、段距、阅读模式与翻页效果、主题全部用自绘滑块式分段控件（高亮块以 `TweenAnimationBuilder` 平移切换）；`_RollingModeDescription` 用于阅读模式说明的上下滚动切换；仿真模式才显示翻页效果选项。系统省电模式开启且选中仿真翻页时，翻页效果下方提示暂以平滑翻页显示。 |
-| `font_settings_section.dart` | 字体选择区。系统/宋体/导入三选一卡片加导入按钮，导入卡副标题显示字体名并在无导入字体时禁用，选中卡片微放大并描边强调。 |
+| `font_settings_section.dart` | 字体选择区。系统/宋体/楷体/导入四选一卡片加导入按钮，导入卡副标题显示字体名并在无导入字体时禁用，选中卡片微放大并描边强调。 |
 | `global_settings_sheet.dart` | 全局设置侧栏（书架右上打开）。隐私书架入口（设置、进入或锁上，以及验证方式与密码）、字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口、存储空间区与开源许可页入口；版本号由书架层传入。同文件的 `StorageUsageSection` 自行异步统计并展示分类占用，提供清理缓存与重新统计；`formatStorageBytes` 负责字节展示。 |
 | `private_shelf_sheets.dart` | 隐私书架的交互面板。`_PinSheet` 自绘 6 位数字键盘，同时承担创建密码和验证密码两种用途。由于键盘是自绘的，系统输入法接触不到密码。`unlockPrivateShelf` 先调起默认的生物验证，失败或取消后再显示密码键盘。忘记密码的时候，已开启的生物验证可以用来重设密码。两种验证都没开启时，只能交由调用方清空隐私书架。`showPrivateShelfSettings` 负责开关指纹和人脸、选择默认方式、修改密码与关闭隐私书架，开启某一种之前会先验证一次。 |
 | `library_search_controls.dart` | 书架搜索与筛选用控件。`LibraryFilterButton` 弹出筛选菜单（当前项在菜单中打勾），菜单右缘与书架网格右边线对齐；`LibrarySearchControls` 组合圆角搜索框（可清除）与激活筛选 `InputChip`。 |
@@ -270,7 +272,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `check_release_package.py` | 发布包脚本。 |
+| `check_release_package.py` | 发布包脚本。核对安装包体积预算、PDFBox 依赖的 SIKE 数据表与类、OCR 模型和单一 ABI，并逐字节比对宋体与楷体两个内置字库。 |
 | `draw_launcher_icon.py` | 图标生成脚本。用贝塞尔路径绘制 1024 母版，`--install` 同时导出五档 mipmap 与自适应前景，全部尺寸从同一张 4096 渲染降采样，底色与 `colors.xml` 逐字节一致。 |
 
 ## design/

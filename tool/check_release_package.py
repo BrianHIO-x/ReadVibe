@@ -17,8 +17,9 @@ PICNIC_METADATA = {
     "PicnicPrivateKeyParameters", "PicnicPublicKeyParameters",
 }
 # Includes the roughly 2.6 MB of compressed SIKE tables needed by PDFBox's
-# retained key parameter initialization, with less than 1 MB of headroom.
-RELEASE_SIZE_BUDGET = 60_000_000
+# retained key parameter initialization and the 2.7 MB bundled Kaiti font,
+# with about 1.7 MB of headroom.
+RELEASE_SIZE_BUDGET = 64_000_000
 
 
 def digest(stream):
@@ -63,7 +64,7 @@ def dex_class_descriptors(data):
     return result
 
 
-def inspect(apk, mapping, font, max_bytes):
+def inspect(apk, mapping, fonts, max_bytes):
     size = apk.stat().st_size
     if size > max_bytes:
         raise ValueError(f"APK size {size:,} exceeds budget {max_bytes:,}")
@@ -81,13 +82,14 @@ def inspect(apk, mapping, font, max_bytes):
         # actual definitions in the APK below instead of treating omission as removal.
         if class_names.get(loader, loader) != loader:
             raise ValueError(f"SIKE resource loader was renamed: {loader}")
+    bundled_fonts = {f"assets/flutter_assets/assets/fonts/{font.name}": font for font in fonts}
     with zipfile.ZipFile(apk) as archive:
         names = set(archive.namelist())
         required = {
             "lib/arm64-v8a/libflutter.so",
             "lib/arm64-v8a/libapp.so",
             "lib/arm64-v8a/libmlkit_google_ocr_pipeline.so",
-            "assets/flutter_assets/assets/fonts/SourceHanSerifSC-Regular.ttf",
+            *bundled_fonts,
         }
         missing = required - names
         if missing:
@@ -116,10 +118,10 @@ def inspect(apk, mapping, font, max_bytes):
             if not archive.read(resource).strip():
                 raise ValueError(f"Required SIKE data table is empty: {resource}")
             sike_data_bytes += archive.getinfo(resource).compress_size
-        bundled_font = "assets/flutter_assets/assets/fonts/SourceHanSerifSC-Regular.ttf"
-        with font.open("rb") as source, archive.open(bundled_font) as packaged:
-            if digest(source) != digest(packaged):
-                raise ValueError("Bundled font differs from the complete source font")
+        for bundled_font, font in bundled_fonts.items():
+            with font.open("rb") as source, archive.open(bundled_font) as packaged:
+                if digest(source) != digest(packaged):
+                    raise ValueError(f"Bundled font differs from its complete source: {font.name}")
         top_entries = sorted(archive.infolist(), key=lambda item: item.compress_size, reverse=True)[:6]
         largest = [{"path": item.filename, "compressed_bytes": item.compress_size} for item in top_entries]
     return {"apk_bytes": size, "size_budget_bytes": max_bytes,
@@ -131,10 +133,11 @@ def main():
     parser.add_argument("apk", type=Path)
     parser.add_argument("--mapping", type=Path, required=True)
     parser.add_argument("--font", type=Path, default=Path("assets/fonts/SourceHanSerifSC-Regular.ttf"))
+    parser.add_argument("--kaiti-font", type=Path, default=Path("assets/fonts/ARPLKaitiMGB-Regular.ttf"))
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--max-bytes", type=int, default=RELEASE_SIZE_BUDGET)
     args = parser.parse_args()
-    report = inspect(args.apk, args.mapping, args.font, args.max_bytes)
+    report = inspect(args.apk, args.mapping, [args.font, args.kaiti_font], args.max_bytes)
     if args.baseline:
         baseline = args.baseline.stat().st_size
         report.update(baseline_bytes=baseline, saved_bytes=baseline - report["apk_bytes"],

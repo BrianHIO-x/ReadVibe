@@ -19,7 +19,7 @@ class FontService {
   Future<ReaderSettings> ensureImportedFontLoaded(
     ReaderSettings settings,
   ) async {
-    if (settings.usesSystemFont || settings.usesBuiltinSerif) {
+    if (settings.usesSystemFont || settings.usesBundledFont) {
       return settings;
     }
     if (!settings.hasImportedFont) {

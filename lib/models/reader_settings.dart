@@ -84,6 +84,7 @@ class ReaderSettings {
   static const schemaVersion = 6;
   static const systemFontFamily = 'system';
   static const builtinSerifFamily = 'SourceHanSerifSC';
+  static const builtinKaitiFamily = 'ARPLKaitiMGB';
 
   final double fontSize;
   final double lineHeight;
@@ -119,6 +120,11 @@ class ReaderSettings {
 
   bool get usesBuiltinSerif => fontFamily == builtinSerifFamily;
 
+  bool get usesBuiltinKaiti => fontFamily == builtinKaitiFamily;
+
+  /// Fonts shipped inside the app rather than installed or imported.
+  bool get usesBundledFont => usesBuiltinSerif || usesBuiltinKaiti;
+
   bool get hasImportedFont =>
       importedFontFamily?.trim().isNotEmpty == true &&
       importedFontName?.trim().isNotEmpty == true &&
@@ -130,14 +136,14 @@ class ReaderSettings {
     return fontFamily;
   }
 
-  /// The bundled Song face is a static regular font. Android cannot create a
-  /// genuinely lighter outline from it, so requesting w300 and w400 looked
-  /// identical. Keep the natural face for `light`, move the former bold
-  /// rendering to the user-facing `medium` slot, and reserve a stronger
-  /// synthetic request for `bold`. System and imported fonts retain their
-  /// native weight mapping.
+  /// The bundled Song and Kaiti faces are both static regular fonts. Android
+  /// cannot create a genuinely lighter outline from them, so requesting w300
+  /// and w400 looked identical. Keep the natural face for `light`, move the
+  /// former bold rendering to the user-facing `medium` slot, and reserve a
+  /// stronger synthetic request for `bold`. System and imported fonts retain
+  /// their native weight mapping.
   FontWeight get effectiveFontWeight {
-    if (!usesBuiltinSerif) return fontWeight.value;
+    if (!usesBundledFont) return fontWeight.value;
     return switch (fontWeight) {
       ReaderFontWeight.light => FontWeight.w400,
       ReaderFontWeight.regular => FontWeight.w600,
@@ -147,9 +153,9 @@ class ReaderSettings {
 
   /// A static font face only exposes a binary synthetic-bold result on some
   /// Android renderers. Add one sharp, same-colour overprint for the heaviest
-  /// Song setting so it remains visibly distinct from the new medium slot.
+  /// bundled-font setting so it remains visibly distinct from the medium slot.
   List<Shadow>? effectiveFontShadows(Color color) {
-    if (!usesBuiltinSerif || fontWeight != ReaderFontWeight.bold) return null;
+    if (!usesBundledFont || fontWeight != ReaderFontWeight.bold) return null;
     return [Shadow(color: color, offset: const Offset(0.38, 0))];
   }
 
