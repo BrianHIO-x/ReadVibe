@@ -43,6 +43,7 @@ import '../controllers/reader_selection_controller.dart';
 import '../controllers/reader_word_count_controller.dart';
 import '../controllers/reader_window_controller.dart';
 import 'reader/reader_epub_layout.dart';
+import 'reader/reader_justified_text.dart';
 import 'reader/reader_layout_cache.dart';
 import 'reader/reader_pagination_support.dart';
 import 'reader/reader_selection_support.dart';
@@ -2331,7 +2332,13 @@ class _ReaderScreenState extends State<ReaderScreen>
       node.visitChildren((child) => visit(child, childClip));
     }
 
-    visit(surface, Offset.zero & stack.size);
+    visit(
+      surface,
+      MatrixUtils.transformRect(
+        surface.getTransformTo(stack),
+        Offset.zero & surface.size,
+      ),
+    );
     return (header: header, footer: footer);
   }
 
@@ -3998,13 +4005,16 @@ class _ReaderScreenState extends State<ReaderScreen>
                         child: Stack(
                           fit: StackFit.expand,
                           children: [
-                            ClipRect(
-                              key: _readingSurfaceKey,
-                              child: Padding(
-                                padding: EdgeInsets.only(
-                                  left: contentInsets.left,
-                                  right: contentInsets.right,
-                                ),
+                            // Pages parked beside the current one stay out of
+                            // the side insets, where a camera or a navigation
+                            // bar would otherwise show their first lines.
+                            Padding(
+                              padding: EdgeInsets.only(
+                                left: contentInsets.left,
+                                right: contentInsets.right,
+                              ),
+                              child: ClipRect(
+                                key: _readingSurfaceKey,
                                 child: MediaQuery(
                                   data: MediaQuery.of(
                                     context,
@@ -4167,8 +4177,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                         padding: EdgeInsets.only(
                           bottom: viewPadding.bottom,
                           top: AppSpacing.sm,
-                          left: AppSpacing.xl,
-                          right: AppSpacing.xl,
+                          left: AppSpacing.xl + contentInsets.left,
+                          right: AppSpacing.xl + contentInsets.right,
                         ),
                         decoration: BoxDecoration(
                           color: themeColors.headerBg,
@@ -4434,8 +4444,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                               ReaderParagraphSpacing.blankLine
                           ? '\n\n'
                           : '\n';
-                      return Text(
-                        _paragraphsFor(chapter).join(separator),
+                      return ReaderJustifiedText(
+                        TextSpan(text: _paragraphsFor(chapter).join(separator)),
                         style: TextStyle(
                           fontFamily: fontFamily,
                           fontSize: _settings.fontSize,
@@ -4447,6 +4457,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                           color: themeColors.text,
                           letterSpacing: 0.2,
                         ),
+                        nearby: (chapterIndex - _chapterIndex).abs() <= 1,
                       );
                     },
                   ),
@@ -4820,8 +4831,8 @@ class _ReaderScreenState extends State<ReaderScreen>
         color: themeColors.text,
         letterSpacing: 0.2,
       );
-      final bodyText = Text(
-        paragraphs[paragraphIndex],
+      final bodyText = ReaderJustifiedText(
+        TextSpan(text: paragraphs[paragraphIndex]),
         style: simulationPage ? bodyStyle : null,
         strutStyle: simulationPage
             ? StrutStyle(
@@ -4832,6 +4843,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 forceStrutHeight: true,
               )
             : null,
+        settledStyle: simulationPage ? null : bodyStyle,
       );
       return Padding(
         padding: EdgeInsets.only(
