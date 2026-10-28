@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -18,15 +19,26 @@ class ReaderWindowController extends ChangeNotifier
   bool _keyboardVisible = false;
   Timer? _restoreTimer;
 
-  EdgeInsets contentInsets(EdgeInsets fallback) => EdgeInsets.fromLTRB(
-    _cutout?.left ?? fallback.left,
-    _cutout?.top ?? fallback.top,
-    _cutout?.right ?? fallback.right,
-    (_bars?.bottom ?? fallback.bottom).clamp(
-      _cutout?.bottom ?? 0,
-      double.infinity,
-    ),
-  );
+  /// Where the page's text may go. Both sides take the wider of the two side
+  /// insets, a camera or a navigation bar on one side in landscape among
+  /// them, so the text stays centred on the screen.
+  EdgeInsets contentInsets(EdgeInsets fallback) {
+    final side = [
+      _cutout?.left ?? fallback.left,
+      _cutout?.right ?? fallback.right,
+      _bars?.left ?? 0.0,
+      _bars?.right ?? 0.0,
+    ].reduce(math.max);
+    return EdgeInsets.fromLTRB(
+      side,
+      _cutout?.top ?? fallback.top,
+      side,
+      (_bars?.bottom ?? fallback.bottom).clamp(
+        _cutout?.bottom ?? 0,
+        double.infinity,
+      ),
+    );
+  }
 
   EdgeInsets chromeInsets(EdgeInsets fallback) => _bars ?? fallback;
 

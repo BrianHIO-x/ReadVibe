@@ -10,6 +10,7 @@ import '../../models/reader_settings.dart';
 import '../../theme/app_spacing.dart';
 import '../../services/resource_presence.dart';
 import '../../theme/app_theme.dart';
+import 'reader_justified_text.dart';
 
 class EpubBlockLayoutMetrics {
   final double leading;
@@ -249,15 +250,14 @@ class ReaderEpubLayout {
           onOpenLink: openLink,
         );
       } else {
-        text = Text.rich(
+        text = _blockText(
           _textSpan(
             block,
             settings: settings,
             foreground: foreground,
             background: background,
           ),
-          textAlign: _textAlign(block.style.textAlign),
-          textScaler: textScaler,
+          align: _textAlign(block.style.textAlign),
           strutStyle: simulationPage
               ? _simulationStrutStyle(block, settings)
               : null,
@@ -436,6 +436,28 @@ class ReaderEpubLayout {
     _ => TextAlign.start,
   };
 
+  /// Body text meets both margins. A justified block is set this way too: the
+  /// engine's own justification would drop its indent.
+  Widget _blockText(
+    InlineSpan text, {
+    required TextAlign align,
+    StrutStyle? strutStyle,
+  }) {
+    if (align == TextAlign.start || align == TextAlign.justify) {
+      return ReaderJustifiedText(
+        text,
+        textScaler: textScaler,
+        strutStyle: strutStyle,
+      );
+    }
+    return Text.rich(
+      text,
+      textAlign: align,
+      textScaler: textScaler,
+      strutStyle: strutStyle,
+    );
+  }
+
   Color _blockBackground(
     EpubContentStyle style,
     ReaderThemeColors themeColors,
@@ -582,7 +604,7 @@ class _EpubLinkedTextState extends State<_EpubLinkedText> {
   }
 
   @override
-  Widget build(BuildContext context) => Text.rich(
+  Widget build(BuildContext context) => widget.layout._blockText(
     widget.layout._textSpan(
       widget.block,
       settings: widget.settings,
@@ -591,8 +613,7 @@ class _EpubLinkedTextState extends State<_EpubLinkedText> {
       linkColor: _safeLinkColor(),
       linkRecognizers: _recognizers,
     ),
-    textAlign: widget.layout._textAlign(widget.block.style.textAlign),
-    textScaler: widget.layout.textScaler,
+    align: widget.layout._textAlign(widget.block.style.textAlign),
     strutStyle: widget.simulationPage
         ? widget.layout._simulationStrutStyle(widget.block, widget.settings)
         : null,
