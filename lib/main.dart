@@ -27,11 +27,21 @@ void main() {
 }
 
 /// The Arphic Public License asks for its text to travel with the Kaiti
-/// font, so it is listed beside the package licenses.
+/// font, so it is listed beside the package licenses. It also asks modified
+/// files to say what changed and when, which the second entry does.
 Stream<LicenseEntry> _bundledFontLicenses() async* {
-  yield LicenseEntryWithLineBreaks(const [
-    'AR PL KaitiM GB（文鼎 PL 简中楷）',
-  ], await rootBundle.loadString('assets/licenses/arphic-public-license.txt'));
+  const font = ['AR PL KaitiM GB（文鼎 PL 简中楷）'];
+  yield LicenseEntryWithLineBreaks(
+    font,
+    await rootBundle.loadString('assets/licenses/arphic-public-license.txt'),
+  );
+  yield const LicenseEntryWithLineBreaks(
+    font,
+    'ReadVibe 随附的字库文件改动了 hhea 表里的行间距，把数值从 6 调整为 0。'
+    '这样设置以后，每一行的行距都会与行框保持一致。'
+    '字形和其他数据全部保持原样，没有做任何修改。\n\n'
+    '改动完成的日期，是 2026 年 10 月 30 日。',
+  );
 }
 
 class ReadVibeApp extends StatelessWidget {

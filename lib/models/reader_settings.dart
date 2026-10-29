@@ -138,12 +138,19 @@ class ReaderSettings {
 
   /// The bundled Song and Kaiti faces are both static regular fonts. Android
   /// cannot create a genuinely lighter outline from them, so requesting w300
-  /// and w400 looked identical. Keep the natural face for `light`, move the
-  /// former bold rendering to the user-facing `medium` slot, and reserve a
-  /// stronger synthetic request for `bold`. System and imported fonts retain
-  /// their native weight mapping.
+  /// and w400 looked identical. Keep the natural face for `light` in both.
+  /// Song moves the former bold rendering to the user-facing `medium` slot and
+  /// reserves a stronger synthetic request for `bold`. Kaiti's brush strokes
+  /// thicken faster, so its synthetic bold serves as `bold` and `medium` stays
+  /// on the natural face, thickened by [effectiveFontShadows]. System and
+  /// imported fonts retain their native weight mapping.
   FontWeight get effectiveFontWeight {
     if (!usesBundledFont) return fontWeight.value;
+    if (usesBuiltinKaiti) {
+      return fontWeight == ReaderFontWeight.bold
+          ? FontWeight.w600
+          : FontWeight.w400;
+    }
     return switch (fontWeight) {
       ReaderFontWeight.light => FontWeight.w400,
       ReaderFontWeight.regular => FontWeight.w600,
@@ -153,9 +160,16 @@ class ReaderSettings {
 
   /// A static font face only exposes a binary synthetic-bold result on some
   /// Android renderers. Add one sharp, same-colour overprint for the heaviest
-  /// bundled-font setting so it remains visibly distinct from the medium slot.
+  /// Song setting so it remains visibly distinct from the medium slot. Kaiti's
+  /// medium slot sits between the natural face and synthetic bold: a diagonal
+  /// overprint about half the synthetic stroke widens both vertical and
+  /// horizontal strokes, and it scales with the font size as that stroke does.
   List<Shadow>? effectiveFontShadows(Color color) {
-    if (!usesBundledFont || fontWeight != ReaderFontWeight.bold) return null;
+    if (usesBuiltinKaiti && fontWeight == ReaderFontWeight.regular) {
+      final spread = fontSize * 0.018;
+      return [Shadow(color: color, offset: Offset(spread, spread * 0.6))];
+    }
+    if (!usesBuiltinSerif || fontWeight != ReaderFontWeight.bold) return null;
     return [Shadow(color: color, offset: const Offset(0.38, 0))];
   }
 
