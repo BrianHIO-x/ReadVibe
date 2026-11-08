@@ -51,7 +51,25 @@ class UpdateService implements UpdateChecker {
     this.timeout = const Duration(seconds: 5),
   }) : _feeds =
            feeds ??
-           [Uri.parse(_apiUrl), Uri.parse('https://gh-proxy.com/$_apiUrl')];
+           [
+             for (final relay in feedMirrorHosts)
+               Uri.parse('https://$relay/$_apiUrl'),
+             Uri.parse(_apiUrl),
+           ];
+
+  /// Mainland relays measured to pass the GitHub releases API through, ahead
+  /// of the direct endpoint.
+  static const feedMirrorHosts = [
+    'edgeone.gh-proxy.org',
+    'gh-proxy.org',
+    'cdn.gh-proxy.org',
+    'gh-proxy.com',
+  ];
+
+  /// After the first feed answers, how long the others still get. A relay can
+  /// serve a cached copy that predates the newest release, so the newest
+  /// version among the answers wins.
+  static const _answerGrace = Duration(milliseconds: 800);
 
   static const _apiUrl =
       'https://api.github.com/repos/BrianHIO-x/ReadVibe/releases/latest';
@@ -72,20 +90,43 @@ class UpdateService implements UpdateChecker {
   Future<UpdateCheckResult> checkForUpdate() =>
       _checking ??= _check().whenComplete(() => _checking = null);
 
+  /// Asks every feed at once instead of one after another. A blocked direct
+  /// endpoint used to cost its full timeout before the relay was even tried.
   Future<UpdateCheckResult> _check() async {
+    final String current;
     try {
-      final current = await currentVersion();
-      for (final feed in _feeds) {
-        try {
-          return parseRelease(await _readFeed(feed), current);
-        } on Object {
-          // A blocked/limited endpoint or an HTML proxy error is not "latest".
-        }
-      }
+      current = await currentVersion();
     } on Object {
       // Package metadata can also be unavailable.
+      return const UpdateCheckResult.error();
     }
-    return const UpdateCheckResult.error();
+    final answers = <UpdateCheckResult>[];
+    final firstAnswer = Completer<void>();
+    final pending = Future.wait([
+      for (final feed in _feeds)
+        () async {
+          try {
+            answers.add(parseRelease(await _readFeed(feed), current));
+            if (!firstAnswer.isCompleted) firstAnswer.complete();
+          } on Object {
+            // A blocked/limited endpoint or an HTML proxy error is not "latest".
+          }
+        }(),
+    ]);
+    await Future.any([pending, firstAnswer.future]);
+    if (answers.isNotEmpty) {
+      await pending.timeout(_answerGrace, onTimeout: () => const []);
+    }
+    if (answers.isEmpty) return const UpdateCheckResult.error();
+    final newest = answers.where((answer) => answer.info != null).toList()
+      ..sort((a, b) {
+        final left = a.info!.version;
+        final right = b.info!.version;
+        if (isNewerVersion(left, right)) return -1;
+        if (isNewerVersion(right, left)) return 1;
+        return 0;
+      });
+    return newest.isEmpty ? const UpdateCheckResult.upToDate() : newest.first;
   }
 
   Future<Object?> _readFeed(Uri feed) async {

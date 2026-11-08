@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
@@ -51,11 +53,66 @@ abstract interface class UpdateDownloader {
 /// One line and the throughput it showed during the probe, in bytes per second.
 /// A line that never answered scores 0 and sorts behind every line that did.
 class _ProbedSource {
-  const _ProbedSource(this.uri, this.order, this.rate);
+  const _ProbedSource(this.uri, this.order, this.rate, this.prefix);
   final Uri uri;
   final int order;
   final double rate;
+
+  /// The first bytes of the file as this line delivered them during the probe.
+  final Uint8List prefix;
   bool get answered => rate > 0;
+
+  /// Mirror relays are built for mainland networks. Direct GitHub is the one
+  /// line that leaves the country, so it only leads when it is clearly faster.
+  bool get domestic => uri.host != 'github.com';
+}
+
+/// Bytes and timing one line has delivered so far during the probe.
+class _ProbeSample {
+  _ProbeSample(this.uri, this.order);
+  final Uri uri;
+  final int order;
+  final _bytes = BytesBuilder(copy: false);
+  final _clock = Stopwatch();
+  int _timed = 0;
+  bool complete = false;
+
+  int get total => _bytes.length;
+
+  void add(List<int> chunk, int limit) {
+    final room = limit - total;
+    if (room <= 0) return;
+    final kept = chunk.length > room ? chunk.sublist(0, room) : chunk;
+    _bytes.add(kept);
+    // Timing starts at the first chunk, so a line is judged on throughput
+    // instead of on how quickly it answered.
+    if (_clock.isRunning) {
+      _timed += kept.length;
+    } else {
+      _clock.start();
+    }
+    if (total >= limit) complete = true;
+  }
+
+  /// Freezes the clock when the line stops, before the other lines finish.
+  void finish() => _clock.stop();
+
+  _ProbedSource result(Duration window) {
+    final prefix = _bytes.takeBytes();
+    if (prefix.isEmpty) return _ProbedSource(uri, order, 0, prefix);
+    final micros = math.max(1, _clock.elapsedMicroseconds);
+    final double rate;
+    if (_timed > 0) {
+      rate = _timed * 1000000 / micros;
+    } else if (complete) {
+      // The whole sample came in one chunk, faster than the probe can resolve.
+      rate = prefix.length * 1000000.0;
+    } else {
+      // A single chunk and then silence: credited over the whole window.
+      rate = prefix.length * 1000000 / math.max(1, window.inMicroseconds);
+    }
+    return _ProbedSource(uri, order, rate, prefix);
+  }
 }
 
 /// Abandons a line that a probed alternative can clearly beat. It carries no
@@ -71,25 +128,33 @@ class UpdateDownloadService implements UpdateDownloader {
     List<Uri> Function(AppUpdateInfo)? sources,
     this.connectTimeout = const Duration(seconds: 5),
     this.idleTimeout = const Duration(seconds: 15),
-    this.probeWindow = const Duration(milliseconds: 1200),
+    this.probeDeadline = const Duration(seconds: 3),
+    this.probeGrace = const Duration(milliseconds: 800),
     this.slowWindow = const Duration(seconds: 6),
   }) : _directoryProvider = directoryProvider ?? getTemporaryDirectory,
        _sources = sources ?? downloadSources;
 
   static const _channel = MethodChannel('com.readvibe.app/app_update');
 
-  /// Sample size per line. Large enough that a fast line is judged on bandwidth
-  /// rather than on a single packet, small enough that racing four lines costs
-  /// a couple of megabytes at worst.
-  static const _probeBytes = 512 * 1024;
+  /// Sample size per line. Large enough that a fast line is judged past its
+  /// TCP slow start, and the winner's sample is kept as the start of the file,
+  /// so the race costs only what the losing lines fetched.
+  static const _probeBytes = 1024 * 1024;
+
+  /// How much faster direct GitHub has to be before it leads the mirrors.
+  static const _overseasMargin = 1.5;
 
   final Future<Directory> Function() _directoryProvider;
   final List<Uri> Function(AppUpdateInfo) _sources;
   final Duration connectTimeout;
   final Duration idleTimeout;
 
-  /// How long a single line is sampled before the race is decided.
-  final Duration probeWindow;
+  /// Longest the race may take, connecting included. A line that has not
+  /// answered by then is ranked on whatever it delivered.
+  final Duration probeDeadline;
+
+  /// Once one line finishes its sample, how long the rest still get.
+  final Duration probeGrace;
 
   /// How long a line has to stay behind a rival before it is given up on.
   final Duration slowWindow;
@@ -98,16 +163,25 @@ class UpdateDownloadService implements UpdateDownloader {
   bool _cancelled = false;
   bool _running = false;
 
-  /// Direct GitHub first, then mirrors that were verified to serve release
-  /// assets from mainland networks. Unlike the release feed, these mirrors only
-  /// pass through file downloads, so they are not interchangeable with the
-  /// endpoints in [UpdateService]. This order is only the tie-break; the probe
-  /// decides which line actually carries the download.
+  /// Mainland mirror relays first, direct GitHub last. Every relay here was
+  /// measured to serve ranged release downloads without redirecting. The
+  /// gh-proxy family moved to `.org`, and its `.com` names now answer with a
+  /// redirect, so the `.org` hosts are listed directly. ghproxy.net was
+  /// dropped after it took nine seconds to send its first byte. This order is
+  /// only the tie-break; the race decides which line carries the download.
   static List<Uri> downloadSources(AppUpdateInfo info) => [
+    for (final relay in mirrorHosts) Uri.parse('https://$relay/${info.apkUrl}'),
     Uri.parse(info.apkUrl),
-    Uri.parse('https://ghfast.top/${info.apkUrl}'),
-    Uri.parse('https://gh-proxy.com/${info.apkUrl}'),
-    Uri.parse('https://ghproxy.net/${info.apkUrl}'),
+  ];
+
+  /// Relays that pass GitHub release downloads through for mainland networks.
+  static const mirrorHosts = [
+    'edgeone.gh-proxy.org',
+    'gh-proxy.org',
+    'cdn.gh-proxy.org',
+    'gh-proxy.com',
+    'hk.gh-proxy.org',
+    'ghfast.top',
   ];
 
   @override
@@ -126,6 +200,12 @@ class UpdateDownloadService implements UpdateDownloader {
   /// Races every line over a short ranged read and returns them fastest first,
   /// so the download starts on the quickest line instead of on whichever one
   /// happens to be listed first.
+  ///
+  /// The race used to wait for every line to finish or time out, which took
+  /// over six seconds whenever one line hung. It now ends three seconds after
+  /// it starts at the latest, or shortly after the first line has delivered
+  /// its whole sample. Lines still running then are ranked on what they
+  /// delivered so far.
   Future<List<_ProbedSource>> _rankSources(
     List<Uri> sources,
     AppUpdateInfo info,
@@ -134,7 +214,7 @@ class UpdateDownloadService implements UpdateDownloader {
     if (sources.length < 2) {
       return [
         for (var index = 0; index < sources.length; index++)
-          _ProbedSource(sources[index], index, 0),
+          _ProbedSource(sources[index], index, 0, Uint8List(0)),
       ];
     }
     onProgress(
@@ -145,72 +225,83 @@ class UpdateDownloadService implements UpdateDownloader {
         probing: true,
       ),
     );
-    final probed = await Future.wait([
+    final limit = math.min(_probeBytes, info.apkSize);
+    final samples = [
       for (var index = 0; index < sources.length; index++)
-        _probe(sources[index], index),
+        _ProbeSample(sources[index], index),
+    ];
+    final stop = Completer<void>();
+    void stopRace() {
+      if (!stop.isCompleted) stop.complete();
+    }
+
+    final deadline = Timer(probeDeadline, stopRace);
+    Timer? grace;
+    await Future.wait([
+      for (final sample in samples)
+        _probe(sample, limit, stop.future, () {
+          grace ??= Timer(probeGrace, stopRace);
+        }),
     ]);
+    deadline.cancel();
+    grace?.cancel();
+    stopRace();
     _checkCancelled();
-    // A probe failure is often transient, and the direct GitHub URL is the one
-    // source that is not a third-party relay. Unanswered lines therefore keep
-    // their declared order at the back rather than being dropped.
-    return probed.toList()
-      ..sort((a, b) {
-        if (a.answered != b.answered) return a.answered ? -1 : 1;
-        if (a.answered) return b.rate.compareTo(a.rate);
-        return a.order.compareTo(b.order);
-      });
+    final probed = [for (final sample in samples) sample.result(probeDeadline)];
+    double score(_ProbedSource source) =>
+        source.domestic ? source.rate : source.rate / _overseasMargin;
+    // A probe failure is often transient, so unanswered lines keep their
+    // declared order at the back rather than being dropped.
+    return probed..sort((a, b) {
+      if (a.answered != b.answered) return a.answered ? -1 : 1;
+      if (a.answered) return score(b).compareTo(score(a));
+      return a.order.compareTo(b.order);
+    });
   }
 
-  Future<_ProbedSource> _probe(Uri uri, int order) async {
+  Future<void> _probe(
+    _ProbeSample sample,
+    int limit,
+    Future<void> stop,
+    void Function() onSampled,
+  ) async {
     final client = HttpClient()..connectionTimeout = connectTimeout;
     _clients.add(client);
+    // Closing the client ends a pending connection or a stream at once, so
+    // the race stops on time even for a line that has gone quiet.
+    unawaited(stop.then((_) => client.close(force: true)));
     try {
-      return await _measure(
-        client,
-        uri,
-        order,
-      ).timeout(connectTimeout + probeWindow);
+      await (() async {
+        final request = await client.getUrl(sample.uri);
+        request.headers.set('User-Agent', 'ReadVibe-Android');
+        request.headers.set('Range', 'bytes=0-${limit - 1}');
+        final response = await request.close();
+        if (response.statusCode != 200 && response.statusCode != 206) return;
+        if (response.statusCode == 206 && !_rangeStartsAtZero(response)) {
+          return;
+        }
+        await for (final chunk in response) {
+          sample.add(chunk, limit);
+          if (sample.complete) {
+            onSampled();
+            break;
+          }
+        }
+      })().timeout(probeDeadline);
     } on Object {
-      return _ProbedSource(uri, order, 0);
+      // Stopped, refused or reset. Whatever arrived still counts.
     } finally {
+      sample.finish();
       _clients.remove(client);
-      // Ends the sample immediately, including when the timeout above fired.
       client.close(force: true);
     }
   }
 
-  /// Times the bytes that arrive after the first chunk, so a line is judged on
-  /// throughput instead of on how quickly it answered. Connecting is a fixed
-  /// cost the whole download pays once, at the start.
-  Future<_ProbedSource> _measure(HttpClient client, Uri uri, int order) async {
-    final request = await client.getUrl(uri);
-    request.headers.set('User-Agent', 'ReadVibe-Android');
-    request.headers.set('Range', 'bytes=0-${_probeBytes - 1}');
-    final response = await request.close();
-    if (response.statusCode != 200 && response.statusCode != 206) {
-      return _ProbedSource(uri, order, 0);
-    }
-    final clock = Stopwatch();
-    var timed = 0;
-    var total = 0;
-    await for (final chunk in response) {
-      total += chunk.length;
-      if (clock.isRunning) {
-        timed += chunk.length;
-      } else {
-        clock.start();
-      }
-      if (total >= _probeBytes || clock.elapsed >= probeWindow) break;
-    }
-    clock.stop();
-    if (total <= 0) return _ProbedSource(uri, order, 0);
-    // A line that delivered the whole sample in one chunk is faster than the
-    // probe can resolve, so it is credited with everything that arrived.
-    final measured = timed > 0 ? timed : total;
-    final micros = clock.elapsedMicroseconds < 1
-        ? 1
-        : clock.elapsedMicroseconds;
-    return _ProbedSource(uri, order, measured * 1000000 / micros);
+  /// A relay that answers a ranged read from some other offset would put the
+  /// wrong bytes at the start of the file.
+  static bool _rangeStartsAtZero(HttpClientResponse response) {
+    final range = response.headers.value(HttpHeaders.contentRangeHeader);
+    return range == null || range.trim().startsWith('bytes 0-');
   }
 
   @override
@@ -251,11 +342,20 @@ class UpdateDownloadService implements UpdateDownloader {
       final canResume = info.sha256 != null;
       Object? lastError;
       var resumeFrom = 0;
+      // The winner's probe sample is the start of the file, so the download
+      // carries on from there instead of fetching those bytes again.
+      final head = sources.isEmpty ? Uint8List(0) : sources.first.prefix;
+      if (canResume && head.isNotEmpty && head.length < info.apkSize) {
+        await partial.writeAsBytes(head, flush: true);
+        resumeFrom = head.length;
+      }
       for (var index = 0; index < sources.length; index++) {
         _checkCancelled();
         final uri = sources[index].uri;
         final label = '线路 ${index + 1}/${sources.length} · ${uri.host}';
-        final rival = index + 1 < sources.length ? sources[index + 1].rate : 0.0;
+        final rival = index + 1 < sources.length
+            ? sources[index + 1].rate
+            : 0.0;
         final client = HttpClient()..connectionTimeout = connectTimeout;
         _clients.add(client);
         var received = resumeFrom;
