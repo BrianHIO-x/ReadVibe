@@ -2123,77 +2123,156 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (_reorderMode) return _buildReorderBookGrid(colors);
     final books = _visibleBooks;
 
-    return RefreshIndicator(
-      onRefresh: _loadData,
-      color: colors.accent,
-      child: GridView.builder(
-        controller: _gridScrollController,
-        padding: EdgeInsets.fromLTRB(
-          AppSpacing.md,
-          AppSpacing.md,
-          AppSpacing.md,
-          AppSpacing.md + MediaQuery.paddingOf(context).bottom,
-        ),
-        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: _shelfMetrics(
-            MediaQuery.sizeOf(context).width,
-          ).columns,
-          childAspectRatio: _shelfCardAspectRatio,
-          crossAxisSpacing: AppSpacing.xs,
-          mainAxisSpacing: AppSpacing.sm,
-        ),
-        itemCount: books.length,
-        findChildIndexCallback: (key) {
-          if (key is! ValueKey<String>) return null;
-          final index = books.indexWhere((book) => book.id == key.value);
-          return index < 0 ? null : index;
-        },
-        itemBuilder: (context, index) {
-          final book = books[index];
-          final cardKey = GlobalObjectKey('book-card-${book.id}');
-          final coverKey = GlobalObjectKey('book-cover-source-${book.id}');
-          final card = RepaintBoundary(
-            key: cardKey,
-            child: BookCard(
-              book: book,
-              progress: _progressMap[book.id],
-              availability:
-                  _availabilityMap[book.id] ?? BookAvailability.available,
-              colors: colors,
-              coverKey: coverKey,
-              onTap: () => _openBookFromCover(book, coverKey),
-              onLongPress: () => _showBookActions(book),
-            ),
-          );
-
-          // Staggered entrance: cap how many items participate in the
-          // stagger so a long shelf doesn't push later cards' start time
-          // past 1.0 (Interval asserts 0 <= begin <= end <= 1).
-          final staggerIndex = math.min(index, 11);
-          final start = (staggerIndex * 0.04).clamp(0.0, 0.6);
-          final interval = Interval(
-            start,
-            (start + 0.4).clamp(0.0, 1.0),
-            curve: AppMotion.standard,
-          );
-          return AnimatedBuilder(
-            key: ValueKey<String>(book.id),
-            animation: _gridEntranceController,
-            builder: (context, child) {
-              final value = interval.transform(_gridEntranceController.value);
-              return Opacity(
-                opacity: value,
-                child: Transform.translate(
-                  offset: Offset(0, (1 - value) * 16),
-                  child: child,
-                ),
-              );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final booksFit = _shelfBooksFitViewport(
+          screenWidth: MediaQuery.sizeOf(context).width,
+          viewportWidth: constraints.maxWidth,
+          viewportHeight: constraints.maxHeight,
+          bookCount: books.length,
+          topPadding: AppSpacing.md,
+          horizontalPadding: AppSpacing.md,
+          gestureInset: MediaQuery.paddingOf(context).bottom,
+        );
+        _pinShelfOffsetWhenItFits(_gridScrollController, booksFit);
+        return RefreshIndicator(
+          onRefresh: _loadData,
+          color: colors.accent,
+          // A short shelf used to keep a few dozen pixels of trailing padding
+          // in the scroll range. Dragging then slid the cards and the platform
+          // stretch pulled them further, even though every book was already
+          // on screen. A shelf that fits now has no scroll range and shows no
+          // stretch, while the pull at the top still reaches the refresh.
+          child: NotificationListener<OverscrollIndicatorNotification>(
+            onNotification: (notification) {
+              if (booksFit) notification.disallowIndicator();
+              return false;
             },
-            child: card,
-          );
-        },
-      ),
+            child: GridView.builder(
+              controller: _gridScrollController,
+              physics: booksFit
+                  ? const AlwaysScrollableScrollPhysics(
+                      parent: ClampingScrollPhysics(),
+                    )
+                  : null,
+              padding: EdgeInsets.fromLTRB(
+                AppSpacing.md,
+                AppSpacing.md,
+                AppSpacing.md,
+                booksFit
+                    ? 0
+                    : AppSpacing.md + MediaQuery.paddingOf(context).bottom,
+              ),
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: _shelfMetrics(
+                  MediaQuery.sizeOf(context).width,
+                ).columns,
+                childAspectRatio: _shelfCardAspectRatio,
+                crossAxisSpacing: AppSpacing.xs,
+                mainAxisSpacing: AppSpacing.sm,
+              ),
+              itemCount: books.length,
+              findChildIndexCallback: (key) {
+                if (key is! ValueKey<String>) return null;
+                final index = books.indexWhere((book) => book.id == key.value);
+                return index < 0 ? null : index;
+              },
+              itemBuilder: (context, index) {
+                final book = books[index];
+                final cardKey = GlobalObjectKey('book-card-${book.id}');
+                final coverKey = GlobalObjectKey(
+                  'book-cover-source-${book.id}',
+                );
+                final card = RepaintBoundary(
+                  key: cardKey,
+                  child: BookCard(
+                    book: book,
+                    progress: _progressMap[book.id],
+                    availability:
+                        _availabilityMap[book.id] ?? BookAvailability.available,
+                    colors: colors,
+                    coverKey: coverKey,
+                    onTap: () => _openBookFromCover(book, coverKey),
+                    onLongPress: () => _showBookActions(book),
+                  ),
+                );
+
+                // Staggered entrance: cap how many items participate in the
+                // stagger so a long shelf doesn't push later cards' start time
+                // past 1.0 (Interval asserts 0 <= begin <= end <= 1).
+                final staggerIndex = math.min(index, 11);
+                final start = (staggerIndex * 0.04).clamp(0.0, 0.6);
+                final interval = Interval(
+                  start,
+                  (start + 0.4).clamp(0.0, 1.0),
+                  curve: AppMotion.standard,
+                );
+                return AnimatedBuilder(
+                  key: ValueKey<String>(book.id),
+                  animation: _gridEntranceController,
+                  builder: (context, child) {
+                    final value = interval.transform(
+                      _gridEntranceController.value,
+                    );
+                    return Opacity(
+                      opacity: value,
+                      child: Transform.translate(
+                        offset: Offset(0, (1 - value) * 16),
+                        child: child,
+                      ),
+                    );
+                  },
+                  child: card,
+                );
+              },
+            ),
+          ),
+        );
+      },
     );
+  }
+
+  /// Whether every book card ends above the system gesture bar.
+  ///
+  /// The grid's bottom padding includes that inset, so a short shelf can still
+  /// report a few dozen pixels of scroll range. Dragging it slides cards that
+  /// are already visible, and the platform stretch pulls them further. Cards
+  /// that actually run into the gesture bar stay scrollable, so the last row
+  /// can still be lifted clear of it.
+  static bool _shelfBooksFitViewport({
+    required double screenWidth,
+    required double viewportWidth,
+    required double viewportHeight,
+    required int bookCount,
+    required double topPadding,
+    required double horizontalPadding,
+    required double gestureInset,
+  }) {
+    if (bookCount <= 0) return true;
+    if (!viewportWidth.isFinite || !viewportHeight.isFinite) return false;
+    final columns = _shelfMetrics(screenWidth).columns;
+    final innerWidth = math.max(0.0, viewportWidth - horizontalPadding * 2);
+    final cardWidth = columns <= 1
+        ? innerWidth
+        : math.max(0.0, (innerWidth - AppSpacing.xs * (columns - 1)) / columns);
+    final cardHeight = cardWidth / _shelfCardAspectRatio;
+    final rows = (bookCount / columns).ceil();
+    final gridHeight = rows * cardHeight + (rows - 1) * AppSpacing.sm;
+    final visibleHeight = math.max(0.0, viewportHeight - gestureInset);
+    return topPadding + gridHeight <= visibleHeight + 0.5;
+  }
+
+  /// Drops a leftover offset once every card already fits.
+  ///
+  /// Switching off user scrolling does not rewind the position. Without this,
+  /// deleting books until the shelf fits could leave the cards parked on the
+  /// old trailing padding, with no gesture able to bring them back.
+  void _pinShelfOffsetWhenItFits(ScrollController controller, bool booksFit) {
+    if (!booksFit || !controller.hasClients || controller.offset == 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !controller.hasClients || controller.offset == 0) return;
+      controller.jumpTo(0);
+    });
   }
 
   /// Shelf geometry for a given width.
@@ -2244,16 +2323,24 @@ class _LibraryScreenState extends State<LibraryScreen>
         final contentHeight = rowCount == 0
             ? 0.0
             : rowCount * cardHeight + (rowCount - 1) * verticalGap;
+        final gestureInset = MediaQuery.paddingOf(context).bottom;
+        final booksFit =
+            contentHeight <= constraints.maxHeight - gestureInset + 0.5;
+        _pinShelfOffsetWhenItFits(_reorderScrollController, booksFit);
 
         return SingleChildScrollView(
           key: const ValueKey('reorder-grid'),
           controller: _reorderScrollController,
-          physics: const AlwaysScrollableScrollPhysics(),
+          physics: booksFit ? const NeverScrollableScrollPhysics() : null,
           padding: EdgeInsets.fromLTRB(
             horizontalPadding,
             0,
             horizontalPadding,
-            horizontalPadding + MediaQuery.paddingOf(context).bottom,
+            // Without trailing padding a shelf that fits has no scroll range,
+            // so the edge auto-scroll during a drag cannot move it either.
+            booksFit
+                ? 0
+                : horizontalPadding + MediaQuery.paddingOf(context).bottom,
           ),
           child: SizedBox(
             width: gridWidth,
