@@ -136,6 +136,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   static const _shelfCardAspectRatio = 0.52;
 
   final _reorderScrollController = ScrollController();
+  bool _reorderShelfFits = false;
   bool _gridScrolled = false;
   Offset? _shelfPointerStart;
   DateTime? _shelfPointerStartTime;
@@ -932,7 +933,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _updateBookDrag(DragUpdateDetails details) {
-    if (!_reorderScrollController.hasClients) return;
+    // A shelf that fits keeps still, even when a cell's blank strip reaches a
+    // little past the screen and leaves a sliver of scroll range.
+    if (_reorderShelfFits || !_reorderScrollController.hasClients) return;
     final screenHeight = MediaQuery.sizeOf(context).height;
     final y = details.globalPosition.dy;
     var delta = 0.0;
@@ -2197,6 +2200,8 @@ class _LibraryScreenState extends State<LibraryScreen>
           topPadding: AppSpacing.md,
           horizontalPadding: AppSpacing.md,
           gestureInset: MediaQuery.paddingOf(context).bottom,
+          paintedHeight: (cellWidth) =>
+              BookCard.paintedHeight(context, cellWidth),
         );
         _pinShelfOffsetWhenItFits(_gridScrollController, booksFit);
         return RefreshIndicator(
@@ -2214,11 +2219,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             },
             child: GridView.builder(
               controller: _gridScrollController,
-              physics: booksFit
-                  ? const AlwaysScrollableScrollPhysics(
-                      parent: ClampingScrollPhysics(),
-                    )
-                  : null,
+              physics: booksFit ? const _PinnedShelfScrollPhysics() : null,
               padding: EdgeInsets.fromLTRB(
                 AppSpacing.md,
                 AppSpacing.md,
@@ -2300,9 +2301,11 @@ class _LibraryScreenState extends State<LibraryScreen>
   ///
   /// The grid's bottom padding includes that inset, so a short shelf can still
   /// report a few dozen pixels of scroll range. Dragging it slides cards that
-  /// are already visible, and the platform stretch pulls them further. Cards
-  /// that actually run into the gesture bar stay scrollable, so the last row
-  /// can still be lifted clear of it.
+  /// are already visible, and the platform stretch pulls them further. The
+  /// last row counts up to the bottom of its progress bar, because each cell
+  /// keeps a blank strip below that and the strip may sit over the gesture
+  /// bar. Cards that actually run into the gesture bar stay scrollable, so the
+  /// last row can still be lifted clear of it.
   static bool _shelfBooksFitViewport({
     required double screenWidth,
     required double viewportWidth,
@@ -2311,6 +2314,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     required double topPadding,
     required double horizontalPadding,
     required double gestureInset,
+    required double Function(double cellWidth) paintedHeight,
   }) {
     if (bookCount <= 0) return true;
     if (!viewportWidth.isFinite || !viewportHeight.isFinite) return false;
@@ -2321,9 +2325,11 @@ class _LibraryScreenState extends State<LibraryScreen>
         : math.max(0.0, (innerWidth - AppSpacing.xs * (columns - 1)) / columns);
     final cardHeight = cardWidth / _shelfCardAspectRatio;
     final rows = (bookCount / columns).ceil();
-    final gridHeight = rows * cardHeight + (rows - 1) * AppSpacing.sm;
+    final lastRowHeight = math.min(cardHeight, paintedHeight(cardWidth));
+    final contentHeight =
+        (rows - 1) * (cardHeight + AppSpacing.sm) + lastRowHeight;
     final visibleHeight = math.max(0.0, viewportHeight - gestureInset);
-    return topPadding + gridHeight <= visibleHeight + 0.5;
+    return topPadding + contentHeight <= visibleHeight + 0.5;
   }
 
   /// Drops a leftover offset once every card already fits.
@@ -2388,8 +2394,16 @@ class _LibraryScreenState extends State<LibraryScreen>
             ? 0.0
             : rowCount * cardHeight + (rowCount - 1) * verticalGap;
         final gestureInset = MediaQuery.paddingOf(context).bottom;
+        final paintedHeight = rowCount == 0
+            ? 0.0
+            : (rowCount - 1) * (cardHeight + verticalGap) +
+                  math.min(
+                    cardHeight,
+                    BookCard.paintedHeight(context, cardWidth),
+                  );
         final booksFit =
-            contentHeight <= constraints.maxHeight - gestureInset + 0.5;
+            paintedHeight <= constraints.maxHeight - gestureInset + 0.5;
+        _reorderShelfFits = booksFit;
         _pinShelfOffsetWhenItFits(_reorderScrollController, booksFit);
 
         return SingleChildScrollView(
@@ -2571,4 +2585,30 @@ class _LibraryScreenState extends State<LibraryScreen>
       ),
     );
   }
+}
+
+/// Scroll physics for a shelf whose cards all sit above the gesture bar.
+///
+/// Every drag and fling is reported as overscroll, so the cards stay still
+/// even when the last cell's blank strip leaves a sliver of scroll range. The
+/// overscroll at the top still reaches the pull-to-refresh above the grid.
+class _PinnedShelfScrollPhysics extends ScrollPhysics {
+  const _PinnedShelfScrollPhysics({super.parent});
+
+  @override
+  _PinnedShelfScrollPhysics applyTo(ScrollPhysics? ancestor) =>
+      _PinnedShelfScrollPhysics(parent: buildParent(ancestor));
+
+  @override
+  bool shouldAcceptUserOffset(ScrollMetrics position) => true;
+
+  @override
+  double applyBoundaryConditions(ScrollMetrics position, double value) =>
+      value - position.pixels;
+
+  @override
+  Simulation? createBallisticSimulation(
+    ScrollMetrics position,
+    double velocity,
+  ) => null;
 }

@@ -1,5 +1,6 @@
 import '../services/resource_presence.dart';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
@@ -18,6 +19,41 @@ class BookCard extends StatelessWidget {
   final Key? coverKey;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
+
+  static const _inset = 6.0;
+  static const _coverAspectRatio = 0.7;
+  static const _metaFontSize = 11.0;
+  static const _iconSize = 12.0;
+  static const _progressHeight = 3.0;
+
+  /// Height a card paints in a shelf cell of [cellWidth], from the cell top
+  /// to the bottom of the progress bar.
+  ///
+  /// Shelf cells keep a fixed aspect ratio, so each one ends about twenty
+  /// pixels below its progress bar. The shelf compares this height with the
+  /// gesture bar to tell whether the last row is really on screen. It mirrors
+  /// the column in [build], and the two have to change together.
+  static double paintedHeight(BuildContext context, double cellWidth) {
+    final style = (Theme.of(context).textTheme.bodyMedium ?? const TextStyle())
+        .merge(const TextStyle(fontSize: _metaFontSize));
+    final painter = TextPainter(
+      text: TextSpan(text: '全文 0 章 · 已读 0%', style: style),
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final lineHeight = painter.height;
+    painter.dispose();
+    final coverWidth = math.max(0.0, cellWidth - _inset * 2);
+    return _inset +
+        coverWidth / _coverAspectRatio +
+        6 +
+        lineHeight +
+        AppSpacing.xs +
+        math.max(lineHeight, _iconSize) +
+        AppSpacing.xs +
+        _progressHeight;
+  }
 
   const BookCard({
     super.key,
@@ -98,7 +134,7 @@ class BookCard extends StatelessWidget {
             overlayColor: WidgetStateProperty.all(Colors.transparent),
             borderRadius: BorderRadius.circular(AppRadius.md),
             child: Padding(
-              padding: const EdgeInsets.all(6),
+              padding: const EdgeInsets.all(_inset),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -106,7 +142,7 @@ class BookCard extends StatelessWidget {
                   RepaintBoundary(
                     key: coverKey,
                     child: AspectRatio(
-                      aspectRatio: 0.7,
+                      aspectRatio: _coverAspectRatio,
                       child: Stack(
                         children: [
                           // 1. Background block. Colour/border/shadow only;
@@ -310,7 +346,10 @@ class BookCard extends StatelessWidget {
                   // Meta line: author + chapter count / progress
                   Text(
                     metaLine,
-                    style: TextStyle(fontSize: 11, color: palette.secondary),
+                    style: TextStyle(
+                      fontSize: _metaFontSize,
+                      color: palette.secondary,
+                    ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -321,7 +360,7 @@ class BookCard extends StatelessWidget {
                         availabilityLabel.isEmpty
                             ? Icons.text_snippet_outlined
                             : Icons.warning_amber_rounded,
-                        size: 12,
+                        size: _iconSize,
                         color: availabilityLabel.isEmpty
                             ? palette.secondary
                             : availabilityColor,
@@ -333,7 +372,7 @@ class BookCard extends StatelessWidget {
                               ? wordCountLine
                               : availabilityLabel,
                           style: TextStyle(
-                            fontSize: 11,
+                            fontSize: _metaFontSize,
                             color: availabilityLabel.isEmpty
                                 ? palette.secondary
                                 : availabilityColor,
@@ -351,7 +390,7 @@ class BookCard extends StatelessWidget {
                       value: progressPercent,
                       backgroundColor: palette.border,
                       valueColor: AlwaysStoppedAnimation<Color>(palette.accent),
-                      minHeight: 3,
+                      minHeight: _progressHeight,
                     ),
                   ),
                 ],
