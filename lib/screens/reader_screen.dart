@@ -116,6 +116,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   Animation<double>? _pageTurnAnimation;
   Animation<double>? _pageCurlLiftAnimation;
   double _pageDragOffset = 0;
+  // The finger's own travel past the book's first or last page. The leaf
+  // shows only a rubber-banded part of it, so the drag has to remember the
+  // rest to keep tracking the finger.
+  double _pageEdgeStretch = 0;
   int? _pageDragTargetIndex;
   bool _commitPageTurnWhenSettled = false;
   int _pageTurnSerial = 0;
@@ -1858,6 +1862,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _commitPageTurnWhenSettled = false;
     _pageTurnOriginChapterIndex = null;
     _pageTurnOriginSnapshot = null;
+    _pageEdgeStretch = 0;
     _setPageDragOffset(0);
     _discardPageTurnSnapshot();
     _discardReversePageTurnSnapshot();
@@ -2564,6 +2569,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     _pageTurnController.stop();
     _pageTurnAnimation = null;
+    _pageEdgeStretch = 0;
     if (_settings.readingMode == ReaderReadingMode.simulation &&
         _pageTurnEffect == SimulationPageTurnEffect.simulation &&
         _pageTurnSnapshot == null) {
@@ -2593,7 +2599,10 @@ class _ReaderScreenState extends State<ReaderScreen>
         _pageTurnSnapshot == null) {
       unawaited(_capturePageTurnSnapshot());
     }
-    final proposed = (_pageDragOffset + deltaX).clamp(-width, width);
+    // Past the book's ends the leaf shows less than the finger has moved, so
+    // the next step continues from the finger's own travel.
+    final base = _pageEdgeStretch != 0 ? _pageEdgeStretch : _pageDragOffset;
+    final proposed = (base + deltaX).clamp(-width, width);
 
     if (_settings.readingMode == ReaderReadingMode.simulation) {
       final offset = _resolveSimulationDrag(proposed, width);
@@ -2603,9 +2612,10 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     final targetIndex = _pageDragTargetIndex ?? _targetIndexForOffset(proposed);
     if (targetIndex == null) {
-      _setPageDragOffset(proposed * 0.14);
+      _stretchPastBookEdge(proposed, width);
       return;
     }
+    _pageEdgeStretch = 0;
 
     final goingNext = targetIndex > _chapterIndex;
     if (_pageDragTargetIndex != targetIndex || _showOverlay) {
@@ -2643,13 +2653,30 @@ class _ReaderScreenState extends State<ReaderScreen>
         : _simulationTargetForDirection(goingNext: goingNext);
     if (target == null) {
       _replaceSimulationPageTarget(null);
-      _setPageDragOffset(proposed * 0.14);
+      _stretchPastBookEdge(proposed, width);
       return null;
     }
+    _pageEdgeStretch = 0;
     _replaceSimulationPageTarget(target, hideOverlay: true);
     return goingNext
         ? proposed.clamp(-width, 0.0).toDouble()
         : proposed.clamp(0.0, width).toDouble();
+  }
+
+  /// Shows a drag of [travel] past the book's first or last page.
+  ///
+  /// The leaf follows a fifth of the finger at first and stiffens the
+  /// further it is pulled, closing on about an eighth of the page width, so
+  /// the end of the book answers with resistance instead of a wall.
+  void _stretchPastBookEdge(double travel, double width) {
+    _pageEdgeStretch = travel;
+    _setPageDragOffset(_rubberBand(travel, width));
+  }
+
+  static double _rubberBand(double travel, double width) {
+    if (travel == 0 || width <= 0) return 0;
+    final limit = width * 0.12;
+    return travel.sign * limit * (1 - 1 / (travel.abs() * 0.2 / limit + 1));
   }
 
   /// Moves a curling leaf with the finger at [position], in the reading
@@ -2880,9 +2907,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     final goingNext =
         simulationTarget?.goingNext ??
         (targetIndex != null && targetIndex > _chapterIndex);
-    final velocityCommits =
-        (goingNext && velocity < -260) || (!goingNext && velocity > 260);
-    final shouldCommit = progress > 0.16 || velocityCommits;
+    // Velocity decides first: a flick along the turn commits it from any
+    // distance, and a flick back towards the page puts the leaf down even
+    // past the distance threshold, since the reader has changed their mind.
+    final towardsTurn = goingNext ? -velocity : velocity;
+    final shouldCommit =
+        towardsTurn > 260 || (towardsTurn >= -260 && progress > 0.16);
     final endOffset = shouldCommit ? (goingNext ? -width : width) : 0.0;
     _animatePageDragTo(endOffset, commit: shouldCommit, velocity: velocity);
   }

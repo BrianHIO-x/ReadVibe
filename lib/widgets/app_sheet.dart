@@ -25,11 +25,13 @@ Future<T?> showAppSheet<T>({
     ),
     sheetAnimationStyle: MediaQuery.disableAnimationsOf(context)
         ? AnimationStyle.noAnimation
-        : sheetAnimationStyle ??
-              AnimationStyle(
-                duration: AppMotion.sheet,
-                reverseDuration: AppMotion.normal,
-              ),
+        : _withSheetCurves(
+            sheetAnimationStyle ??
+                AnimationStyle(
+                  duration: AppMotion.sheet,
+                  reverseDuration: AppMotion.normal,
+                ),
+          ),
     builder: (_) => AppOverlayTheme(
       colors: colors,
       child: Builder(builder: builder),
@@ -39,6 +41,15 @@ Future<T?> showAppSheet<T>({
   await route.completed;
   return result;
 }
+
+/// Fills in the edge-sheet curves a caller left out. Flutter's default
+/// plays the same decelerating curve backwards to close, so a sheet used to
+/// leave slowly and then speed off. Closing on the flipped curve makes it
+/// leave at once.
+AnimationStyle _withSheetCurves(AnimationStyle style) => style.copyWith(
+  curve: style.curve ?? AppMotion.sheetCurve,
+  reverseCurve: style.reverseCurve ?? AppMotion.exitOf(AppMotion.sheetCurve),
+);
 
 /// Attached panels share the reader's 24 dp upper corners and paper surface.
 class AppSheetSurface extends StatelessWidget {

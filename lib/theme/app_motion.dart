@@ -36,8 +36,10 @@ class AppMotion {
   static const settingsSheet = Duration(milliseconds: 330);
   static const settingsSheetClose = Duration(milliseconds: 220);
 
-  /// Side drawer.
+  /// Side drawer. Closing is quicker than opening: by then the reader has
+  /// finished with it, and a flick to close should land at once.
   static const drawer = Duration(milliseconds: 330);
+  static const drawerClose = Duration(milliseconds: 240);
 
   /// Shelf cards use a slightly elastic, position-aware settle while other
   /// cards make room for the item being reordered.
@@ -72,6 +74,17 @@ class AppMotion {
   static const gentle = Curves.easeInOutCubic;
   static const controlCurve = Cubic(0.16, 1.0, 0.3, 1.0);
   static const shelfReorderCurve = Cubic(0.18, 0.88, 0.22, 1.0);
+
+  /// Sheets and drawers attached to a screen edge: the iOS sheet curve. It
+  /// is very steep at the start, so the panel answers the tap at once, and
+  /// lands as gently as a spring.
+  static const sheetCurve = Cubic(0.32, 0.72, 0.0, 1.0);
+
+  /// The curve to give a route or controller that plays [curve] backwards
+  /// to close. A reversed animation runs its curve from the end, which turns
+  /// an ease-out entrance into an exit that starts slowly. The flipped curve
+  /// makes the exit start fast and settle, like the entrance did.
+  static Curve exitOf(Curve curve) => curve.flipped;
 
   /// A soft material-like pickup curve: quick response at the beginning,
   /// then a calm settle before the heavier page expansion.

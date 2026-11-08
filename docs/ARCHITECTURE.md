@@ -213,7 +213,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | 文件 | 作用 |
 |---|---|
 | `app_theme.dart` | 全局设计系统。定义暖米色调色板常量、阅读主题色 `ReaderThemeColors`（背景/正文/次级/头部/边框/强调；浅色、暖色、深色与 OLED 纯黑四套，跟随系统时在暖色与深色之间选择）、`getReaderTheme`（系统主题解析）、`systemUiOverlayStyle`（透明状态栏与导航栏，按背景亮度选择图标亮度），以及完整亮/暗两套 `ThemeData`（无水波纹、自绘 SnackBar 透明）。 |
-| `app_motion.dart` | 动效令牌与开书过渡。集中全部时长与曲线令牌，例如按压 96ms、翻页 300ms、开书 680ms 与合书 540ms；`buildFadeScaleRoute` 实现三阶段书香开页路由：封面快照提起放大、单页绕左缘翻开、阅读面接管，关闭按同一时间线倒放，时长为开书的 0.8 倍。路由本身不透明：开合动画进行时书架照常露出，停稳后书架退出画面、其动画暂停，过渡层也不再绘制暗化层、外阴影、底色与圆角裁剪；内部 `_BookRouteTransition`、`_BookRouteFrame`、`_OpeningPage` 管理阴影、圆角、折页阴影与封面 RawImage。 |
+| `app_motion.dart` | 动效令牌与开书过渡。集中全部时长与曲线令牌，例如按压 96ms、翻页 300ms、开书 680ms 与合书 540ms；`sheetCurve` 是贴边面板与抽屉共用的 iOS 面板曲线 `Cubic(0.32, 0.72, 0, 1)`，`exitOf` 给倒放关闭的路由换上翻转曲线，让退场也从快到慢；抽屉关闭 `drawerClose` 比打开更短；`buildFadeScaleRoute` 实现三阶段书香开页路由：封面快照提起放大、单页绕左缘翻开、阅读面接管，关闭按同一时间线倒放，时长为开书的 0.8 倍。路由本身不透明：开合动画进行时书架照常露出，停稳后书架退出画面、其动画暂停，过渡层也不再绘制暗化层、外阴影、底色与圆角裁剪；内部 `_BookRouteTransition`、`_BookRouteFrame`、`_OpeningPage` 管理阴影、圆角、折页阴影与封面 RawImage。 |
 | `app_overlay_theme.dart` | 阅读主题下的界面覆盖层。`AppOverlayTheme` 依据 `ReaderThemeColors` 现场派生整套主题（按钮、输入框、对话框、抽屉、菜单、Tooltip、滑条、ListTile），并提供 `isDark`、`danger`、`barrier`、`shape` 静态助手，保证任何页面上浮出的控件与当前阅读纸色一致。 |
 | `app_spacing.dart` | 间距与圆角令牌。`AppSpacing`（4/8/12/16/24/32）与 `AppRadius`（8/12/16/24 胶囊）。 |
 
@@ -222,10 +222,11 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | 文件 | 作用 |
 |---|---|
 | `app_toast.dart` | 应用统一轻提示。基于透明 SnackBar 自绘卡片（信息/成功/错误/加载四种图标与配色的时长），支持阅读纸色注入与宽屏居中限制，加载态 30 秒常驻、点击可消。 |
-| `app_dialog.dart` | 应用统一对话框。`showAppDialog` 捕获主题上下文并控制入场/退场时长与遮罩透明度；`AppDialog` 规范内边距与最大宽度；`AppDestructiveButton` 以错误色呈现破坏性操作（填充或描边两态）。 |
-| `app_sheet.dart` | 应用统一底部面板。`showAppSheet` 以 `ModalBottomSheetRoute` 承载可滚动面板并保留禁用动画降级；`AppSheetSurface` 定制 24dp 圆角纸面；`AppSheetHeader` 提供标题与关闭钮；`AppActionSheet` 为多子项动作列表；面板不再裁掉底部安全区，改由滚动内容自行留白，纸面一直铺到屏幕底缘。 |
+| `app_dialog.dart` | 应用统一对话框。`showAppDialog` 捕获主题上下文并控制入场/退场时长与遮罩透明度，`_AppDialogRoute` 在淡入的同时从 96% 尺寸居中放大，退场使用翻转曲线；`AppDialog` 规范内边距与最大宽度；`AppDestructiveButton` 以错误色呈现破坏性操作（填充或描边两态）。 |
+| `app_sheet.dart` | 应用统一底部面板。`showAppSheet` 以 `ModalBottomSheetRoute` 承载可滚动面板并保留禁用动画降级，调用方未指定曲线时补上 `sheetCurve` 入场与其翻转曲线退场；`AppSheetSurface` 定制 24dp 圆角纸面；`AppSheetHeader` 提供标题与关闭钮；`AppActionSheet` 为多子项动作列表；面板不再裁掉底部安全区，改由滚动内容自行留白，纸面一直铺到屏幕底缘。 |
 | `app_popup_menu.dart` | 主题化弹出菜单。`AppPopupMenuButton` 自行计算锚点矩形后调用 `showMenu`，限定宽度并绘制选中态（勾选图标与强调底色）；可选的 `menuRightInset` 把菜单右缘钉在距屏幕右边固定距离处，用于与下方内容列对齐；`AppMenuEntry` 携带值、标签、图标与选中标记。 |
 | `pressable_scale.dart` | 纯视觉按压缩放反馈。用 Listener 监听原始指针事件，不注册手势识别器，可包裹 InkWell/按钮而不劫持点击；禁用态自动复位。 |
+| `side_drawer.dart` | 左侧滑出抽屉。`showSideDrawer` 推入自绘遮罩的弹出路由：拖动时面板与手指 1:1 同步，遮罩透明度由同一拖动量换算；松手时速度超过 200 像素/秒按方向决定，否则拖过四成宽度才关闭；关闭从松手位置接着滑出，未关闭则以临界阻尼弹簧带着松手速度回位，回位途中可以再次抓住。书架全局设置使用它。 |
 | `book_card.dart` | 书架书卡。封面区域复现背景书脊与渐变遮罩（三明治分层供开书动画采样），显示封面图或首字占位；以章节进度与章内进度折算整体百分比，PDF 显示页数口径；可用性受损时角标提示丢失原因；语义化拼接无障碍标签。`paintedHeight` 按同一套尺寸算出书卡实际绘制到进度条底部的高度，书架据此判断最后一排是否已经停在手势条上方。 |
 | `chapter_list.dart` | 全屏目录面板。列表底部按系统手势条高度补白，章节行可滚动至手势条之下。`_TocDirectory` 把章节组织为两级卷目录（卷标题聚合、导语类与卷间散章分区），无卷则退化为平铺列表；卷头为 pinned 固定头可折叠并回传展开状态；行尾显示逐章字数（监听 `chapterWordCounts`）；章节行与卷头都使用固定行高，并随系统字号同步增大。目录行采用较小的字号和收窄的边距，从而给标题留出更多宽度。打开目录或点“回到当前章”时，当前章节会按行高算出精确位置并置顶显示。当前章位于展开的卷内时，置顶位置会让出固定卷头的高度。 |
 | `chapter_editor_sheet.dart` | 章节编辑器。顶栏由关闭键、章节标题输入框、查找替换开关与保存按钮组成；正文框不自动聚焦，打开时按 `initialAnchorOffset` 把阅读所在行钉到视口顶部（读取 `RenderEditable` 的光标矩形，天然对齐整行）；查找替换面板在当前章内定位匹配，`_FindHighlightController` 直接在文本跨度上着色，因此未聚焦也能看到命中，支持上一个、下一个、单次替换与全部替换（上限 500 处）；深度处理 Android 系统栏：键盘弹出时恢复编辑区、路由非当前或退后台时暂停，并以 1.1 秒延时重试恢复；富文本章节保存前弹确认（本章转纯文本）；脏内容关闭时询问放弃；保存失败原样展示错误。 |

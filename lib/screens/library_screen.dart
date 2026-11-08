@@ -33,6 +33,7 @@ import '../widgets/app_update_dialog.dart';
 import '../widgets/book_card.dart';
 import '../widgets/global_settings_sheet.dart';
 import '../widgets/private_shelf_sheets.dart';
+import '../widgets/side_drawer.dart';
 import 'reader_screen.dart';
 import 'pdf_reader_screen.dart';
 import 'package:file_picker/file_picker.dart';
@@ -1013,118 +1014,83 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (_settingsOpen) return;
     _settingsOpen = true;
     var sheetSettings = _settings;
-    final dialog = showGeneralDialog<void>(
+    final dialog = showSideDrawer<void>(
       context: context,
-      barrierDismissible: true,
       barrierLabel: '关闭设置',
       barrierColor: Colors.black.withValues(alpha: 0.14),
-      transitionDuration: AppMotion.drawer,
-      pageBuilder: (ctx, animation, secondaryAnimation) {
-        final width = math.min(MediaQuery.sizeOf(ctx).width * 0.86, 360.0);
-        return Align(
-          alignment: Alignment.centerLeft,
-          child: SizedBox(
-            width: width,
-            height: double.infinity,
-            child: GestureDetector(
-              // Swipe left (towards the left edge, i.e. negative dx) on the
-              // settings panel itself dismisses the drawer.
-              onHorizontalDragEnd: (details) {
-                if (details.primaryVelocity != null &&
-                    details.primaryVelocity! < -200) {
-                  Navigator.of(ctx).pop();
-                }
-              },
-              child: Material(
-                color: Colors.transparent,
-                child: StatefulBuilder(
-                  builder: (context, setSheetState) {
-                    final colors = AppTheme.getReaderTheme(
-                      sheetSettings.theme,
-                      systemBrightness: MediaQuery.platformBrightnessOf(
-                        context,
-                      ),
-                    );
-                    return AppOverlayTheme(
-                      colors: colors,
-                      child: GlobalSettingsSheet(
-                        settings: sheetSettings,
-                        colors: colors,
-                        onChange: (newSettings) {
-                          setSheetState(() => sheetSettings = newSettings);
-                          if (mounted) setState(() => _settings = newSettings);
-                          _syncAutomaticUpdateCheck();
-                          _persistSettings(newSettings);
-                        },
-                        onImportFont: () async {
-                          try {
-                            _systemDialogDepth++;
-                            final ReaderSettings? picked;
-                            try {
-                              picked = await _fontService.pickAndInstallFont(
-                                sheetSettings,
-                              );
-                            } finally {
-                              _systemDialogDepth--;
-                            }
-                            final newSettings = picked;
-                            if (newSettings == null) return;
-                            if (!context.mounted || !mounted) return;
-                            setSheetState(() => sheetSettings = newSettings);
-                            if (mounted) {
-                              setState(() => _settings = newSettings);
-                            }
-                            await _storage.saveSettings(newSettings);
-                            _showMessage('字体已导入并应用');
-                          } catch (e) {
-                            _showError(
-                              e is FormatException
-                                  ? e.message
-                                  : '字体导入失败，请选择 .ttf 或 .otf 文件',
-                            );
-                          }
-                        },
-                        onCheckUpdate: () async {
-                          // Close the sheet first so the result dialog or
-                          // snackbar lands on the shelf instead of the sheet.
-                          Navigator.of(context).pop();
-                          await _checkUpdateManually();
-                        },
-                        onMeasureStorage: _storage.measureStorageUsage,
-                        onClearCaches: _storage.clearTemporaryCaches,
-                        applicationVersion: _applicationVersion,
-                        privateShelfConfigured: _privateConfig.configured,
-                        privateShelfOpen: _privateMode,
-                        onPrivateShelf: () {
-                          Navigator.of(context).pop();
-                          unawaited(_handlePrivateShelfEntry());
-                        },
-                        onPrivateShelfSettings: () {
-                          Navigator.of(context).pop();
-                          unawaited(_managePrivateShelf());
-                        },
-                      ),
-                    );
-                  },
-                ),
+      builder: (_) => Material(
+        color: Colors.transparent,
+        child: StatefulBuilder(
+          builder: (context, setSheetState) {
+            final colors = AppTheme.getReaderTheme(
+              sheetSettings.theme,
+              systemBrightness: MediaQuery.platformBrightnessOf(
+                context,
               ),
-            ),
-          ),
-        );
-      },
-      transitionBuilder: (ctx, animation, secondaryAnimation, child) {
-        final curved = CurvedAnimation(
-          parent: animation,
-          curve: AppMotion.standard,
-        );
-        return SlideTransition(
-          position: Tween<Offset>(
-            begin: const Offset(-1, 0),
-            end: Offset.zero,
-          ).animate(curved),
-          child: child,
-        );
-      },
+            );
+            return AppOverlayTheme(
+              colors: colors,
+              child: GlobalSettingsSheet(
+                settings: sheetSettings,
+                colors: colors,
+                onChange: (newSettings) {
+                  setSheetState(() => sheetSettings = newSettings);
+                  if (mounted) setState(() => _settings = newSettings);
+                  _syncAutomaticUpdateCheck();
+                  _persistSettings(newSettings);
+                },
+                onImportFont: () async {
+                  try {
+                    _systemDialogDepth++;
+                    final ReaderSettings? picked;
+                    try {
+                      picked = await _fontService.pickAndInstallFont(
+                        sheetSettings,
+                      );
+                    } finally {
+                      _systemDialogDepth--;
+                    }
+                    final newSettings = picked;
+                    if (newSettings == null) return;
+                    if (!context.mounted || !mounted) return;
+                    setSheetState(() => sheetSettings = newSettings);
+                    if (mounted) {
+                      setState(() => _settings = newSettings);
+                    }
+                    await _storage.saveSettings(newSettings);
+                    _showMessage('字体已导入并应用');
+                  } catch (e) {
+                    _showError(
+                      e is FormatException
+                          ? e.message
+                          : '字体导入失败，请选择 .ttf 或 .otf 文件',
+                    );
+                  }
+                },
+                onCheckUpdate: () async {
+                  // Close the sheet first so the result dialog or
+                  // snackbar lands on the shelf instead of the sheet.
+                  Navigator.of(context).pop();
+                  await _checkUpdateManually();
+                },
+                onMeasureStorage: _storage.measureStorageUsage,
+                onClearCaches: _storage.clearTemporaryCaches,
+                applicationVersion: _applicationVersion,
+                privateShelfConfigured: _privateConfig.configured,
+                privateShelfOpen: _privateMode,
+                onPrivateShelf: () {
+                  Navigator.of(context).pop();
+                  unawaited(_handlePrivateShelfEntry());
+                },
+                onPrivateShelfSettings: () {
+                  Navigator.of(context).pop();
+                  unawaited(_managePrivateShelf());
+                },
+              ),
+            );
+          },
+        ),
+      ),
     );
     unawaited(dialog.whenComplete(() => _settingsOpen = false));
   }
@@ -1799,6 +1765,8 @@ class _LibraryScreenState extends State<LibraryScreen>
                 Expanded(
                   child: AnimatedSwitcher(
                     duration: const Duration(milliseconds: 220),
+                    switchInCurve: AppMotion.standard,
+                    switchOutCurve: AppMotion.exitOf(AppMotion.standard),
                     layoutBuilder: (currentChild, previousChildren) => Stack(
                       alignment: Alignment.topCenter,
                       fit: StackFit.expand,
@@ -1870,6 +1838,8 @@ class _LibraryScreenState extends State<LibraryScreen>
                 tooltip: _reorderMode ? '退出移动' : '设置',
                 icon: AnimatedSwitcher(
                   duration: AppMotion.fast,
+                  switchInCurve: AppMotion.standard,
+                  switchOutCurve: AppMotion.exitOf(AppMotion.standard),
                   child: Icon(
                     _reorderMode ? Icons.close_rounded : Icons.menu,
                     key: ValueKey(_reorderMode),
@@ -1881,6 +1851,8 @@ class _LibraryScreenState extends State<LibraryScreen>
               Expanded(
                 child: AnimatedSwitcher(
                   duration: AppMotion.fast,
+                  switchInCurve: AppMotion.standard,
+                  switchOutCurve: AppMotion.exitOf(AppMotion.standard),
                   layoutBuilder: (current, previous) => Stack(
                     alignment: Alignment.centerLeft,
                     children: [...previous, ?current],
@@ -1942,6 +1914,8 @@ class _LibraryScreenState extends State<LibraryScreen>
               ],
               AnimatedSwitcher(
                 duration: AppMotion.fast,
+                switchInCurve: AppMotion.standard,
+                switchOutCurve: AppMotion.exitOf(AppMotion.standard),
                 child: _reorderMode
                     ? FilledButton.icon(
                         key: const ValueKey('reorder-done'),

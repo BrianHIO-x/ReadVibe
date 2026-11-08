@@ -12,7 +12,7 @@ Future<T?> showAppDialog<T>({
   bool barrierDismissible = true,
 }) async {
   final navigator = Navigator.of(context, rootNavigator: true);
-  final route = DialogRoute<T>(
+  final route = _AppDialogRoute<T>(
     context: context,
     themes: InheritedTheme.capture(from: context, to: navigator.context),
     barrierDismissible: barrierDismissible,
@@ -25,6 +25,7 @@ Future<T?> showAppDialog<T>({
           ? Duration.zero
           : AppMotion.fast,
       curve: AppMotion.standard,
+      reverseCurve: AppMotion.exitOf(AppMotion.standard),
     ),
     builder: (_) => AppOverlayTheme(
       colors: colors,
@@ -94,5 +95,56 @@ class AppDestructiveButton extends StatelessWidget {
             onPressed: onPressed,
             child: child,
           );
+  }
+}
+
+/// A dialog that grows from 96% of its size as it fades in, so it arrives
+/// instead of appearing out of nothing. Dialogs sit in the middle of the
+/// screen, so they grow from their centre.
+class _AppDialogRoute<T> extends DialogRoute<T> {
+  _AppDialogRoute({
+    required super.context,
+    required super.builder,
+    super.themes,
+    super.barrierDismissible,
+    super.barrierColor,
+    super.animationStyle,
+  });
+
+  CurvedAnimation? _scaleCurve;
+  Animation<double>? _scale;
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (_scaleCurve?.parent != animation) {
+      _scaleCurve?.dispose();
+      final curve = CurvedAnimation(
+        parent: animation,
+        curve: AppMotion.standard,
+        reverseCurve: AppMotion.exitOf(AppMotion.standard),
+      );
+      _scaleCurve = curve;
+      _scale = Tween<double>(begin: 0.96, end: 1).animate(curve);
+    }
+    return ScaleTransition(
+      scale: _scale!,
+      child: super.buildTransitions(
+        context,
+        animation,
+        secondaryAnimation,
+        child,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _scaleCurve?.dispose();
+    super.dispose();
   }
 }
