@@ -105,7 +105,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   int _loadSerial = 0;
   Timer? _automaticUpdateTimer;
   late final LibraryMaintenanceController _maintenance;
-  bool _automaticUpdateAttempted = false;
+  bool _automaticUpdateRunning = false;
+  DateTime? _automaticUpdateRetryAt;
   bool _manualUpdateChecking = false;
   bool _updateDialogVisible = false;
   String _applicationVersion = '—';
@@ -155,7 +156,10 @@ class _LibraryScreenState extends State<LibraryScreen>
     _bookExporter = widget.exporter ?? BookExportService();
     _updateChecker = widget.updateChecker ?? UpdateService();
     _privateLock = widget.privateShelfLock ?? PrivateShelfLock();
-    _lifecycle = AppLifecycleListener(onHide: _lockPrivateShelfOnLeave);
+    _lifecycle = AppLifecycleListener(
+      onHide: _lockPrivateShelfOnLeave,
+      onResume: _syncAutomaticUpdateCheck,
+    );
     _maintenance = LibraryMaintenanceController(
       repository: _storage,
       books: () => _books,
@@ -210,44 +214,104 @@ class _LibraryScreenState extends State<LibraryScreen>
     systemBrightness: MediaQuery.platformBrightnessOf(context),
   );
 
-  /// Silent GitHub release check once the shelf has settled. A dismissed
-  /// version stays quiet for three days so offline reading is never nagged.
+  static const _updateCheckInterval = Duration(hours: 24);
+  static const _updateRetryDelay = Duration(hours: 1);
+  static const _updateCheckedAtKey = 'update_last_checked_at';
+
+  /// Silent GitHub release check, at most once every 24 hours.
+  ///
+  /// The check used to run once per process, two seconds after the shelf
+  /// first loaded. Android keeps the process alive for days, and a failed
+  /// first attempt was never retried, so a new release could go unnoticed
+  /// for a long time. The time of the last answered check is now stored, and
+  /// the check runs whenever the shelf loads, the app comes back to the
+  /// foreground, or the 24 hours run out while the shelf is open.
   void _syncAutomaticUpdateCheck() {
-    if (!_settings.automaticUpdateChecks) {
-      _automaticUpdateTimer?.cancel();
+    _automaticUpdateTimer?.cancel();
+    _automaticUpdateTimer = null;
+    if (!_settings.automaticUpdateChecks) return;
+    unawaited(_runAutomaticUpdateCheck());
+  }
+
+  void _scheduleAutomaticUpdateCheck(Duration delay) {
+    _automaticUpdateTimer?.cancel();
+    _automaticUpdateTimer = null;
+    if (!mounted || !_settings.automaticUpdateChecks) return;
+    _automaticUpdateTimer = Timer(delay, () {
       _automaticUpdateTimer = null;
-      return;
-    }
-    if (_automaticUpdateAttempted || _automaticUpdateTimer != null) return;
-    _automaticUpdateTimer = Timer(const Duration(seconds: 2), () async {
-      _automaticUpdateTimer = null;
-      _automaticUpdateAttempted = true;
-      if (!mounted) return;
-      final result = await _updateChecker.checkForUpdate();
-      final info = result.info;
-      if (!mounted ||
-          !_settings.automaticUpdateChecks ||
-          info == null ||
-          _manualUpdateChecking ||
-          _updateDialogVisible) {
-        return;
-      }
-      final prefs = await SharedPreferences.getInstance();
-      final dismissedKey = 'update_dismissed_${info.version}';
-      final dismissedAt = prefs.getInt(dismissedKey) ?? 0;
-      final quietDays = DateTime.now().millisecondsSinceEpoch - dismissedAt;
-      if (quietDays < const Duration(days: 3).inMilliseconds) return;
-      if (!mounted) return;
-      await _showUpdateDialog(info);
-      unawaited(
-        prefs.setInt(dismissedKey, DateTime.now().millisecondsSinceEpoch),
-      );
+      unawaited(_runAutomaticUpdateCheck());
     });
   }
 
+  /// The prompt may cover the shelf or its settings sheet, never a book being
+  /// read. A skipped check runs again when the reader closes, since that
+  /// reloads the shelf, or when the app returns to the foreground.
+  bool get _canPromptAutomaticUpdate =>
+      mounted &&
+      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
+      (ModalRoute.of(context)?.isCurrent == true || _settingsOpen) &&
+      !_openingBook &&
+      !_importing &&
+      !_manualUpdateChecking &&
+      !_updateDialogVisible;
+
+  Future<void> _runAutomaticUpdateCheck() async {
+    if (_automaticUpdateRunning ||
+        !_settings.automaticUpdateChecks ||
+        !_canPromptAutomaticUpdate) {
+      return;
+    }
+    _automaticUpdateRunning = true;
+    try {
+      final now = DateTime.now();
+      final retryAt = _automaticUpdateRetryAt;
+      if (retryAt != null && now.isBefore(retryAt)) {
+        _scheduleAutomaticUpdateCheck(retryAt.difference(now));
+        return;
+      }
+      final prefs = await SharedPreferences.getInstance();
+      final checkedAt = DateTime.fromMillisecondsSinceEpoch(
+        prefs.getInt(_updateCheckedAtKey) ?? 0,
+      );
+      final due = checkedAt.add(_updateCheckInterval);
+      // A stored time ahead of the clock means the clock was set back. It is
+      // treated as due, so the next check cannot be held off indefinitely.
+      if (now.isBefore(due) && !checkedAt.isAfter(now)) {
+        _scheduleAutomaticUpdateCheck(due.difference(now));
+        return;
+      }
+
+      final result = await _updateChecker.checkForUpdate();
+      if (!mounted || !_settings.automaticUpdateChecks) return;
+      if (result.failed) {
+        // An unreachable feed is retried within the hour instead of waiting
+        // for another full day.
+        _automaticUpdateRetryAt = DateTime.now().add(_updateRetryDelay);
+        _scheduleAutomaticUpdateCheck(_updateRetryDelay);
+        return;
+      }
+      _automaticUpdateRetryAt = null;
+      final info = result.info;
+      // A release found while a book was opening is not counted as shown, so
+      // returning to the shelf checks again and prompts.
+      if (info != null && !_canPromptAutomaticUpdate) return;
+      await prefs.setInt(
+        _updateCheckedAtKey,
+        DateTime.now().millisecondsSinceEpoch,
+      );
+      _scheduleAutomaticUpdateCheck(_updateCheckInterval);
+      if (info != null) await _showUpdateDialog(info);
+    } on Object catch (error, stackTrace) {
+      debugPrint('Automatic update check failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    } finally {
+      _automaticUpdateRunning = false;
+    }
+  }
+
   /// Manual check from the global settings sheet. Reports every outcome —
-  /// new version, up to date, or unreachable — and ignores the three-day
-  /// dismiss window because the user explicitly asked.
+  /// new version, up to date, or unreachable — and ignores the 24-hour
+  /// cadence because the user explicitly asked.
   Future<void> _checkUpdateManually() async {
     if (_manualUpdateChecking || _updateDialogVisible) return;
     _manualUpdateChecking = true;
