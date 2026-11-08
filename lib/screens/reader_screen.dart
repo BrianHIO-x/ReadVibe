@@ -4646,14 +4646,26 @@ class _ReaderScreenState extends State<ReaderScreen>
     required List<String> paragraphs,
     required List<EpubContentBlock> richBlocks,
     required double contentWidth,
+  }) => _simulationChapterExtents(
+    chapter: chapter,
+    paragraphs: paragraphs,
+    richBlocks: richBlocks,
+    contentWidth: contentWidth,
+  ).total;
+
+  ChapterItemExtents _simulationChapterExtents({
+    required Chapter chapter,
+    required List<String> paragraphs,
+    required List<EpubContentBlock> richBlocks,
+    required double contentWidth,
   }) {
-    return _layoutCache.chapterExtent(
+    return _layoutCache.chapterExtents(
       chapter,
       SimulationLayoutSignature(
         contentWidth: contentWidth,
         settings: _settings,
       ),
-      () => _measureSimulationChapterContentExtent(
+      () => _measureSimulationChapterExtents(
         chapter: chapter,
         paragraphs: paragraphs,
         richBlocks: richBlocks,
@@ -4662,7 +4674,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  double _measureSimulationChapterContentExtent({
+  /// The page-mode list's items as [_buildChapterPage] lays them out: the
+  /// standalone title, each body block with the gap below it, and the empty
+  /// closing item.
+  ChapterItemExtents _measureSimulationChapterExtents({
     required Chapter chapter,
     required List<String> paragraphs,
     required List<EpubContentBlock> richBlocks,
@@ -4674,45 +4689,47 @@ class _ReaderScreenState extends State<ReaderScreen>
       mode: ReaderReadingMode.simulation,
       width: contentWidth,
     );
-    if (chapter.hasRichEpubContent) {
-      final extent =
-          titleExtent +
-          richBlocks.fold<double>(
-            0,
-            (extent, block) =>
-                extent +
-                _epubLayout.blockExtent(
-                  block,
-                  settings: _settings,
-                  mode: ReaderReadingMode.simulation,
-                  width: contentWidth,
-                ),
-          );
-      return extent;
-    }
-
-    final lineExtent = _resolvedSimulationLineExtent(_settings);
-    final paragraphGap =
-        _settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
-        ? lineExtent
-        : 0.0;
+    final items = <double>[
+      if (!_epubLayout.hasEmbeddedHeading(chapter)) titleExtent,
+    ];
     var bodyExtent = 0.0;
-    for (var index = 0; index < paragraphs.length; index++) {
-      final painter = _layoutBodyText(
-        paragraphs[index],
-        settings: _settings,
-        mode: ReaderReadingMode.simulation,
-        width: contentWidth,
-      );
-      try {
-        bodyExtent += painter.computeLineMetrics().length * lineExtent;
-      } finally {
-        painter.dispose();
+    if (chapter.hasRichEpubContent) {
+      for (final block in richBlocks) {
+        final extent = _epubLayout.blockExtent(
+          block,
+          settings: _settings,
+          mode: ReaderReadingMode.simulation,
+          width: contentWidth,
+        );
+        items.add(extent);
+        bodyExtent += extent;
       }
-      if (index < paragraphs.length - 1) bodyExtent += paragraphGap;
+    } else {
+      final lineExtent = _resolvedSimulationLineExtent(_settings);
+      final paragraphGap =
+          _settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
+          ? lineExtent
+          : 0.0;
+      for (var index = 0; index < paragraphs.length; index++) {
+        final painter = _layoutBodyText(
+          paragraphs[index],
+          settings: _settings,
+          mode: ReaderReadingMode.simulation,
+          width: contentWidth,
+        );
+        var extent = 0.0;
+        try {
+          extent = painter.computeLineMetrics().length * lineExtent;
+        } finally {
+          painter.dispose();
+        }
+        if (index < paragraphs.length - 1) extent += paragraphGap;
+        items.add(extent);
+        bodyExtent += extent;
+      }
     }
-    final extent = titleExtent + bodyExtent;
-    return extent;
+    items.add(0);
+    return ChapterItemExtents(items: items, total: titleExtent + bodyExtent);
   }
 
   Widget _buildChapterPage({
@@ -4862,12 +4879,15 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     final Widget scrollView;
     if (simulationPage) {
-      final exactScrollExtent = _simulationChapterContentExtent(
+      final extents = _simulationChapterExtents(
         chapter: chapter,
         paragraphs: paragraphs,
         richBlocks: richBlocks,
         contentWidth: contentWidth,
       );
+      final itemExtents = extents.items.length == itemCount
+          ? extents.items
+          : null;
       scrollView = ListView.custom(
         key: scrollViewKey,
         controller: controller,
@@ -4876,13 +4896,19 @@ class _ReaderScreenState extends State<ReaderScreen>
         scrollCacheExtent: const ScrollCacheExtent.pixels(0),
         padding: scrollViewPadding,
         semanticChildCount: itemCount,
+        // Every item's height is measured already, so a list born at a page
+        // deep in the chapter lays out only the items on that page.
+        itemExtentBuilder: itemExtents == null
+            ? null
+            : (index, _) =>
+                  index < itemExtents.length ? itemExtents[index] : null,
         childrenDelegate: ExactScrollExtentSliverChildBuilderDelegate(
           (context, index) => ReaderSelectableBlock(
             retainSelection: false,
             child: buildItem(context, index),
           ),
           childCount: itemCount,
-          exactScrollExtent: exactScrollExtent,
+          exactScrollExtent: extents.total,
         ),
       );
     } else {

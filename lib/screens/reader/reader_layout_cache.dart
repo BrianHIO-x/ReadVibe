@@ -19,7 +19,7 @@ class ReaderLayoutCache {
   final int maxChapters;
   final int maxCharacters;
   final _paragraphs = <int, List<String>>{};
-  final _extents = <int, double>{};
+  final _extents = <int, ChapterItemExtents>{};
   var _characters = 0;
   SimulationLayoutSignature? _extentSignature;
   SimulationLayoutSignature? _lineSignature;
@@ -65,10 +65,10 @@ class ReaderLayoutCache {
     return measured;
   }
 
-  double chapterExtent(
+  ChapterItemExtents chapterExtents(
     Chapter chapter,
     SimulationLayoutSignature signature,
-    double Function() measure,
+    ChapterItemExtents Function() measure,
   ) {
     if (_extentSignature?.matches(signature) != true) {
       _extents.clear();
@@ -99,4 +99,20 @@ class ReaderLayoutCache {
 
   static int _length(List<String> paragraphs) =>
       paragraphs.fold(0, (sum, paragraph) => sum + paragraph.length);
+}
+
+/// The height of every item in a page-mode chapter list, from the standalone
+/// title through the body to the closing spacer, and the chapter's total.
+///
+/// Page mode builds a fresh list for the page a turn reveals and for the back
+/// of the leaf. A list that only knows its total has to lay out every item
+/// from the top of the chapter to find the one at its offset, so a turn deep
+/// into a long chapter used to lay out the whole chapter up to there, twice.
+/// With every height known in advance, the list starts at the page itself.
+class ChapterItemExtents {
+  ChapterItemExtents({required List<double> items, required this.total})
+    : items = List<double>.unmodifiable(items);
+
+  final List<double> items;
+  final double total;
 }
