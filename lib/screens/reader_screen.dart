@@ -4724,13 +4724,16 @@ class _ReaderScreenState extends State<ReaderScreen>
     ];
     var bodyExtent = 0.0;
     if (chapter.hasRichEpubContent) {
-      for (final block in richBlocks) {
-        final extent = _epubLayout.blockExtent(
-          block,
-          settings: _settings,
-          mode: ReaderReadingMode.simulation,
-          width: contentWidth,
-        );
+      // One painter for the whole body: a fresh one per paragraph spent most
+      // of the measurement in setup, and page mode cannot draw its first page
+      // until every item is known.
+      final extents = _epubLayout.blockExtents(
+        richBlocks,
+        settings: _settings,
+        mode: ReaderReadingMode.simulation,
+        width: contentWidth,
+      );
+      for (final extent in extents) {
         items.add(extent);
         bodyExtent += extent;
       }
@@ -4740,22 +4743,35 @@ class _ReaderScreenState extends State<ReaderScreen>
           _settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
           ? lineExtent
           : 0.0;
-      for (var index = 0; index < paragraphs.length; index++) {
-        final painter = _layoutBodyText(
-          paragraphs[index],
-          settings: _settings,
-          mode: ReaderReadingMode.simulation,
-          width: contentWidth,
-        );
-        var extent = 0.0;
-        try {
-          extent = painter.computeLineMetrics().length * lineExtent;
-        } finally {
-          painter.dispose();
+      final bodyStyle = TextStyle(
+        fontFamily: _settings.effectiveFontFamily,
+        fontSize: _settings.fontSize,
+        fontWeight: _settings.effectiveFontWeight,
+        height: _settings.lineHeight,
+        letterSpacing: 0.2,
+      );
+      final painter = TextPainter(
+        textDirection: TextDirection.ltr,
+        textScaler: _readerTextScaler,
+        strutStyle: StrutStyle(
+          fontFamily: _settings.effectiveFontFamily,
+          fontSize: _settings.fontSize,
+          height: _settings.lineHeight,
+          fontWeight: _settings.effectiveFontWeight,
+          forceStrutHeight: true,
+        ),
+      );
+      try {
+        for (var index = 0; index < paragraphs.length; index++) {
+          painter.text = TextSpan(text: paragraphs[index], style: bodyStyle);
+          painter.layout(maxWidth: contentWidth);
+          var extent = painter.computeLineMetrics().length * lineExtent;
+          if (index < paragraphs.length - 1) extent += paragraphGap;
+          items.add(extent);
+          bodyExtent += extent;
         }
-        if (index < paragraphs.length - 1) extent += paragraphGap;
-        items.add(extent);
-        bodyExtent += extent;
+      } finally {
+        painter.dispose();
       }
     }
     items.add(0);
@@ -4811,6 +4827,21 @@ class _ReaderScreenState extends State<ReaderScreen>
       horizontalPadding,
       simulationPage ? 0 : viewPadding.bottom + 80,
     );
+    // Page mode measures its items before building them. The body builder can
+    // reuse those heights, so a visible paragraph is not laid out once to size
+    // its slot and again to draw itself.
+    final simulationExtents = simulationPage
+        ? _simulationChapterExtents(
+            chapter: chapter,
+            paragraphs: paragraphs,
+            richBlocks: richBlocks,
+            contentWidth: contentWidth,
+          )
+        : null;
+    final itemExtents =
+        simulationExtents != null && simulationExtents.items.length == itemCount
+        ? simulationExtents.items
+        : null;
     Widget buildItem(BuildContext context, int index) {
       if (hasStandaloneTitle && index == 0) {
         final titleStyle = TextStyle(
@@ -4867,6 +4898,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           themeColors: themeColors,
           width: contentWidth,
           simulationPage: simulationPage,
+          itemExtent: itemExtents?[index],
         );
       }
       final bodyStyle = TextStyle(
@@ -4909,15 +4941,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     final Widget scrollView;
     if (simulationPage) {
-      final extents = _simulationChapterExtents(
-        chapter: chapter,
-        paragraphs: paragraphs,
-        richBlocks: richBlocks,
-        contentWidth: contentWidth,
-      );
-      final itemExtents = extents.items.length == itemCount
-          ? extents.items
-          : null;
+      final extents = simulationExtents!;
       scrollView = ListView.custom(
         key: scrollViewKey,
         controller: controller,

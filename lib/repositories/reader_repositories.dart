@@ -3,6 +3,9 @@ import 'dart:io';
 import '../models/book.dart';
 import '../models/reader_bookmark.dart';
 import '../models/reader_settings.dart';
+import 'app_data_directory_provider.dart';
+
+export 'app_data_directory_provider.dart';
 
 /// Result of a low-priority private-storage consistency sweep.
 class StorageCleanupResult {
@@ -49,11 +52,6 @@ class StorageUsageReport {
       fontBytes;
 
   int get totalBytes => libraryBytes + cacheBytes;
-}
-
-/// Narrow resource boundary used by EPUB, DOCX and legacy search cleanup.
-abstract interface class AppDataDirectoryProvider {
-  Future<Directory> getAppDataDirectory();
 }
 
 abstract interface class ImportedFontStore {

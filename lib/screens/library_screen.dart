@@ -125,6 +125,10 @@ class _LibraryScreenState extends State<LibraryScreen>
   // A system picker or save dialog covers the app while the shelf is still
   // using it. Leaving for one of those does not lock the private shelf.
   int _systemDialogDepth = 0;
+  // The private shelf settings sheet may raise the system biometric prompt,
+  // which also makes the app inactive. That dialog belongs to a flow still on
+  // screen, so the inactive lock waits for a real hide instead.
+  int _foregroundPromptDepth = 0;
 
   late final AnimationController _gridEntranceController;
   late final AnimationController _emptyIconController;
@@ -159,6 +163,13 @@ class _LibraryScreenState extends State<LibraryScreen>
     _updateChecker = widget.updateChecker ?? UpdateService();
     _privateLock = widget.privateShelfLock ?? PrivateShelfLock();
     _lifecycle = AppLifecycleListener(
+      // Lock while the window still draws. The framework disables frames as
+      // soon as the app becomes hidden, so a lock performed there cannot take
+      // the private covers (or their semantics) out of the last rendered
+      // frame, which is exactly the frame the recents snapshot keeps.
+      // Android reports this state when the activity is paused, before it is
+      // stopped. onHide stays as a safety net for platforms that skip it.
+      onInactive: _handleAppInactive,
       onHide: _lockPrivateShelfOnLeave,
       onResume: _syncAutomaticUpdateCheck,
     );
@@ -362,8 +373,20 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _handleGridScroll() {
-    final scrolled =
-        _gridScrollController.hasClients && _gridScrollController.offset > 4;
+    // One shelf grid is mounted at a time, so this controller normally owns a
+    // single position. Reading [ScrollController.offset] would throw as soon as
+    // a second one existed, which is what a cross-fading shelf used to create.
+    // Measure the attached positions instead: the header only needs to know
+    // whether any of them has left the top.
+    var scrolled = false;
+    for (final position in List<ScrollPosition>.of(
+      _gridScrollController.positions,
+    )) {
+      if (position.hasPixels && position.pixels > 4) {
+        scrolled = true;
+        break;
+      }
+    }
     if (scrolled != _gridScrolled) {
       setState(() => _gridScrolled = scrolled);
     }
@@ -1024,9 +1047,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           builder: (context, setSheetState) {
             final colors = AppTheme.getReaderTheme(
               sheetSettings.theme,
-              systemBrightness: MediaQuery.platformBrightnessOf(
-                context,
-              ),
+              systemBrightness: MediaQuery.platformBrightnessOf(context),
             );
             return AppOverlayTheme(
               colors: colors,
@@ -1107,6 +1128,14 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
+  /// Inactive can mean a system dialog still on screen opened by this shelf
+  /// (the biometric prompt from its settings). Hide is the point at which the
+  /// app really left, so only that state interrupts those local flows.
+  void _handleAppInactive() {
+    if (_foregroundPromptDepth > 0) return;
+    _lockPrivateShelfOnLeave();
+  }
+
   void _lockPrivateShelfOnLeave() {
     if (!_privateMode || _systemDialogDepth > 0 || !mounted) return;
     // A sheet or dialog opened from the private shelf may name a private
@@ -1125,6 +1154,9 @@ class _LibraryScreenState extends State<LibraryScreen>
     _librarySearchController.clear();
     _librarySearchFocus.unfocus();
     _reorderFocusTimer?.cancel();
+    // Every card of the outgoing shelf leaves the tree in this same frame.
+    // Nothing of it is kept for an exit animation, so a locked private shelf
+    // cannot be painted, tapped, or read by a screen reader afterwards.
     setState(() {
       _privateMode = private;
       _shelfFilter = ShelfFilter.all;
@@ -1133,20 +1165,34 @@ class _LibraryScreenState extends State<LibraryScreen>
       _reorderFocusBookId = null;
       _draggingBookId = null;
     });
-    if (_gridScrollController.hasClients) _gridScrollController.jumpTo(0);
+    _rewindShelfScroll(_gridScrollController);
     // Replays the entrance so switching shelves reads as a new page.
     _gridEntranceController.reset();
     _syncShelfAnimations();
   }
 
+  /// Whether an unlock that just finished may still open the private shelf.
+  ///
+  /// The PIN sheet or biometric prompt can outlive the foreground window. If
+  /// the shelf were opened after the app had gone to the background, it would
+  /// be waiting unlocked on return without a fresh check, so a result that
+  /// arrives while the app is no longer resumed is dropped.
+  bool get _canOpenPrivateShelfNow =>
+      mounted &&
+      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+
   Future<void> _handlePrivateShelfEntry() async {
     if (!_privateConfig.configured) {
-      if (await _setUpPrivateShelf()) _setPrivateMode(true);
+      if (await _setUpPrivateShelf() && _canOpenPrivateShelfNow) {
+        _setPrivateMode(true);
+      }
     } else if (_privateMode) {
       _setPrivateMode(false);
     } else {
       final result = await _unlockPrivateShelf('进入隐私书架');
-      if (result == PrivateShelfUnlock.unlocked) _setPrivateMode(true);
+      if (result == PrivateShelfUnlock.unlocked && _canOpenPrivateShelfNow) {
+        _setPrivateMode(true);
+      }
     }
   }
 
@@ -1190,12 +1236,20 @@ class _LibraryScreenState extends State<LibraryScreen>
       return;
     }
     if (!mounted) return;
-    await showPrivateShelfSettings(
-      context,
-      lock: _privateLock,
-      colors: _feedbackColors,
-      onDisable: _disablePrivateShelf,
-    );
+    // Enabling a biometric raises the system prompt from inside this sheet.
+    // Treat the inactive state while the sheet owns that prompt as part of the
+    // foreground flow; a real hide still locks through onHide.
+    _foregroundPromptDepth++;
+    try {
+      await showPrivateShelfSettings(
+        context,
+        lock: _privateLock,
+        colors: _feedbackColors,
+        onDisable: _disablePrivateShelf,
+      );
+    } finally {
+      _foregroundPromptDepth--;
+    }
     await _loadPrivateConfig();
   }
 
@@ -1762,41 +1816,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                 ),
 
                 // Content
-                Expanded(
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 220),
-                    switchInCurve: AppMotion.standard,
-                    switchOutCurve: AppMotion.exitOf(AppMotion.standard),
-                    layoutBuilder: (currentChild, previousChildren) => Stack(
-                      alignment: Alignment.topCenter,
-                      fit: StackFit.expand,
-                      children: [...previousChildren, ?currentChild],
-                    ),
-                    child: _loading
-                        ? const Center(
-                            key: ValueKey('loading'),
-                            child: CircularProgressIndicator(),
-                          )
-                        : _shelfBooks.isEmpty
-                        ? KeyedSubtree(
-                            key: ValueKey('empty-$_privateMode'),
-                            child: _buildEmptyState(colors),
-                          )
-                        : !_reorderMode && _visibleBooks.isEmpty
-                        ? KeyedSubtree(
-                            key: const ValueKey('no-shelf-results'),
-                            child: _buildNoShelfResults(colors),
-                          )
-                        : KeyedSubtree(
-                            key: ValueKey(
-                              _reorderMode
-                                  ? 'reorder-grid'
-                                  : 'library-grid-$_privateMode-${_shelfFilter.name}-${_librarySearchController.text}',
-                            ),
-                            child: _buildBookGrid(colors),
-                          ),
-                  ),
-                ),
+                Expanded(child: _buildShelfContent(colors)),
               ],
             ),
           ),
@@ -2160,6 +2180,42 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
+  /// The single shelf surface on screen for the current state.
+  ///
+  /// Exactly one grid is mounted at a time. An [AnimatedSwitcher] used to
+  /// cross-fade between shelves and kept the outgoing grid mounted for the
+  /// length of the fade. Two grids then held the same per-book
+  /// [GlobalObjectKey]s, attached two [ScrollPosition]s to the shared scroll
+  /// controller, and left private covers painted, tappable and announced by a
+  /// screen reader after the shelf locked. The grid is now replaced in place
+  /// instead: the key ignores the query, filter and shelf, so filtering
+  /// updates the same grid and keeps its position and attached keys, while a
+  /// shelf change rebuilds its children without an exit frame.
+  Widget _buildShelfContent(ReaderThemeColors colors) {
+    if (_loading) {
+      return const Center(
+        key: ValueKey('loading'),
+        child: CircularProgressIndicator(),
+      );
+    }
+    if (_shelfBooks.isEmpty) {
+      return KeyedSubtree(
+        key: ValueKey('empty-$_privateMode'),
+        child: _buildEmptyState(colors),
+      );
+    }
+    if (!_reorderMode && _visibleBooks.isEmpty) {
+      return KeyedSubtree(
+        key: const ValueKey('no-shelf-results'),
+        child: _buildNoShelfResults(colors),
+      );
+    }
+    return KeyedSubtree(
+      key: const ValueKey('library-grid'),
+      child: _buildBookGrid(colors),
+    );
+  }
+
   Widget _buildBookGrid(ReaderThemeColors colors) {
     if (_reorderMode) return _buildReorderBookGrid(colors);
     final books = _visibleBooks;
@@ -2306,16 +2362,42 @@ class _LibraryScreenState extends State<LibraryScreen>
     return topPadding + contentHeight <= visibleHeight + 0.5;
   }
 
+  /// Rewinds every laid-out position of [controller] to the top.
+  ///
+  /// [ScrollController.offset] and [ScrollController.position] require exactly
+  /// one attached position. A shelf transition briefly attached two before the
+  /// grid swap was made atomic, so read and move the positions one by one
+  /// instead of assuming there is only one.
+  void _rewindShelfScroll(ScrollController controller) {
+    if (!controller.hasClients) return;
+    for (final position in List<ScrollPosition>.of(controller.positions)) {
+      if (!position.hasPixels ||
+          !position.hasContentDimensions ||
+          position.pixels == 0) {
+        continue;
+      }
+      position.jumpTo(0);
+    }
+  }
+
   /// Drops a leftover offset once every card already fits.
   ///
   /// Switching off user scrolling does not rewind the position. Without this,
   /// deleting books until the shelf fits could leave the cards parked on the
   /// old trailing padding, with no gesture able to bring them back.
   void _pinShelfOffsetWhenItFits(ScrollController controller, bool booksFit) {
-    if (!booksFit || !controller.hasClients || controller.offset == 0) return;
+    if (!booksFit || !controller.hasClients) return;
+    var parked = false;
+    for (final position in List<ScrollPosition>.of(controller.positions)) {
+      if (position.hasPixels && position.pixels != 0) {
+        parked = true;
+        break;
+      }
+    }
+    if (!parked) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !controller.hasClients || controller.offset == 0) return;
-      controller.jumpTo(0);
+      if (!mounted) return;
+      _rewindShelfScroll(controller);
     });
   }
 

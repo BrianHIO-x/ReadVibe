@@ -88,19 +88,9 @@ class ReaderEpubLayout {
     required ReaderReadingMode mode,
     required double width,
   }) {
-    final baseLine = mode == ReaderReadingMode.simulation
-        ? resolveSimulationLineExtent(settings)
-        : settings.fontSize * settings.lineHeight;
-    final rawLeading = block.style.marginTopEm * settings.fontSize;
-    final leading = mode == ReaderReadingMode.simulation && baseLine > 0
-        ? (rawLeading / baseLine).ceil() * baseLine
-        : rawLeading;
-    final paragraphGap =
-        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
-        ? baseLine
-        : 0.0;
-    final trailing =
-        block.style.marginBottomEm * settings.fontSize + paragraphGap;
+    final spacing = blockSpacing(block, settings: settings, mode: mode);
+    final leading = spacing.leading;
+    final trailing = spacing.trailing;
     final double content;
     if (block.isImage) {
       content = imageHeight(block, width: width, settings: settings);
@@ -115,8 +105,11 @@ class ReaderEpubLayout {
       painter.dispose();
     }
     var total = leading + content + trailing;
-    if (mode == ReaderReadingMode.simulation && baseLine > 0) {
-      total = math.max(baseLine, (total / baseLine).ceil() * baseLine);
+    if (mode == ReaderReadingMode.simulation) {
+      final baseLine = resolveSimulationLineExtent(settings);
+      if (baseLine > 0) {
+        total = math.max(baseLine, (total / baseLine).ceil() * baseLine);
+      }
     }
     return EpubBlockLayoutMetrics(
       leading: leading,
@@ -126,12 +119,98 @@ class ReaderEpubLayout {
     );
   }
 
+  /// The space [block] adds above and below its text, without measuring that
+  /// text.
+  ///
+  /// Page mode needs every block's exact height before it draws one, so it
+  /// uses [blockMetrics]. While reading, the text widget sizes itself; asking
+  /// for the same measurement here only laid the paragraph out a second time
+  /// in the frame that built it.
+  EpubBlockLayoutMetrics blockSpacing(
+    EpubContentBlock block, {
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+  }) {
+    final baseLine = mode == ReaderReadingMode.simulation
+        ? resolveSimulationLineExtent(settings)
+        : settings.fontSize * settings.lineHeight;
+    final rawLeading = block.style.marginTopEm * settings.fontSize;
+    final leading = mode == ReaderReadingMode.simulation && baseLine > 0
+        ? (rawLeading / baseLine).ceil() * baseLine
+        : rawLeading;
+    final paragraphGap =
+        settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
+        ? baseLine
+        : 0.0;
+    final trailing =
+        block.style.marginBottomEm * settings.fontSize + paragraphGap;
+    return EpubBlockLayoutMetrics(
+      leading: leading,
+      content: 0,
+      trailing: trailing,
+      total: leading + trailing,
+    );
+  }
+
   double blockExtent(
     EpubContentBlock block, {
     required ReaderSettings settings,
     required ReaderReadingMode mode,
     required double width,
   }) => blockMetrics(block, settings: settings, mode: mode, width: width).total;
+
+  /// The extent of every block, measured with one painter.
+  ///
+  /// Page mode measures a chapter's whole body before it draws the first page.
+  /// Building a painter for each paragraph spent most of that time in setup
+  /// rather than layout, so the work is shared here; the heights are the same
+  /// ones [blockExtent] returns for each block on its own.
+  List<double> blockExtents(
+    Iterable<EpubContentBlock> blocks, {
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double width,
+  }) {
+    final extents = <double>[];
+    TextPainter? painter;
+    try {
+      for (final block in blocks) {
+        final spacing = blockSpacing(block, settings: settings, mode: mode);
+        final double content;
+        if (block.isImage) {
+          content = imageHeight(block, width: width, settings: settings);
+        } else {
+          final shared = painter ??= TextPainter(
+            textDirection: TextDirection.ltr,
+            textScaler: textScaler,
+          );
+          shared.text = _textSpan(
+            block,
+            settings: settings,
+            foreground: Colors.black,
+            background: Colors.white,
+          );
+          shared.textAlign = _textAlign(block.style.textAlign);
+          shared.strutStyle = mode == ReaderReadingMode.simulation
+              ? _simulationStrutStyle(block, settings)
+              : null;
+          shared.layout(maxWidth: width);
+          content = shared.height;
+        }
+        var total = spacing.leading + content + spacing.trailing;
+        if (mode == ReaderReadingMode.simulation) {
+          final baseLine = resolveSimulationLineExtent(settings);
+          if (baseLine > 0) {
+            total = math.max(baseLine, (total / baseLine).ceil() * baseLine);
+          }
+        }
+        extents.add(total);
+      }
+    } finally {
+      painter?.dispose();
+    }
+    return extents;
+  }
 
   TextPainter layoutTextBlock(
     EpubContentBlock block, {
@@ -186,16 +265,29 @@ class ReaderEpubLayout {
     required ReaderSettings settings,
     required double width,
     required bool simulationPage,
+    double? itemExtent,
   }) {
     final mode = simulationPage
         ? ReaderReadingMode.simulation
         : settings.readingMode;
-    final metrics = blockMetrics(
-      block,
-      settings: settings,
-      mode: mode,
-      width: width,
-    );
+    // Page mode measures every item before it draws one. When that height is
+    // handed in, the visible paragraph keeps it instead of being laid out a
+    // second time for its slot. While reading, the text sizes itself and this
+    // call only gathers the space above and below it.
+    final spacing = blockSpacing(block, settings: settings, mode: mode);
+    final metrics = itemExtent != null
+        ? EpubBlockLayoutMetrics(
+            leading: spacing.leading,
+            content: math.max(
+              0,
+              itemExtent - spacing.leading - spacing.trailing,
+            ),
+            trailing: spacing.trailing,
+            total: itemExtent,
+          )
+        : simulationPage
+        ? blockMetrics(block, settings: settings, mode: mode, width: width)
+        : spacing;
     final blockBackground = _blockBackground(block.style, themeColors);
     final foreground = _foreground(
       block.style,
@@ -213,7 +305,9 @@ class ReaderEpubLayout {
           : width;
       content = SizedBox(
         width: displayWidth,
-        height: metrics.content,
+        height: simulationPage
+            ? metrics.content
+            : imageHeight(block, width: width, settings: settings),
         child: path == null
             ? _imageFallback(block, themeColors)
             : Image.file(
@@ -263,7 +357,9 @@ class ReaderEpubLayout {
               : null,
         );
       }
-      content = SizedBox(width: width, height: metrics.content, child: text);
+      content = simulationPage
+          ? SizedBox(width: width, height: metrics.content, child: text)
+          : SizedBox(width: width, child: text);
     }
 
     final backgroundPath = block.style.backgroundImagePath;
@@ -283,19 +379,15 @@ class ReaderEpubLayout {
                 : null,
             borderRadius: BorderRadius.circular(AppRadius.sm),
           );
-    return SizedBox(
-      height: metrics.total,
-      child: Padding(
-        padding: EdgeInsets.only(
-          top: metrics.leading,
-          bottom: metrics.trailing,
-        ),
-        child: DecoratedBox(
-          decoration: decoration ?? const BoxDecoration(),
-          child: content,
-        ),
+    final padded = Padding(
+      padding: EdgeInsets.only(top: metrics.leading, bottom: metrics.trailing),
+      child: DecoratedBox(
+        decoration: decoration ?? const BoxDecoration(),
+        child: content,
       ),
     );
+    if (!simulationPage) return padded;
+    return SizedBox(height: metrics.total, child: padded);
   }
 
   StrutStyle _simulationStrutStyle(
@@ -370,29 +462,74 @@ class ReaderEpubLayout {
         ),
       );
     } else {
+      // Word splits one paragraph into a run per formatting change, and often
+      // per revision or language marker as well. Neighbouring runs that draw
+      // the same way are one span as far as the text engine is concerned, and
+      // a long paragraph made of thousands of such runs is laid out an order
+      // of magnitude slower than the same text in a single span.
+      final mergedText = StringBuffer();
+      TextStyle? mergedStyle;
+      TapGestureRecognizer? mergedRecognizer;
+      EpubLinkTarget? mergedLink;
+      void flushMerged() {
+        if (mergedText.isEmpty) return;
+        children.add(
+          TextSpan(
+            text: mergedText.toString(),
+            style: mergedStyle,
+            recognizer: mergedRecognizer,
+          ),
+        );
+        mergedText.clear();
+        mergedStyle = null;
+        mergedRecognizer = null;
+        mergedLink = null;
+      }
+
       for (var index = 0; index < block.runs.length; index++) {
         final run = block.runs[index];
         final isLink = run.link != null && linkColor != null;
-        final style = _runTextStyle(
-          run.style,
-          settings: settings,
-          foreground: foreground,
-          background: background,
-        );
-        children.add(
-          TextSpan(
-            text: run.text,
-            style: isLink
-                ? style.copyWith(
-                    color: linkColor,
-                    decoration: TextDecoration.underline,
-                    decorationColor: linkColor.withValues(alpha: 0.5),
-                  )
-                : style,
-            recognizer: linkRecognizers?[index],
-          ),
-        );
+        final style = isLink
+            ? _runTextStyle(
+                run.style,
+                settings: settings,
+                foreground: foreground,
+                background: background,
+              ).copyWith(
+                color: linkColor,
+                decoration: TextDecoration.underline,
+                decorationColor: linkColor.withValues(alpha: 0.5),
+              )
+            : _runTextStyle(
+                run.style,
+                settings: settings,
+                foreground: foreground,
+                background: background,
+              );
+        final link = isLink ? run.link : null;
+        final previousLink = mergedLink;
+        final sameLink = previousLink == null
+            ? link == null
+            : link != null &&
+                  previousLink.chapterIndex == link.chapterIndex &&
+                  previousLink.blockIndex == link.blockIndex;
+        if (mergedText.isNotEmpty && style == mergedStyle && sameLink) {
+          mergedText.write(run.text);
+          continue;
+        }
+        flushMerged();
+        mergedText.write(run.text);
+        mergedStyle = style;
+        if (isLink) {
+          mergedRecognizer = linkRecognizers == null
+              ? null
+              : linkRecognizers[index];
+        } else {
+          mergedRecognizer = null;
+        }
+        mergedLink = link;
       }
+      flushMerged();
     }
     return TextSpan(children: children);
   }
@@ -531,7 +668,6 @@ class ReaderEpubLayout {
   }
 }
 
-
 /// Renders a block that contains internal links.
 ///
 /// Tap recognizers must outlive a single frame and be disposed with the widget,
@@ -624,7 +760,8 @@ class _EpubLinkedTextState extends State<_EpubLinkedText> {
   Color _safeLinkColor() {
     final accent = widget.themeColors.accent;
     final contrast =
-        (accent.computeLuminance() - widget.background.computeLuminance()).abs();
+        (accent.computeLuminance() - widget.background.computeLuminance())
+            .abs();
     return contrast < 0.12 ? widget.foreground : accent;
   }
 }

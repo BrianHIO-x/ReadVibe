@@ -149,6 +149,18 @@ const _justifiedCapacity = 256;
 /// it into reach.
 const _deferredLength = 2000;
 
+/// Text longer than this is drawn as it is.
+///
+/// Justification lays the text out again for every pass, walks every line and
+/// rebuilds a span for every character cluster, so its cost grows faster than
+/// the text. A unit this long is not a paragraph a reader can see whole: it is
+/// a Word document pasted without paragraph marks, a table joined into one
+/// block, or a plain chapter that scroll mode set as one text. Leaving those
+/// unjustified keeps the same line breaks and positions while bounding the
+/// frame that draws them; every ordinary novel paragraph stays inside the
+/// feature.
+const _maximumJustifiedCharacters = 20000;
+
 /// Half-width savings already measured, by mark and style.
 final _savings = <(String, TextStyle, TextScaler, Locale?), double>{};
 
@@ -200,6 +212,8 @@ InlineSpan? justifyReaderText(
     return cached;
   }
   if (cachedOnly) return null;
+  final plain = text.toPlainText(includeSemanticsLabels: false);
+  if (plain.length > _maximumJustifiedCharacters) return null;
   final layout = _Layout(
     style: style,
     strutStyle: strutStyle,
@@ -209,7 +223,7 @@ InlineSpan? justifyReaderText(
     locale: locale,
     width: width,
   );
-  final result = layout.justify(text);
+  final result = layout.justify(text, plain);
   _justified[key] = result;
   if (_justified.length > _justifiedCapacity) {
     _justified.remove(_justified.keys.first);
@@ -269,10 +283,9 @@ class _Layout {
     locale: locale,
   )..layout(maxWidth: width);
 
-  InlineSpan? justify(InlineSpan text) {
+  InlineSpan? justify(InlineSpan text, String plain) {
     final leaves = _leaves(text);
     if (leaves == null || leaves.isEmpty) return null;
-    final plain = text.toPlainText(includeSemanticsLabels: false);
     final painter = _layOut(text);
     try {
       final lines = _lines(painter, plain);

@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -12,7 +13,8 @@ import 'package:xml/xml.dart';
 
 import '../models/book.dart';
 import 'book_id.dart';
-import '../repositories/reader_repositories.dart';
+import 'epub_markup_decoder.dart';
+import '../repositories/app_data_directory_provider.dart';
 
 /// Resource limits are grouped so the security boundaries can be exercised by
 /// small fixtures without allocating hundreds of megabytes in tests.
@@ -47,17 +49,22 @@ Future<Book> parseEpub(
   final bookId = nextBookId('epub', now: now);
   final root = await storage.getAppDataDirectory();
   final resourceDirectory = Directory(p.join(root.path, 'epub', bookId));
+  // The worker gets a plain value object. It must not capture storage, a
+  // Future or any callback, because the AOT isolate boundary only carries
+  // sendable values.
+  final task = _EpubParseTask(
+    filePath: filePath,
+    fileName: fileName,
+    bookId: bookId,
+    importMicroseconds: now.microsecondsSinceEpoch,
+    resourceDirectoryPath: resourceDirectory.path,
+    maxInputBytes: limits.maxInputBytes,
+    maxArchiveEntries: limits.maxArchiveEntries,
+    maxExpandedBytes: limits.maxExpandedBytes,
+    maxSingleImageBytes: limits.maxSingleImageBytes,
+  );
   try {
-    return await Isolate.run(
-      () => _parseEpubSync(
-        filePath,
-        fileName,
-        bookId,
-        now,
-        resourceDirectory.path,
-        limits,
-      ),
-    );
+    return await Isolate.run(() => _parseEpubTask(task));
   } on Object {
     try {
       if (await resourceDirectory.exists()) {
@@ -70,6 +77,44 @@ Future<Book> parseEpub(
     rethrow;
   }
 }
+
+class _EpubParseTask {
+  const _EpubParseTask({
+    required this.filePath,
+    required this.fileName,
+    required this.bookId,
+    required this.importMicroseconds,
+    required this.resourceDirectoryPath,
+    required this.maxInputBytes,
+    required this.maxArchiveEntries,
+    required this.maxExpandedBytes,
+    required this.maxSingleImageBytes,
+  });
+
+  final String filePath;
+  final String fileName;
+  final String bookId;
+  final int importMicroseconds;
+  final String resourceDirectoryPath;
+  final int maxInputBytes;
+  final int maxArchiveEntries;
+  final int maxExpandedBytes;
+  final int maxSingleImageBytes;
+}
+
+Book _parseEpubTask(_EpubParseTask task) => _parseEpubSync(
+  task.filePath,
+  task.fileName,
+  task.bookId,
+  DateTime.fromMicrosecondsSinceEpoch(task.importMicroseconds),
+  task.resourceDirectoryPath,
+  EpubParseLimits(
+    maxInputBytes: task.maxInputBytes,
+    maxArchiveEntries: task.maxArchiveEntries,
+    maxExpandedBytes: task.maxExpandedBytes,
+    maxSingleImageBytes: task.maxSingleImageBytes,
+  ),
+);
 
 Book _parseEpubSync(
   String filePath,
@@ -112,64 +157,42 @@ Book _parseEpubSync(
     }
     archiveFiles.putIfAbsent(_normalizeArchivePath(file.name), () => file);
   }
-  final encryptedPaths = _epubEncryptedPaths(archiveFiles);
+  final archiveLookup = _ArchiveLookup(archiveFiles);
+  final encryptedPaths = _epubEncryptedPaths(archiveLookup);
 
-  final containerFile = _findArchiveFile(
-    archiveFiles,
-    'META-INF/container.xml',
-  );
+  final containerFile = archiveLookup.find('META-INF/container.xml');
   if (containerFile == null) {
     throw const FormatException('无效的 EPUB 文件：缺少 container.xml');
   }
-  final container = _parseXml(containerFile, 'container.xml');
-  final rootFile = _elementsNamed(container, 'rootfile').firstOrNull;
-  final rawOpfPath = rootFile?.getAttribute('full-path');
-  if (rawOpfPath == null || rawOpfPath.trim().isEmpty) {
-    throw const FormatException('container.xml 中未找到 OPF 路径');
-  }
-  final opfPath = _normalizeArchivePath(rawOpfPath);
-  if (encryptedPaths.contains(opfPath)) {
-    throw const FormatException('EPUB 包内容受 DRM 或加密保护，无法离线解析');
-  }
-  final opfFile = _findArchiveFile(archiveFiles, opfPath);
-  if (opfFile == null) {
-    throw FormatException('无效的 EPUB 文件：无法读取 OPF ($opfPath)');
-  }
-
-  final opf = _parseXml(opfFile, 'OPF');
+  final container = _parseXml(containerFile, 'container.xml', lenient: true);
+  final opfSelection = _selectOpf(container, archiveLookup, encryptedPaths);
+  final opf = opfSelection.opf;
+  final opfPath = opfSelection.path;
   final opfDir = p.posix.dirname(opfPath);
   final title = _firstElementText(opf, 'title');
   final author = _firstElementText(opf, 'creator');
-  final manifest = _extractManifest(opf, opfDir);
-  final navigationTitles = _extractNavigationTitles(
-    opf,
-    manifest,
-    archiveFiles,
-  );
-  final spineIds = _elementsNamed(opf, 'itemref')
-      .where(
-        (element) =>
-            element.getAttribute('linear')?.toLowerCase().trim() != 'no',
-      )
-      .map((element) => element.getAttribute('idref'))
-      .whereType<String>()
-      .toList(growable: false);
-  if (spineIds.any((id) {
-    final path = manifest[id]?.path;
-    return path != null && encryptedPaths.contains(path);
-  })) {
+  final manifest = _extractManifest(opf, opfDir, archiveLookup);
+  final navigation = _extractNavigation(opf, manifest, archiveLookup);
+  final spineDocuments = _extractSpineDocuments(opf, manifest, archiveLookup);
+  if (spineDocuments.any(
+    (document) =>
+        document.linear &&
+        _isEncryptedPath(document.item.path, archiveLookup, encryptedPaths),
+  )) {
     throw const FormatException('EPUB 正文章节受 DRM 或加密保护，无法离线解析');
   }
 
   final resourceDirectory = Directory(resourceDirectoryPath);
   resourceDirectory.createSync(recursive: true);
   final imageStore = _EpubImageStore(
-    archiveFiles: archiveFiles,
+    archiveLookup: archiveLookup,
+    encryptedPaths: encryptedPaths,
     outputDirectory: resourceDirectory,
     maxSingleImageBytes: limits.maxSingleImageBytes,
   );
   final fontStore = _EpubFontStore(
-    archiveFiles: archiveFiles,
+    archiveLookup: archiveLookup,
+    encryptedPaths: encryptedPaths,
     outputDirectory: resourceDirectory,
     bookId: bookId,
   );
@@ -177,109 +200,102 @@ Book _parseEpubSync(
   final coverImagePath = coverArchivePath == null
       ? null
       : imageStore.extractArchivePath(coverArchivePath)?.path;
-  final chapters = <Chapter>[];
-  String? activeVolumeTitle;
-  final cssDocumentCache = <String, String>{};
-  final cssRulesCache = <String, List<_CssRule>>{};
-  // Link resolution runs after the spine, because a footnote marker in chapter
-  // one routinely points at a note collected in the last spine document.
-  final chapterIndexByPath = <String, int>{};
-  final blockIndexByAnchor = <String, int>{};
-  final pendingLinks = <int, Map<int, Map<int, String>>>{};
 
-  for (final itemId in spineIds) {
-    final manifestItem = manifest[itemId];
-    if (manifestItem == null || !_isMarkupMediaType(manifestItem.mediaType)) {
-      continue;
-    }
-    final contentFile = _findArchiveFile(archiveFiles, manifestItem.path);
-    if (contentFile == null) continue;
+  final assembler = _EpubBookAssembler(
+    archiveLookup: archiveLookup,
+    encryptedPaths: encryptedPaths,
+    navigation: navigation,
+    imageStore: imageStore,
+    fontStore: fontStore,
+  );
 
-    final document = html_parser.parse(_decodeMarkup(_bytesOf(contentFile)));
-    final cssText = _chapterCssText(
-      document,
-      manifestItem.path,
-      archiveFiles,
-      cssDocumentCache,
-    );
-    fontStore.registerCss(cssText);
-    final resolver = _EpubStyleResolver(
-      cssText,
-      rulesCache: cssRulesCache,
-      resolveImage: (rawUrl) =>
-          imageStore.extract(rawUrl, relativeTo: manifestItem.path)?.path,
-      resolveFontFamily: fontStore.resolveFamily,
-    );
-    final parsed = _documentToBlocks(
-      document,
-      manifestItem.path,
-      resolver,
-      imageStore,
-    );
-    final blocks = parsed.blocks;
-
-    if (blocks.isEmpty) continue;
-
-    final chapterIndex = chapters.length;
-    chapterIndexByPath[manifestItem.path] = chapterIndex;
-    for (var index = 0; index < blocks.length; index++) {
-      for (final id in blocks[index].anchorIds) {
-        blockIndexByAnchor.putIfAbsent('${manifestItem.path}#$id', () => index);
-      }
+  // The reading order is the spine's linear order. Non-linear documents are
+  // parsed only when links point at them (footnote pages) or when the linear
+  // spine is too sparse to be the whole book.
+  for (final document in spineDocuments) {
+    if (!document.linear) continue;
+    assembler.addDocument(document.item);
+  }
+  final sparseLinearText = assembler.plainTextLength < 400;
+  if (sparseLinearText) {
+    for (final document in spineDocuments) {
+      if (document.linear) continue;
+      assembler.addDocument(document.item);
     }
-    if (parsed.linkHrefs.isNotEmpty) {
-      pendingLinks[chapterIndex] = parsed.linkHrefs;
-    }
-
-    final embeddedHeading = blocks
-        .where((block) => block.isText && block.isHeading)
-        .firstOrNull;
-    final chapterTitle =
-        navigationTitles[manifestItem.path] ??
-        embeddedHeading?.text.trim() ??
-        _extractDocumentTitle(document) ??
-        '章节 ${chapters.length + 1}';
-    if (embeddedHeading == null) {
-      _promoteMatchingLeadingTitle(blocks, chapterTitle);
-    }
-
-    var plainTextBlocks = blocks.where(
-      (block) =>
-          block.isText && !block.isHeading && block.text.trim().isNotEmpty,
-    );
-    if (plainTextBlocks.isEmpty) {
-      plainTextBlocks = blocks.where(
-        (block) => block.isText && block.text.trim().isNotEmpty,
-      );
-    }
-    final plainText = plainTextBlocks
-        .map((block) => block.text.trim())
-        .join('\n');
-    if (isVolumeChapterTitle(chapterTitle)) {
-      activeVolumeTitle = chapterTitle;
-    }
-    chapters.add(
-      Chapter(
-        index: chapters.length,
-        title: chapterTitle,
-        content: plainText,
-        volumeTitle: isStandaloneChapterTitle(chapterTitle)
-            ? null
-            : activeVolumeTitle,
-        epubBlocks: List<EpubContentBlock>.unmodifiable(blocks),
-      ),
-    );
   }
 
-  if (chapters.isEmpty) {
+  // Follow only newly discovered references. Rescanning every link and the
+  // whole manifest each round would make a large book's import quadratic.
+  final documentCandidates = <String, _ManifestItem>{};
+  final manifestOrder = <String, int>{};
+  var manifestIndex = 0;
+  for (final item in manifest.values) {
+    if (_documentKind(item, archiveLookup) == _EpubDocumentKind.unsupported) {
+      continue;
+    }
+    documentCandidates[item.path] = item;
+    manifestOrder.putIfAbsent(item.path, () => manifestIndex++);
+  }
+  final spineOrder = <String, int>{};
+  for (var index = 0; index < spineDocuments.length; index++) {
+    spineOrder[spineDocuments[index].item.path] = index;
+  }
+  int referenceRank(String path) {
+    final spineIndex = spineOrder[path];
+    if (spineIndex != null) return spineIndex;
+    return spineDocuments.length + (manifestOrder[path] ?? 1 << 20);
+  }
+
+  final referenceQueue = ListQueue<String>();
+  final queuedReferences = <String>{};
+  void enqueueReferences(Iterable<String> references) {
+    final ordered =
+        references.where(documentCandidates.containsKey).toList(growable: false)
+          ..sort(
+            (first, second) =>
+                referenceRank(first).compareTo(referenceRank(second)),
+          );
+    for (final path in ordered) {
+      if (!queuedReferences.add(path) || assembler.hasProcessed(path)) {
+        continue;
+      }
+      referenceQueue.add(path);
+    }
+  }
+
+  enqueueReferences(assembler.takeNewReferences());
+  var followGuard = 0;
+  while (referenceQueue.isNotEmpty &&
+      followGuard++ <= documentCandidates.length) {
+    final path = referenceQueue.removeFirst();
+    final item = documentCandidates[path];
+    if (item == null || assembler.hasProcessed(path)) continue;
+    if (assembler.addDocument(item)) {
+      enqueueReferences(assembler.takeNewReferences());
+    }
+  }
+
+  if (assembler.chapters.isEmpty) {
+    // A damaged or empty spine is not a reason to reject a book whose manifest
+    // still contains readable documents.
+    for (final document in spineDocuments) {
+      if (!document.linear) assembler.addDocument(document.item);
+    }
+    for (final item in manifest.values) {
+      if (_documentKind(item, archiveLookup) != _EpubDocumentKind.unsupported) {
+        assembler.addDocument(item);
+      }
+    }
+  }
+  if (assembler.chapters.isEmpty) {
     throw const FormatException('无法从 EPUB 中解析出任何章节内容或图片');
   }
 
   _resolveEpubLinks(
-    chapters,
-    pendingLinks: pendingLinks,
-    chapterIndexByPath: chapterIndexByPath,
-    blockIndexByAnchor: blockIndexByAnchor,
+    assembler.chapters,
+    pendingLinks: assembler.pendingLinks,
+    chapterIndexByPath: assembler.chapterIndexByPath,
+    anchorLocations: assembler.anchorLocations,
   );
 
   final fallbackTitle = fileName
@@ -292,12 +308,512 @@ Book _parseEpubSync(
         : (fallbackTitle.isEmpty ? '未命名书籍' : fallbackTitle),
     author: author,
     format: BookFormat.epub,
-    chapters: chapters,
+    chapters: assembler.chapters,
     importDate: importDate,
     fileSize: inputLength,
     sourcePath: resourceDirectory.path,
     coverImagePath: coverImagePath,
     embeddedFonts: fontStore.embeddedFonts,
+  );
+}
+
+/// Exact ZIP lookup with deterministic, ambiguity-free fallbacks.
+///
+/// A path is first matched byte-for-byte. Only when that misses do we try the
+/// same path after URI decoding and then a single case-folded candidate. Two
+/// entries that differ only by case are never guessed; an exact match still
+/// wins over them.
+class _ArchiveLookup {
+  _ArchiveLookup(Map<String, ArchiveFile> files)
+    : files = Map.unmodifiable(files) {
+    for (final entry in files.entries) {
+      _folded
+          .putIfAbsent(entry.key.toLowerCase(), () => <String>[])
+          .add(entry.key);
+      final decoded = _normalizeArchivePath(_safeDecodeUriComponent(entry.key));
+      final decodedKey = decoded.toLowerCase();
+      if (decodedKey != entry.key.toLowerCase()) {
+        _decoded.putIfAbsent(decodedKey, () => <String>[]).add(entry.key);
+      }
+    }
+  }
+
+  final Map<String, ArchiveFile> files;
+  final Map<String, List<String>> _folded = <String, List<String>>{};
+  final Map<String, List<String>> _decoded = <String, List<String>>{};
+
+  ArchiveFile? find(String requestedPath) => resolve(requestedPath)?.file;
+
+  /// Resolves a requested path to the actual normalized ZIP entry key.
+  ///
+  /// Callers that compare paths (DRM lists, manifest ids, links and anchors)
+  /// must use this key on both sides; a case- or percent-variant of the same
+  /// entry is not a different chapter.
+  String? canonicalPath(String requestedPath) => resolve(requestedPath)?.path;
+
+  ({String path, ArchiveFile file})? resolve(String requestedPath) {
+    final normalized = _normalizeArchivePath(requestedPath);
+    if (normalized.isEmpty) return null;
+    final direct = files[normalized];
+    if (direct != null) return (path: normalized, file: direct);
+
+    final decodedPath = _normalizeArchivePath(
+      _safeDecodeUriComponent(normalized),
+    );
+    if (decodedPath.isNotEmpty && decodedPath != normalized) {
+      final decodedDirect = files[decodedPath];
+      if (decodedDirect != null) {
+        return (path: decodedPath, file: decodedDirect);
+      }
+    }
+
+    final foldedPath = _uniquePath(_folded[normalized.toLowerCase()]);
+    if (foldedPath != null) {
+      return (path: foldedPath, file: files[foldedPath]!);
+    }
+    if (decodedPath.isNotEmpty) {
+      final decodedFoldedPath = _uniquePath(
+        _decoded[decodedPath.toLowerCase()],
+      );
+      if (decodedFoldedPath != null) {
+        return (path: decodedFoldedPath, file: files[decodedFoldedPath]!);
+      }
+    }
+    return null;
+  }
+
+  String? _uniquePath(List<String>? candidates) {
+    if (candidates == null || candidates.length != 1) return null;
+    return candidates.single;
+  }
+}
+
+class _AnchorLocation {
+  const _AnchorLocation(this.chapterIndex, this.blockIndex);
+
+  final int chapterIndex;
+  final int blockIndex;
+}
+
+enum _EpubDocumentKind { markup, svg, raster, unsupported }
+
+class _SpineDocument {
+  const _SpineDocument(this.item, this.linear);
+
+  final _ManifestItem item;
+  final bool linear;
+}
+
+class _LoadedDocument {
+  const _LoadedDocument(this.blocks, this.linkHrefs, this.documentTitle);
+
+  final List<EpubContentBlock> blocks;
+  final Map<int, Map<int, String>> linkHrefs;
+  final String? documentTitle;
+}
+
+class _ChapterPlan {
+  const _ChapterPlan(this.start, this.end, this.title, this.volumeTitle);
+
+  final int start;
+  final int end;
+  final String? title;
+  final String? volumeTitle;
+}
+
+class _ResolvedNavEntry {
+  const _ResolvedNavEntry(this.entry, this.blockIndex);
+
+  final _NavEntry entry;
+  final int blockIndex;
+
+  int get depth => entry.depth;
+  String get title => entry.title;
+  String? get parentTitle => entry.parentTitle;
+}
+
+class _EpubBookAssembler {
+  _EpubBookAssembler({
+    required this.archiveLookup,
+    required this.encryptedPaths,
+    required this.navigation,
+    required this.imageStore,
+    required this.fontStore,
+  });
+
+  final _ArchiveLookup archiveLookup;
+  final Set<String> encryptedPaths;
+  final _EpubNavigation navigation;
+  final _EpubImageStore imageStore;
+  final _EpubFontStore fontStore;
+
+  final List<Chapter> chapters = <Chapter>[];
+  final Map<String, int> chapterIndexByPath = <String, int>{};
+  final Map<String, _AnchorLocation> anchorLocations =
+      <String, _AnchorLocation>{};
+  final Map<int, Map<int, Map<int, String>>> pendingLinks =
+      <int, Map<int, Map<int, String>>>{};
+  final Set<String> _processedPaths = <String>{};
+  final Set<String> _newReferences = <String>{};
+  final Map<String, String> _cssDocumentCache = <String, String>{};
+  final Map<String, List<_CssRule>> _cssRulesCache = <String, List<_CssRule>>{};
+
+  String? activeVolumeTitle;
+  int plainTextLength = 0;
+
+  bool hasProcessed(String path) => _processedPaths.contains(path);
+
+  Set<String> takeNewReferences() {
+    if (_newReferences.isEmpty) return const <String>{};
+    final references = Set<String>.of(_newReferences);
+    _newReferences.clear();
+    return references;
+  }
+
+  bool addDocument(_ManifestItem item) {
+    if (!_processedPaths.add(item.path)) return false;
+    if (_isEncryptedPath(item.path, archiveLookup, encryptedPaths)) {
+      // A link into a DRM-protected document must not read it either.
+      return false;
+    }
+    final file = archiveLookup.find(item.path);
+    if (file == null) return false;
+    final kind = _documentKind(item, archiveLookup);
+    if (kind == _EpubDocumentKind.unsupported) return false;
+    _LoadedDocument? loaded;
+    try {
+      switch (kind) {
+        case _EpubDocumentKind.markup:
+          final document = html_parser.parse(decodeEpubMarkup(_bytesOf(file)));
+          final cssText = _chapterCssText(
+            document,
+            item.path,
+            archiveLookup,
+            _cssDocumentCache,
+          );
+          fontStore.registerCss(cssText, basePath: item.path);
+          final resolver = _EpubStyleResolver(
+            cssText,
+            rulesCache: _cssRulesCache,
+            resolveImage: (rawUrl) =>
+                imageStore.extract(rawUrl, relativeTo: item.path)?.path,
+            resolveFontFamily: fontStore.resolveFamily,
+          );
+          final parsed = _documentToBlocks(
+            document,
+            item.path,
+            resolver,
+            imageStore,
+            archiveLookup,
+          );
+          loaded = _LoadedDocument(
+            parsed.blocks,
+            parsed.linkHrefs,
+            _extractDocumentTitle(document),
+          );
+        case _EpubDocumentKind.svg:
+          loaded = _svgPageDocument(item.path, file, imageStore);
+        case _EpubDocumentKind.raster:
+          loaded = _rasterPageDocument(item.path, imageStore);
+        case _EpubDocumentKind.unsupported:
+          return false;
+      }
+    } on Object {
+      // One unreadable document must not block the rest of the book. Broken
+      // CSS, a corrupt image or malformed markup is isolated to this entry.
+      return false;
+    }
+    if (loaded == null || loaded.blocks.isEmpty) return false;
+    _appendDocument(item, loaded);
+    return true;
+  }
+
+  void _appendDocument(_ManifestItem item, _LoadedDocument loaded) {
+    final allBlocks = loaded.blocks;
+    final plans = _chapterPlans(
+      item.path,
+      allBlocks,
+      loaded.documentTitle,
+      navigation,
+    );
+    for (final plan in plans) {
+      final blocks = allBlocks.sublist(plan.start, plan.end);
+      if (blocks.isEmpty) continue;
+
+      final chapterIndex = chapters.length;
+      chapterIndexByPath.putIfAbsent(item.path, () => chapterIndex);
+      for (var localIndex = 0; localIndex < blocks.length; localIndex++) {
+        for (final id in blocks[localIndex].anchorIds) {
+          anchorLocations.putIfAbsent(
+            '${item.path}#$id',
+            () => _AnchorLocation(chapterIndex, localIndex),
+          );
+        }
+      }
+
+      final links = <int, Map<int, String>>{};
+      for (final entry in loaded.linkHrefs.entries) {
+        if (entry.key < plan.start || entry.key >= plan.end) continue;
+        links[entry.key - plan.start] = entry.value;
+      }
+      if (links.isNotEmpty) {
+        pendingLinks[chapterIndex] = links;
+        for (final runLinks in links.values) {
+          for (final href in runLinks.values) {
+            final hash = href.indexOf('#');
+            final path = hash < 0 ? href : href.substring(0, hash);
+            if (path.isNotEmpty) _newReferences.add(path);
+          }
+        }
+      }
+
+      final embeddedHeading = blocks
+          .where((block) => block.isText && block.isHeading)
+          .firstOrNull;
+      var chapterTitle = _normalizeVisibleText(plan.title ?? '');
+      if (chapterTitle.isEmpty) {
+        chapterTitle =
+            (plans.length == 1
+                ? navigation.firstTitleForPath(item.path)
+                : null) ??
+            _normalizeVisibleText(embeddedHeading?.text ?? '');
+      }
+      if (chapterTitle.isEmpty) {
+        chapterTitle = _normalizeVisibleText(loaded.documentTitle ?? '');
+      }
+      if (chapterTitle.isEmpty) {
+        chapterTitle = '章节 ${chapters.length + 1}';
+      }
+      if (embeddedHeading == null) {
+        _promoteMatchingLeadingTitle(blocks, chapterTitle);
+      }
+
+      var plainTextBlocks = blocks.where(
+        (block) =>
+            block.isText && !block.isHeading && block.text.trim().isNotEmpty,
+      );
+      if (plainTextBlocks.isEmpty) {
+        plainTextBlocks = blocks.where(
+          (block) => block.isText && block.text.trim().isNotEmpty,
+        );
+      }
+      final plainText = plainTextBlocks
+          .map((block) => block.text.trim())
+          .join('\n');
+      plainTextLength += plainText.length;
+
+      if (plan.volumeTitle == null && isVolumeChapterTitle(chapterTitle)) {
+        activeVolumeTitle = chapterTitle;
+      }
+      var volumeTitle = plan.volumeTitle ?? activeVolumeTitle;
+      if (isStandaloneChapterTitle(chapterTitle)) {
+        volumeTitle = null;
+      }
+      chapters.add(
+        Chapter(
+          index: chapters.length,
+          title: chapterTitle,
+          content: plainText,
+          volumeTitle: volumeTitle,
+          epubBlocks: List<EpubContentBlock>.unmodifiable(blocks),
+        ),
+      );
+    }
+  }
+}
+
+List<_ChapterPlan> _chapterPlans(
+  String path,
+  List<EpubContentBlock> blocks,
+  String? documentTitle,
+  _EpubNavigation navigation,
+) {
+  if (blocks.isEmpty) return const <_ChapterPlan>[];
+  final fallback = <_ChapterPlan>[
+    _ChapterPlan(
+      0,
+      blocks.length,
+      null,
+      _documentVolumeTitle(path, navigation),
+    ),
+  ];
+  final entries = navigation
+      .entriesForPath(path)
+      .where((entry) => entry.fragment != null && entry.fragment!.isNotEmpty)
+      .toList(growable: false);
+  if (entries.isEmpty) return fallback;
+
+  final blockByAnchor = <String, int>{};
+  for (var index = 0; index < blocks.length; index++) {
+    for (final id in blocks[index].anchorIds) {
+      blockByAnchor.putIfAbsent(id, () => index);
+    }
+  }
+  final resolved = <_ResolvedNavEntry>[];
+  final usedBlocks = <int>{};
+  for (final entry in entries) {
+    final blockIndex = blockByAnchor[entry.fragment!];
+    if (blockIndex == null || !usedBlocks.add(blockIndex)) continue;
+    resolved.add(_ResolvedNavEntry(entry, blockIndex));
+  }
+  if (resolved.length < 2) return fallback;
+
+  final minDepth = resolved.map((entry) => entry.depth).reduce(math.min);
+  final topLevel = resolved
+      .where((entry) => entry.depth == minDepth)
+      .toList(growable: false);
+  List<_ResolvedNavEntry> chosen;
+  if (topLevel.length >= 2) {
+    chosen = topLevel.toList();
+  } else {
+    final depths = resolved.map((entry) => entry.depth).toSet().toList()
+      ..sort();
+    int? deeperDepth;
+    for (final depth in depths) {
+      if (depth <= minDepth) continue;
+      if (resolved.where((entry) => entry.depth == depth).length >= 2) {
+        deeperDepth = depth;
+        break;
+      }
+    }
+    if (deeperDepth == null ||
+        !_shouldSplitDeeper(topLevel.firstOrNull, blocks.length)) {
+      return fallback;
+    }
+    chosen = resolved
+        .where((entry) => entry.depth == deeperDepth)
+        .toList(growable: false);
+  }
+  chosen.sort((first, second) => first.blockIndex.compareTo(second.blockIndex));
+
+  final plans = <_ChapterPlan>[];
+  var cursor = 0;
+  if (chosen.first.blockIndex > 0) {
+    plans.add(_ChapterPlan(0, chosen.first.blockIndex, documentTitle, null));
+    cursor = chosen.first.blockIndex;
+  }
+  for (var index = 0; index < chosen.length; index++) {
+    final entry = chosen[index];
+    final start = entry.blockIndex;
+    final end = index + 1 < chosen.length
+        ? chosen[index + 1].blockIndex
+        : blocks.length;
+    if (start < cursor || end <= start) continue;
+    plans.add(_ChapterPlan(start, end, entry.title, _volumeTitleFor(entry)));
+    cursor = end;
+  }
+  return plans.isEmpty ? fallback : plans;
+}
+
+String? _documentVolumeTitle(String path, _EpubNavigation navigation) {
+  final first = navigation.entriesForPath(path).firstOrNull;
+  final parent = _normalizeVisibleText(first?.parentTitle ?? '');
+  if (parent.isEmpty || !_looksLikeVolumeTitle(parent)) return null;
+  return parent;
+}
+
+bool _shouldSplitDeeper(_ResolvedNavEntry? parent, int blockCount) {
+  if (blockCount >= 400) return true;
+  final title = _normalizeVisibleText(parent?.title ?? '');
+  if (title.isEmpty) return false;
+  return _isTocLikeTitle(title) || _looksLikeVolumeTitle(title);
+}
+
+String? _volumeTitleFor(_ResolvedNavEntry entry) {
+  final parent = _normalizeVisibleText(entry.parentTitle ?? '');
+  if (parent.isEmpty || parent == entry.title) return null;
+  if (_isTocLikeTitle(parent)) return null;
+  return parent;
+}
+
+bool _looksLikeVolumeTitle(String title) {
+  if (isVolumeChapterTitle(title)) return true;
+  return RegExp(
+    r'^(?:第[一二两三四五六七八九十百千万零〇０-９0-9]+[部篇]|(?:上|中|下)(?:卷|册|部)|(?:part|book|volume)\b)',
+    caseSensitive: false,
+  ).hasMatch(title.trim());
+}
+
+bool _isTocLikeTitle(String title) {
+  final normalized = title.trim().toLowerCase();
+  return normalized == '目录' ||
+      normalized == '目錄' ||
+      normalized == 'contents' ||
+      normalized == 'table of contents' ||
+      normalized == 'toc';
+}
+
+_LoadedDocument? _svgPageDocument(
+  String path,
+  ArchiveFile file,
+  _EpubImageStore imageStore,
+) {
+  final document = html_parser.parse(decodeEpubMarkup(_bytesOf(file)));
+  final documentTitle = _extractDocumentTitle(document);
+  final imageElements = <Element>[];
+  final root = document.documentElement;
+  if (root != null) {
+    void collect(Element element) {
+      if (element.localName == 'image' || element.localName == 'img') {
+        imageElements.add(element);
+      }
+      for (final child in element.children) {
+        collect(child);
+      }
+    }
+
+    collect(root);
+  }
+  final blocks = <EpubContentBlock>[];
+  final extractedPaths = <String>{};
+  for (final element in imageElements) {
+    final rawSource =
+        _htmlAttribute(element, 'xlink:href') ??
+        _htmlAttribute(element, 'href') ??
+        _htmlAttribute(element, 'src');
+    if (rawSource == null || rawSource.trim().isEmpty) continue;
+    final extracted = imageStore.extract(rawSource, relativeTo: path);
+    if (extracted == null || !extractedPaths.add(extracted.path)) continue;
+    final width = _cssOrAttributePixels(element.attributes['width']);
+    final height = _cssOrAttributePixels(element.attributes['height']);
+    blocks.add(
+      EpubContentBlock(
+        kind: EpubContentBlockKind.image,
+        imagePath: extracted.path,
+        altText:
+            element.attributes['alt']?.trim() ??
+            element.attributes['aria-label']?.trim() ??
+            documentTitle,
+        imageWidth: width ?? extracted.width,
+        imageHeight: height ?? extracted.height,
+        style: const EpubContentStyle(textIndentEm: 0),
+      ),
+    );
+  }
+  if (blocks.isEmpty) return null;
+  return _LoadedDocument(
+    blocks,
+    const <int, Map<int, String>>{},
+    documentTitle,
+  );
+}
+
+_LoadedDocument? _rasterPageDocument(String path, _EpubImageStore imageStore) {
+  final extracted = imageStore.extractArchivePath(path);
+  if (extracted == null) return null;
+  return _LoadedDocument(
+    <EpubContentBlock>[
+      EpubContentBlock(
+        kind: EpubContentBlockKind.image,
+        imagePath: extracted.path,
+        altText: p.posix.basenameWithoutExtension(path),
+        imageWidth: extracted.width,
+        imageHeight: extracted.height,
+        style: const EpubContentStyle(textIndentEm: 0),
+      ),
+    ],
+    const <int, Map<int, String>>{},
+    null,
   );
 }
 
@@ -309,7 +825,7 @@ void _resolveEpubLinks(
   List<Chapter> chapters, {
   required Map<int, Map<int, Map<int, String>>> pendingLinks,
   required Map<String, int> chapterIndexByPath,
-  required Map<String, int> blockIndexByAnchor,
+  required Map<String, _AnchorLocation> anchorLocations,
 }) {
   for (final entry in pendingLinks.entries) {
     final chapter = chapters[entry.key];
@@ -327,7 +843,7 @@ void _resolveEpubLinks(
         final target = _epubLinkTarget(
           runEntry.value,
           chapterIndexByPath: chapterIndexByPath,
-          blockIndexByAnchor: blockIndexByAnchor,
+          anchorLocations: anchorLocations,
         );
         if (target == null) continue;
         runs[runIndex] = runs[runIndex].withLink(target);
@@ -351,24 +867,29 @@ void _resolveEpubLinks(
 EpubLinkTarget? _epubLinkTarget(
   String href, {
   required Map<String, int> chapterIndexByPath,
-  required Map<String, int> blockIndexByAnchor,
+  required Map<String, _AnchorLocation> anchorLocations,
 }) {
   final hashIndex = href.indexOf('#');
   final path = hashIndex < 0 ? href : href.substring(0, hashIndex);
-  final chapterIndex = chapterIndexByPath[path];
-  if (chapterIndex == null) return null;
-  if (hashIndex < 0) return EpubLinkTarget(chapterIndex: chapterIndex);
-  final blockIndex = blockIndexByAnchor[href];
+  final firstChapter = chapterIndexByPath[path];
+  if (firstChapter == null) return null;
+  if (hashIndex < 0) return EpubLinkTarget(chapterIndex: firstChapter);
+  final location = anchorLocations[href];
+  if (location == null) {
+    return EpubLinkTarget(chapterIndex: firstChapter);
+  }
   return EpubLinkTarget(
-    chapterIndex: chapterIndex,
-    blockIndex: blockIndex ?? -1,
+    chapterIndex: location.chapterIndex,
+    blockIndex: location.blockIndex,
   );
 }
 
-Set<String> _epubEncryptedPaths(Map<String, ArchiveFile> archiveFiles) {
-  final encryption = _findArchiveFile(archiveFiles, 'META-INF/encryption.xml');
+Set<String> _epubEncryptedPaths(_ArchiveLookup archiveLookup) {
+  final encryption = archiveLookup.find('META-INF/encryption.xml');
   if (encryption == null) return const <String>{};
   try {
+    // Encryption metadata is security-relevant: keep exact XML parsing here
+    // and refuse the book when the list cannot be trusted.
     final document = _parseXml(encryption, 'encryption.xml');
     final paths = <String>{};
     for (final reference in _elementsNamed(document, 'CipherReference')) {
@@ -379,6 +900,8 @@ Set<String> _epubEncryptedPaths(Map<String, ArchiveFile> archiveFiles) {
       );
       if (path.isNotEmpty && path != '..' && !path.startsWith('../')) {
         paths.add(path);
+        final canonical = archiveLookup.canonicalPath(path);
+        if (canonical != null) paths.add(canonical);
       }
     }
     return paths;
@@ -387,38 +910,66 @@ Set<String> _epubEncryptedPaths(Map<String, ArchiveFile> archiveFiles) {
   }
 }
 
+bool _isEncryptedPath(
+  String requestedPath,
+  _ArchiveLookup archiveLookup,
+  Set<String> encryptedPaths,
+) {
+  if (encryptedPaths.contains(requestedPath)) return true;
+  final canonical = archiveLookup.canonicalPath(requestedPath);
+  return canonical != null && encryptedPaths.contains(canonical);
+}
+
 class _ManifestItem {
+  const _ManifestItem(
+    this.id,
+    this.path,
+    this.mediaType,
+    this.properties,
+    this.fallbackId,
+  );
+
+  final String id;
   final String path;
   final String mediaType;
   final Set<String> properties;
-
-  const _ManifestItem(this.path, this.mediaType, this.properties);
+  final String? fallbackId;
 }
 
-Map<String, _ManifestItem> _extractManifest(XmlDocument opf, String opfDir) {
+Map<String, _ManifestItem> _extractManifest(
+  XmlDocument opf,
+  String opfDir,
+  _ArchiveLookup archiveLookup,
+) {
   final manifest = <String, _ManifestItem>{};
   for (final item in _elementsNamed(opf, 'item')) {
-    final id = item.getAttribute('id');
+    final id = item.getAttribute('id')?.trim();
     final href = item.getAttribute('href');
-    if (id == null || href == null) continue;
+    if (id == null || id.isEmpty || href == null) continue;
     final joined = _resolveArchiveReference(
       href,
       opfDir,
       baseIsDirectory: true,
     );
     if (joined.isEmpty) continue;
+    final canonicalPath = archiveLookup.canonicalPath(joined) ?? joined;
     manifest[id] = _ManifestItem(
-      joined,
-      item.getAttribute('media-type')?.trim().toLowerCase() ?? '',
+      id,
+      canonicalPath,
+      _normalizeMediaType(item.getAttribute('media-type') ?? ''),
       (item.getAttribute('properties') ?? '')
           .toLowerCase()
           .split(RegExp(r'\s+'))
           .where((value) => value.isNotEmpty)
           .toSet(),
+      item.getAttribute('fallback')?.trim(),
     );
   }
   return manifest;
 }
+
+String _normalizeMediaType(String raw) =>
+    raw.split(';').first.trim().toLowerCase();
 
 String? _epubCoverArchivePath(
   XmlDocument opf,
@@ -445,104 +996,503 @@ String? _epubCoverArchivePath(
   return null;
 }
 
-Map<String, String> _extractNavigationTitles(
+List<_SpineDocument> _extractSpineDocuments(
   XmlDocument opf,
   Map<String, _ManifestItem> manifest,
-  Map<String, ArchiveFile> archiveFiles,
+  _ArchiveLookup archiveLookup,
 ) {
-  final titles = <String, String>{};
-
-  void addTitle(String? rawReference, String? rawTitle, String relativeTo) {
-    final title = _normalizeVisibleText(rawTitle ?? '');
-    if (rawReference == null || title.isEmpty) return;
-    final path = _resolveArchiveReference(rawReference, relativeTo);
-    if (path.isNotEmpty) titles.putIfAbsent(path, () => title);
-  }
-
-  for (final item in manifest.values.where(
-    (candidate) => candidate.properties.contains('nav'),
-  )) {
-    final file = _findArchiveFile(archiveFiles, item.path);
-    if (file == null) continue;
-    try {
-      final document = html_parser.parse(_decodeMarkup(_bytesOf(file)));
-      final navigationElements = document.querySelectorAll('nav');
-      final toc = navigationElements.where((element) {
-        final type =
-            element.attributes['epub:type'] ??
-            element.attributes['type'] ??
-            element.attributes['role'] ??
-            '';
-        return type
-            .toLowerCase()
-            .split(RegExp(r'\s+'))
-            .any((value) => value == 'toc' || value == 'doc-toc');
-      }).firstOrNull;
-      final scope = toc ?? navigationElements.firstOrNull ?? document.body;
-      for (final anchor
-          in scope?.querySelectorAll('a[href]') ?? const <Element>[]) {
-        addTitle(anchor.attributes['href'], anchor.text, item.path);
+  final documents = <_SpineDocument>[];
+  final indexByPath = <String, int>{};
+  for (final itemref in _elementsNamed(opf, 'itemref')) {
+    final idref = itemref.getAttribute('idref')?.trim();
+    if (idref == null || idref.isEmpty) continue;
+    final item = _resolveSpineManifestItem(
+      manifest[idref],
+      manifest,
+      archiveLookup,
+    );
+    if (item == null) continue;
+    final linear = itemref.getAttribute('linear')?.toLowerCase().trim() != 'no';
+    final existingIndex = indexByPath[item.path];
+    if (existingIndex != null) {
+      if (linear && !documents[existingIndex].linear) {
+        documents[existingIndex] = _SpineDocument(item, true);
       }
-    } on Object {
-      // A malformed navigation document must not make readable spine content
-      // impossible to import; the document heading remains the fallback.
+      continue;
     }
+    indexByPath[item.path] = documents.length;
+    documents.add(_SpineDocument(item, linear));
   }
-
-  final spine = _elementsNamed(opf, 'spine').firstOrNull;
-  final ncxId = spine?.getAttribute('toc');
-  final ncxCandidates = <_ManifestItem>{
-    if (ncxId != null && manifest[ncxId] != null) manifest[ncxId]!,
-    ...manifest.values.where(
-      (item) => item.mediaType == 'application/x-dtbncx+xml',
-    ),
-  };
-  for (final item in ncxCandidates) {
-    final file = _findArchiveFile(archiveFiles, item.path);
-    if (file == null) continue;
-    try {
-      final ncx = _parseXml(file, 'NCX');
-      for (final navPoint in _elementsNamed(ncx, 'navPoint')) {
-        final content = navPoint.descendants
-            .whereType<XmlElement>()
-            .where((element) => element.name.local == 'content')
-            .firstOrNull;
-        final label = navPoint.descendants
-            .whereType<XmlElement>()
-            .where((element) => element.name.local == 'navLabel')
-            .firstOrNull;
-        addTitle(content?.getAttribute('src'), label?.innerText, item.path);
-      }
-    } on Object {
-      // EPUB 2 navigation is optional for rendering. Ignore a damaged NCX and
-      // use the embedded chapter heading instead.
-    }
-  }
-  return titles;
+  return documents;
 }
 
+_ManifestItem? _resolveSpineManifestItem(
+  _ManifestItem? item,
+  Map<String, _ManifestItem> manifest,
+  _ArchiveLookup archiveLookup,
+) {
+  final seen = <String>{};
+  var current = item;
+  while (current != null) {
+    if (!seen.add(current.id)) return null;
+    if (_documentKind(current, archiveLookup) !=
+            _EpubDocumentKind.unsupported &&
+        archiveLookup.find(current.path) != null) {
+      return current;
+    }
+    final fallbackId = current.fallbackId;
+    if (fallbackId == null || fallbackId.isEmpty) return null;
+    current = manifest[fallbackId];
+  }
+  return null;
+}
+
+const _markupExtensions = <String>{'.xhtml', '.html', '.htm'};
+const _rasterExtensions = <String>{
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.bmp',
+};
+
 bool _isMarkupMediaType(String mediaType) =>
-    mediaType.isEmpty ||
     mediaType == 'application/xhtml+xml' ||
     mediaType == 'text/html' ||
-    mediaType == 'application/xml';
+    mediaType == 'application/xml' ||
+    mediaType == 'text/xml' ||
+    mediaType == 'text/xhtml';
+
+bool _isRasterImageMediaType(String mediaType) =>
+    mediaType.startsWith('image/') && mediaType != 'image/svg+xml';
+
+bool _isKnownBinaryMediaType(String mediaType) =>
+    mediaType.startsWith('image/') ||
+    mediaType.startsWith('audio/') ||
+    mediaType.startsWith('video/') ||
+    mediaType.startsWith('font/') ||
+    mediaType == 'application/pdf' ||
+    mediaType == 'application/zip' ||
+    mediaType == 'application/x-dtbncx+xml';
+
+_EpubDocumentKind _documentKind(
+  _ManifestItem item,
+  _ArchiveLookup archiveLookup,
+) {
+  final mediaType = item.mediaType;
+  final extension = p.posix.extension(item.path).toLowerCase();
+  if (_isMarkupMediaType(mediaType)) return _EpubDocumentKind.markup;
+  if (mediaType == 'image/svg+xml') return _EpubDocumentKind.svg;
+  if (_isRasterImageMediaType(mediaType)) return _EpubDocumentKind.raster;
+  final looselyTyped =
+      mediaType.isEmpty ||
+      mediaType == 'application/octet-stream' ||
+      mediaType == 'binary/octet-stream' ||
+      mediaType == 'text/plain';
+  final extensionIsTrustworthy =
+      looselyTyped || !_isKnownBinaryMediaType(mediaType);
+  if (extensionIsTrustworthy && _markupExtensions.contains(extension)) {
+    return _EpubDocumentKind.markup;
+  }
+  if (extensionIsTrustworthy && extension == '.svg') {
+    return _EpubDocumentKind.svg;
+  }
+  if (extensionIsTrustworthy && _rasterExtensions.contains(extension)) {
+    return _EpubDocumentKind.raster;
+  }
+  return _EpubDocumentKind.unsupported;
+}
+
+({XmlDocument opf, String path}) _selectOpf(
+  XmlDocument container,
+  _ArchiveLookup archiveLookup,
+  Set<String> encryptedPaths,
+) {
+  FormatException? firstError;
+  var sawEncrypted = false;
+  for (final rootfile in _elementsNamed(container, 'rootfile')) {
+    final rawPath = rootfile.getAttribute('full-path');
+    if (rawPath == null || rawPath.trim().isEmpty) continue;
+    final path = _normalizeArchivePath(
+      _safeDecodeUriComponent(rawPath.split('#').first.split('?').first),
+    );
+    if (path.isEmpty || path == '..' || path.startsWith('../')) continue;
+    if (_isEncryptedPath(path, archiveLookup, encryptedPaths)) {
+      sawEncrypted = true;
+      continue;
+    }
+    final file = archiveLookup.find(path);
+    if (file == null) continue;
+    try {
+      final opf = _parseXml(file, 'OPF', lenient: true);
+      if (_elementsNamed(opf, 'manifest').isEmpty) {
+        firstError ??= const FormatException('OPF 中缺少 manifest');
+        continue;
+      }
+      return (opf: opf, path: path);
+    } on FormatException catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (sawEncrypted) {
+    throw const FormatException('EPUB 包内容受 DRM 或加密保护，无法离线解析');
+  }
+  throw firstError ?? const FormatException('无效的 EPUB 文件：无法读取 OPF');
+}
+
+class _NavEntry {
+  const _NavEntry(
+    this.path,
+    this.fragment,
+    this.title,
+    this.depth,
+    this.parentTitle,
+  );
+
+  final String path;
+  final String? fragment;
+  final String title;
+  final int depth;
+  final String? parentTitle;
+}
+
+class _EpubNavigation {
+  _EpubNavigation(List<_NavEntry> source)
+    : entries = List.unmodifiable(source) {
+    for (final entry in source) {
+      _byPath.putIfAbsent(entry.path, () => <_NavEntry>[]).add(entry);
+      if (entry.fragment == null) {
+        _firstTitle.putIfAbsent(entry.path, () => entry.title);
+      }
+    }
+    for (final entry in source) {
+      _firstTitle.putIfAbsent(entry.path, () => entry.title);
+    }
+  }
+
+  final List<_NavEntry> entries;
+  final Map<String, List<_NavEntry>> _byPath = <String, List<_NavEntry>>{};
+  final Map<String, String> _firstTitle = <String, String>{};
+
+  List<_NavEntry> entriesForPath(String path) =>
+      _byPath[path] ?? const <_NavEntry>[];
+
+  String? firstTitleForPath(String path) => _firstTitle[path];
+}
+
+_EpubNavigation _extractNavigation(
+  XmlDocument opf,
+  Map<String, _ManifestItem> manifest,
+  _ArchiveLookup archiveLookup,
+) {
+  final entries = <_NavEntry>[];
+  final seen = <String>{};
+  var parsedNavigationDocument = false;
+
+  for (final item in manifest.values) {
+    if (!item.properties.contains('nav')) continue;
+    final file = archiveLookup.find(item.path);
+    if (file == null) continue;
+    try {
+      final document = html_parser.parse(decodeEpubMarkup(_bytesOf(file)));
+      final navigation = _findTocNavigation(document);
+      if (navigation == null) continue;
+      final list =
+          _directChild(navigation, 'ol') ??
+          _directChild(navigation, 'ul') ??
+          navigation.querySelector('ol') ??
+          navigation.querySelector('ul');
+      if (list == null) continue;
+      final before = entries.length;
+      _walkNavigationList(
+        list,
+        0,
+        null,
+        item.path,
+        archiveLookup,
+        entries,
+        seen,
+      );
+      if (entries.length > before) parsedNavigationDocument = true;
+    } on Object {
+      // Navigation is optional for reading; a damaged nav document falls back
+      // to a damaged NCX only when it produced no usable entries at all.
+    }
+  }
+
+  if (!parsedNavigationDocument) {
+    final spine = _elementsNamed(opf, 'spine').firstOrNull;
+    final ncxId = spine?.getAttribute('toc')?.trim();
+    final candidates = <_ManifestItem>[
+      if (ncxId != null && manifest[ncxId] != null) manifest[ncxId]!,
+      ...manifest.values.where(
+        (item) => item.mediaType == 'application/x-dtbncx+xml',
+      ),
+    ];
+    final seenNcx = <String>{};
+    for (final item in candidates) {
+      if (!seenNcx.add(item.path)) continue;
+      final file = archiveLookup.find(item.path);
+      if (file == null) continue;
+      try {
+        final ncx = _parseXml(file, 'NCX', lenient: true);
+        final navMap = _elementsNamed(ncx, 'navMap').firstOrNull;
+        if (navMap == null) continue;
+        for (final navPoint in navMap.children.whereType<XmlElement>().where(
+          (element) => _xmlNameIs(element, 'navPoint'),
+        )) {
+          _walkNcxPoint(
+            navPoint,
+            0,
+            null,
+            item.path,
+            archiveLookup,
+            entries,
+            seen,
+          );
+        }
+      } on Object {
+        // Ignore a damaged NCX and use embedded chapter headings instead.
+      }
+    }
+  }
+
+  if (entries.isEmpty) return _EpubNavigation(const <_NavEntry>[]);
+  final minDepth = entries.map((entry) => entry.depth).reduce(math.min);
+  if (minDepth == 0) return _EpubNavigation(entries);
+  return _EpubNavigation(<_NavEntry>[
+    for (final entry in entries)
+      _NavEntry(
+        entry.path,
+        entry.fragment,
+        entry.title,
+        entry.depth - minDepth,
+        entry.parentTitle,
+      ),
+  ]);
+}
+
+Element? _findTocNavigation(Document document) {
+  final navigationElements = document.querySelectorAll('nav');
+  for (final element in navigationElements) {
+    final type =
+        _htmlAttribute(element, 'epub:type') ??
+        _htmlAttribute(element, 'type') ??
+        _htmlAttribute(element, 'role') ??
+        '';
+    final isToc = type
+        .toLowerCase()
+        .split(RegExp(r'\s+'))
+        .any((value) => value == 'toc' || value == 'doc-toc');
+    if (isToc) return element;
+  }
+  for (final element in navigationElements) {
+    if (element.querySelector('a[href]') != null) return element;
+  }
+  return null;
+}
+
+Element? _directChild(Element parent, String localName) {
+  for (final child in parent.children) {
+    if (child.localName == localName) return child;
+  }
+  return null;
+}
+
+void _walkNavigationList(
+  Element list,
+  int depth,
+  String? parentTitle,
+  String basePath,
+  _ArchiveLookup archiveLookup,
+  List<_NavEntry> entries,
+  Set<String> seen,
+) {
+  for (final item in list.children) {
+    if (item.localName != 'li') continue;
+    final anchor = _navigationAnchor(item);
+    final rawTitle = _normalizeVisibleText(
+      anchor?.text ?? _navigationOwnLabel(item),
+    );
+    final title = rawTitle.isEmpty
+        ? _normalizeVisibleText(anchor?.attributes['title'] ?? '')
+        : rawTitle;
+    final href = anchor == null ? null : _htmlAttribute(anchor, 'href');
+    if (href != null) {
+      _addNavEntry(
+        rawHref: href,
+        title: title,
+        depth: depth,
+        parentTitle: parentTitle,
+        basePath: basePath,
+        archiveLookup: archiveLookup,
+        entries: entries,
+        seen: seen,
+      );
+    }
+    final childParentTitle = title.isNotEmpty ? title : parentTitle;
+    for (final child in item.children) {
+      if (child.localName == 'ol' || child.localName == 'ul') {
+        _walkNavigationList(
+          child,
+          depth + 1,
+          childParentTitle,
+          basePath,
+          archiveLookup,
+          entries,
+          seen,
+        );
+      }
+    }
+  }
+}
+
+Element? _navigationAnchor(Element item) {
+  Element? find(Element parent) {
+    for (final child in parent.children) {
+      if (child.localName == 'ol' || child.localName == 'ul') continue;
+      if (child.localName == 'a' &&
+          (_htmlAttribute(child, 'href') ?? '').trim().isNotEmpty) {
+        return child;
+      }
+      final nested = find(child);
+      if (nested != null) return nested;
+    }
+    return null;
+  }
+
+  return find(item);
+}
+
+String _navigationOwnLabel(Element item) {
+  final buffer = StringBuffer();
+  for (final node in item.nodes) {
+    if (node is Text) {
+      buffer.write(node.data);
+    } else if (node is Element &&
+        node.localName != 'ol' &&
+        node.localName != 'ul' &&
+        node.localName != 'a') {
+      buffer.write(node.text);
+    }
+  }
+  return buffer.toString();
+}
+
+void _walkNcxPoint(
+  XmlElement navPoint,
+  int depth,
+  String? parentTitle,
+  String basePath,
+  _ArchiveLookup archiveLookup,
+  List<_NavEntry> entries,
+  Set<String> seen,
+) {
+  final content = navPoint.children
+      .whereType<XmlElement>()
+      .where((element) => _xmlNameIs(element, 'content'))
+      .firstOrNull;
+  final label = navPoint.children
+      .whereType<XmlElement>()
+      .where((element) => _xmlNameIs(element, 'navLabel'))
+      .firstOrNull;
+  final title = _normalizeVisibleText(label?.innerText ?? '');
+  _addNavEntry(
+    rawHref: content?.getAttribute('src'),
+    title: title,
+    depth: depth,
+    parentTitle: parentTitle,
+    basePath: basePath,
+    archiveLookup: archiveLookup,
+    entries: entries,
+    seen: seen,
+  );
+  final childParentTitle = title.isNotEmpty ? title : parentTitle;
+  for (final child in navPoint.children.whereType<XmlElement>().where(
+    (element) => _xmlNameIs(element, 'navPoint'),
+  )) {
+    _walkNcxPoint(
+      child,
+      depth + 1,
+      childParentTitle,
+      basePath,
+      archiveLookup,
+      entries,
+      seen,
+    );
+  }
+}
+
+void _addNavEntry({
+  required String? rawHref,
+  required String title,
+  required int depth,
+  required String? parentTitle,
+  required String basePath,
+  required _ArchiveLookup archiveLookup,
+  required List<_NavEntry> entries,
+  required Set<String> seen,
+}) {
+  if (rawHref == null || rawHref.trim().isEmpty || title.isEmpty) return;
+  final target = _resolveNavTarget(rawHref, basePath, archiveLookup);
+  if (target == null) return;
+  final key = '${target.path}\u0000${target.fragment ?? ''}';
+  if (!seen.add(key)) return;
+  final normalizedParent = _normalizeVisibleText(parentTitle ?? '');
+  entries.add(
+    _NavEntry(
+      target.path,
+      target.fragment,
+      title,
+      depth,
+      normalizedParent.isEmpty ? null : normalizedParent,
+    ),
+  );
+}
+
+({String path, String? fragment})? _resolveNavTarget(
+  String rawHref,
+  String basePath,
+  _ArchiveLookup archiveLookup,
+) {
+  final value = rawHref.trim();
+  if (value.isEmpty || _uriSchemePattern.hasMatch(value)) return null;
+  final hashIndex = value.indexOf('#');
+  final rawPath = hashIndex < 0 ? value : value.substring(0, hashIndex);
+  final rawFragment = hashIndex < 0 ? '' : value.substring(hashIndex + 1);
+  final resolvedPath = rawPath.trim().isEmpty
+      ? basePath
+      : _resolveArchiveReference(rawPath, basePath);
+  if (resolvedPath.isEmpty) return null;
+  final path = archiveLookup.canonicalPath(resolvedPath) ?? resolvedPath;
+  final fragment = _safeDecodeUriComponent(rawFragment).trim();
+  return (path: path, fragment: fragment.isEmpty ? null : fragment);
+}
 
 String _chapterCssText(
   Document document,
   String contentPath,
-  Map<String, ArchiveFile> archiveFiles,
+  _ArchiveLookup archiveLookup,
   Map<String, String> documentCache,
 ) {
   final output = StringBuffer();
   final visited = <String>{};
 
   void appendCssPath(String rawPath, String relativeTo) {
-    final cssPath = _resolveArchiveReference(rawPath, relativeTo);
-    if (cssPath.isEmpty || !visited.add(cssPath)) return;
+    final resolvedPath = _resolveArchiveReference(rawPath, relativeTo);
+    if (resolvedPath.isEmpty) return;
+    final cssPath = archiveLookup.canonicalPath(resolvedPath) ?? resolvedPath;
+    if (!visited.add(cssPath)) return;
     final css = documentCache.putIfAbsent(cssPath, () {
-      final file = _findArchiveFile(archiveFiles, cssPath);
-      if (file == null || file.size > 8 * 1024 * 1024) return '';
-      return _decodeMarkup(_bytesOf(file));
+      try {
+        final file = archiveLookup.find(cssPath);
+        if (file == null || file.size > 8 * 1024 * 1024) return '';
+        return decodeEpubMarkup(_bytesOf(file));
+      } on Object {
+        // One damaged stylesheet must not fail the whole chapter.
+        return '';
+      }
     });
     if (css.isEmpty) return;
     for (final match in RegExp(
@@ -606,6 +1556,7 @@ _ParsedDocument _documentToBlocks(
   String contentPath,
   _EpubStyleResolver resolver,
   _EpubImageStore imageStore,
+  _ArchiveLookup archiveLookup,
 ) {
   final blocks = <EpubContentBlock>[];
   final linkHrefs = <int, Map<int, String>>{};
@@ -614,7 +1565,14 @@ _ParsedDocument _documentToBlocks(
   if (root == null) return _ParsedDocument(blocks, linkHrefs);
 
   void noteAnchorId(Element element) {
-    final id = element.attributes['id']?.trim();
+    var id = element.attributes['id']?.trim();
+    if (id == null || id.isEmpty) {
+      id = _htmlAttribute(element, 'xml:id')?.trim();
+    }
+    if ((id == null || id.isEmpty) && element.localName == 'a') {
+      // EPUB 2 footnote targets frequently use <a name="...">.
+      id = _htmlAttribute(element, 'name')?.trim();
+    }
     if (id == null || id.isEmpty || id.length > 256) return;
     if (pendingAnchorIds.length >= 64 || pendingAnchorIds.contains(id)) return;
     pendingAnchorIds.add(id);
@@ -636,22 +1594,22 @@ _ParsedDocument _documentToBlocks(
     final hashIndex = value.indexOf('#');
     final rawPath = hashIndex < 0 ? value : value.substring(0, hashIndex);
     final rawFragment = hashIndex < 0 ? '' : value.substring(hashIndex + 1);
-    final path = rawPath.trim().isEmpty
+    final resolvedPath = rawPath.trim().isEmpty
         ? contentPath
         : _resolveArchiveReference(rawPath, contentPath);
-    if (path.isEmpty) return null;
+    if (resolvedPath.isEmpty) return null;
+    final path = archiveLookup.canonicalPath(resolvedPath) ?? resolvedPath;
     final fragment = _safeDecodeUriComponent(rawFragment).trim();
     return fragment.isEmpty ? path : '$path#$fragment';
   }
 
-  void appendImage(Element image, EpubContentStyle inheritedStyle) {
-    final rawSource =
-        image.attributes['src'] ??
-        image.attributes['xlink:href'] ??
-        image.attributes['href'];
-    if (rawSource == null || rawSource.trim().isEmpty) return;
+  bool appendImageSource(
+    Element image,
+    String rawSource,
+    EpubContentStyle inheritedStyle,
+  ) {
     final extracted = imageStore.extract(rawSource, relativeTo: contentPath);
-    if (extracted == null) return;
+    if (extracted == null) return false;
     final style = _normalizeImageStyle(
       resolver.styleFor(image, inherited: inheritedStyle),
     );
@@ -687,6 +1645,50 @@ _ParsedDocument _documentToBlocks(
         anchorIds: drainAnchorIds(),
       ),
     );
+    return true;
+  }
+
+  bool appendImage(Element image, EpubContentStyle inheritedStyle) {
+    var rawSource =
+        _htmlAttribute(image, 'src') ??
+        _htmlAttribute(image, 'xlink:href') ??
+        _htmlAttribute(image, 'href');
+    if (rawSource == null || rawSource.trim().isEmpty) {
+      rawSource = _firstSrcsetCandidate(_htmlAttribute(image, 'srcset'));
+    }
+    if (rawSource == null || rawSource.trim().isEmpty) return false;
+    return appendImageSource(image, rawSource, inheritedStyle);
+  }
+
+  void appendDirectText(String rawText, EpubContentStyle inheritedStyle) {
+    if (rawText.trim().isEmpty) return;
+    final blockStyle = _normalizeBlockStyle(
+      inheritedStyle,
+      tag: null,
+      isHeading: false,
+    );
+    final collector = _EpubRunCollector()..add(rawText, inheritedStyle);
+    final collected = collector.finish();
+    if (collected == null) return;
+    final compact = _compactRuns(collected.runs, blockStyle);
+    final hrefs = <int, String>{};
+    for (var index = 0; index < compact.length; index++) {
+      final href = compact[index].href;
+      if (href != null) hrefs[index] = href;
+    }
+    if (hrefs.isNotEmpty) linkHrefs[blocks.length] = hrefs;
+    blocks.add(
+      EpubContentBlock(
+        kind: EpubContentBlockKind.text,
+        text: collected.text,
+        runs: List<EpubTextRun>.unmodifiable(<EpubTextRun>[
+          for (final run in compact)
+            EpubTextRun(text: run.text, style: run.style),
+        ]),
+        style: blockStyle,
+        anchorIds: drainAnchorIds(),
+      ),
+    );
   }
 
   void appendLeaf(Element element, EpubContentStyle inheritedStyle) {
@@ -715,7 +1717,7 @@ _ParsedDocument _documentToBlocks(
         EpubContentBlock(
           kind: EpubContentBlockKind.text,
           text: collected.text,
-          runs: List<EpubTextRun>.unmodifiable([
+          runs: List<EpubTextRun>.unmodifiable(<EpubTextRun>[
             for (final run in compact)
               EpubTextRun(text: run.text, style: run.style),
           ]),
@@ -734,12 +1736,25 @@ _ParsedDocument _documentToBlocks(
       if (node is! Element || resolver.isHidden(node)) return;
       final tag = node.localName;
       if (tag == 'script' || tag == 'style' || tag == 'head') return;
-      noteAnchorId(node);
       if (tag == 'img' || tag == 'image') {
+        // Flush first: an anchor on the image belongs to the image block, not
+        // to the text that happens to precede it.
         flushText();
+        noteAnchorId(node);
         appendImage(node, style);
         return;
       }
+      if (tag == 'object' || tag == 'embed') {
+        final rawSource = tag == 'object'
+            ? _htmlAttribute(node, 'data')
+            : _htmlAttribute(node, 'src');
+        if (rawSource != null && rawSource.trim().isNotEmpty) {
+          flushText();
+          noteAnchorId(node);
+          if (appendImageSource(node, rawSource, style)) return;
+        }
+      }
+      noteAnchorId(node);
       if (tag == 'br' || tag == 'hr') collector.add(' ', style, href: href);
       // An anchor nested inside another anchor is malformed markup; the
       // innermost href wins, matching how browsers resolve the same document.
@@ -769,11 +1784,21 @@ _ParsedDocument _documentToBlocks(
       appendImage(element, inheritedStyle);
       return;
     }
+    if (element.localName == 'object' || element.localName == 'embed') {
+      final rawSource = element.localName == 'object'
+          ? _htmlAttribute(element, 'data')
+          : _htmlAttribute(element, 'src');
+      if (rawSource != null &&
+          rawSource.trim().isNotEmpty &&
+          appendImageSource(element, rawSource, inheritedStyle)) {
+        return;
+      }
+    }
     final containsBlockChild = element.children.any(
       (child) => _blockElements.contains(child.localName),
     );
-    // Inline wrappers such as `<span>` or `<b>` legitimately hold chapter text
-    // in real-world EPUBs. Treating only block tags as leaves silently dropped
+    // Inline wrappers such as <span> or <b> legitimately hold chapter text in
+    // real-world EPUBs. Treating only block tags as leaves silently dropped
     // that text whenever the wrapper sat next to block-level siblings.
     if (!containsBlockChild &&
         !_transparentContainers.contains(element.localName) &&
@@ -782,11 +1807,14 @@ _ParsedDocument _documentToBlocks(
       appendLeaf(element, inheritedStyle);
       return;
     }
-    for (final child in element.children) {
-      walk(child, style);
-    }
-    if (element == root && blocks.isEmpty && element.text.trim().isNotEmpty) {
-      appendLeaf(element, inheritedStyle);
+    for (final node in element.nodes) {
+      if (node is Text) {
+        // Mixed content such as <body>开场<p>中间</p>结尾</body> is valid
+        // HTML. element.children alone would silently drop the direct text.
+        appendDirectText(node.data, style);
+      } else if (node is Element) {
+        walk(node, style);
+      }
     }
   }
 
@@ -794,8 +1822,31 @@ _ParsedDocument _documentToBlocks(
   return _ParsedDocument(blocks, linkHrefs);
 }
 
+String? _firstSrcsetCandidate(String? raw) {
+  final value = raw?.trim();
+  if (value == null || value.isEmpty) return null;
+  final comma = value.indexOf(',');
+  final first = comma < 0 ? value : value.substring(0, comma);
+  final space = first.indexOf(RegExp(r'\s'));
+  final candidate = (space < 0 ? first : first.substring(0, space)).trim();
+  return candidate.isEmpty ? null : candidate;
+}
+
 /// Matches any URI scheme, so http, mailto, tel and data links stay plain text.
 final _uriSchemePattern = RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*:');
+
+/// Reads an HTML attribute whose key may carry a namespace (xlink:href,
+/// epub:type, xml:id). package:html keeps the qualified key object, so a plain
+/// map lookup misses those names even though [Element.attributes] prints them.
+String? _htmlAttribute(Element element, String name) {
+  final direct = element.attributes[name];
+  if (direct != null) return direct;
+  final lower = name.toLowerCase();
+  for (final entry in element.attributes.entries) {
+    if (entry.key.toString().toLowerCase() == lower) return entry.value;
+  }
+  return null;
+}
 
 const _blockElements = <String>{
   'address',
@@ -830,9 +1881,9 @@ const _headingElements = <String>{'h1', 'h2', 'h3', 'h4', 'h5', 'h6'};
 bool _isSemanticHeading(Element element, EpubContentStyle style) {
   if (_headingElements.contains(element.localName)) return true;
   final roleTokens = <String>[
-    element.attributes['role'] ?? '',
-    element.attributes['epub:type'] ?? '',
-    element.attributes['type'] ?? '',
+    _htmlAttribute(element, 'role') ?? '',
+    _htmlAttribute(element, 'epub:type') ?? '',
+    _htmlAttribute(element, 'type') ?? '',
   ].expand((value) => value.toLowerCase().split(RegExp(r'\s+')));
   if (roleTokens.any(
     (value) =>
@@ -876,6 +1927,7 @@ bool _promoteMatchingLeadingTitle(
           .map(
             (run) => EpubTextRun(
               text: run.text,
+              link: run.link,
               style: EpubContentStyle(
                 fontFamily: run.style.fontFamily,
                 fontScale: math.max(1.2, run.style.fontScale),
@@ -895,6 +1947,7 @@ bool _promoteMatchingLeadingTitle(
       altText: block.altText,
       imageWidth: block.imageWidth,
       imageHeight: block.imageHeight,
+      anchorIds: block.anchorIds,
       style: EpubContentStyle(
         fontFamily: style.fontFamily,
         fontScale: math.max(1.2, style.fontScale),
@@ -1570,22 +2623,24 @@ String? _cssUrl(String? value) {
 }
 
 class _EpubFontStore {
-  final Map<String, ArchiveFile> archiveFiles;
+  _EpubFontStore({
+    required this.archiveLookup,
+    required this.encryptedPaths,
+    required this.outputDirectory,
+    required this.bookId,
+  });
+
+  final _ArchiveLookup archiveLookup;
+  final Set<String> encryptedPaths;
   final Directory outputDirectory;
   final String bookId;
   final Map<String, String> _declaredFamilies = <String, String>{};
   final Map<String, String> _embeddedFonts = <String, String>{};
 
-  _EpubFontStore({
-    required this.archiveFiles,
-    required this.outputDirectory,
-    required this.bookId,
-  });
-
   Map<String, String> get embeddedFonts =>
       Map<String, String>.unmodifiable(_embeddedFonts);
 
-  void registerCss(String cssText) {
+  void registerCss(String cssText, {String? basePath}) {
     for (final match in RegExp(
       r'@font-face\s*\{([^{}]*)\}',
       caseSensitive: false,
@@ -1593,39 +2648,59 @@ class _EpubFontStore {
     ).allMatches(cssText)) {
       final declarations = _parseDeclarations(match.group(1) ?? '');
       final rawFamily = declarations['font-family'];
-      final rawSource = _cssUrl(declarations['src']);
-      if (rawFamily == null || rawSource == null) continue;
-      final normalizedFamily = _normalizeFontFamilyName(rawFamily);
+      final rawSources =
+          RegExp(r'''url\(\s*["']?([^"')]+)["']?\s*\)''', caseSensitive: false)
+              .allMatches(declarations['src'] ?? '')
+              .map((match) => match.group(1)?.trim() ?? '')
+              .where((value) => value.isNotEmpty);
+      if (rawFamily == null) continue;
+      final normalizedFamily = _normalizeFontFamilyName(
+        rawFamily.split(',').first,
+      );
       if (normalizedFamily.isEmpty ||
           _declaredFamilies.containsKey(normalizedFamily)) {
         continue;
       }
-      final archivePath = _normalizeArchivePath(
-        rawSource.startsWith('/') ? rawSource.substring(1) : rawSource,
-      );
-      final extension = p.posix.extension(archivePath).toLowerCase();
-      if (extension != '.ttf' && extension != '.otf') continue;
-      final source = _findArchiveFile(archiveFiles, archivePath);
-      if (source == null ||
-          source.size <= 0 ||
-          source.size > 64 * 1024 * 1024) {
-        continue;
-      }
-      final safeToken = base64Url
-          .encode(utf8.encode('$bookId:$normalizedFamily'))
-          .replaceAll('=', '')
-          .replaceAll('-', '_');
-      final family =
-          'ReadVibeEpub_${safeToken.substring(0, math.min(48, safeToken.length))}';
-      final target = File(
-        p.join(outputDirectory.path, 'font_${_embeddedFonts.length}$extension'),
-      );
-      try {
-        target.writeAsBytesSync(_bytesOf(source), flush: true);
-        _declaredFamilies[normalizedFamily] = family;
-        _embeddedFonts[family] = target.path;
-      } on FileSystemException {
-        // A broken optional publisher font must not make the book unreadable.
+      for (final rawSource in rawSources) {
+        if (rawSource.startsWith('data:')) continue;
+        final resolvedPath = _resolveArchiveReference(
+          rawSource,
+          basePath ?? '',
+        );
+        if (resolvedPath.isEmpty) continue;
+        final archivePath =
+            archiveLookup.canonicalPath(resolvedPath) ?? resolvedPath;
+        final extension = p.posix.extension(archivePath).toLowerCase();
+        if (extension != '.ttf' && extension != '.otf') continue;
+        if (_isEncryptedPath(archivePath, archiveLookup, encryptedPaths)) {
+          continue;
+        }
+        final source = archiveLookup.find(archivePath);
+        if (source == null ||
+            source.size <= 0 ||
+            source.size > 64 * 1024 * 1024) {
+          continue;
+        }
+        final safeToken = base64Url
+            .encode(utf8.encode('$bookId:$normalizedFamily'))
+            .replaceAll('=', '')
+            .replaceAll('-', '_');
+        final family =
+            'ReadVibeEpub_${safeToken.substring(0, math.min(48, safeToken.length))}';
+        final target = File(
+          p.join(
+            outputDirectory.path,
+            'font_${_embeddedFonts.length}$extension',
+          ),
+        );
+        try {
+          target.writeAsBytesSync(_bytesOf(source), flush: true);
+          _declaredFamilies[normalizedFamily] = family;
+          _embeddedFonts[family] = target.path;
+          break;
+        } on Object {
+          // A broken optional publisher font must not make the book unreadable.
+        }
       }
     }
   }
@@ -1654,17 +2729,19 @@ class _ExtractedImage {
 }
 
 class _EpubImageStore {
-  final Map<String, ArchiveFile> archiveFiles;
+  _EpubImageStore({
+    required this.archiveLookup,
+    required this.encryptedPaths,
+    required this.outputDirectory,
+    required this.maxSingleImageBytes,
+  });
+
+  final _ArchiveLookup archiveLookup;
+  final Set<String> encryptedPaths;
   final Directory outputDirectory;
   final int maxSingleImageBytes;
   final Map<String, _ExtractedImage?> _cache = <String, _ExtractedImage?>{};
   var _dataImageIndex = 0;
-
-  _EpubImageStore({
-    required this.archiveFiles,
-    required this.outputDirectory,
-    required this.maxSingleImageBytes,
-  });
 
   _ExtractedImage? extract(String rawReference, {required String relativeTo}) {
     final reference = rawReference.trim();
@@ -1673,37 +2750,51 @@ class _EpubImageStore {
     if (lowerReference.startsWith('data:image/')) {
       return _extractDataImage(reference);
     }
-    final parsedReference = Uri.tryParse(reference);
-    if (parsedReference?.hasScheme == true) return null;
-    final archivePath = _resolveArchiveReference(reference, relativeTo);
-    if (archivePath.isEmpty) return null;
-    return extractArchivePath(archivePath);
+    try {
+      final parsedReference = Uri.tryParse(reference);
+      if (parsedReference?.hasScheme == true) return null;
+      final archivePath = _resolveArchiveReference(reference, relativeTo);
+      if (archivePath.isEmpty) return null;
+      return extractArchivePath(archivePath);
+    } on Object {
+      return null;
+    }
   }
 
   _ExtractedImage? extractArchivePath(String rawArchivePath) {
-    final archivePath = _normalizeArchivePath(rawArchivePath);
-    if (archivePath.isEmpty) return null;
+    final requestedPath = _normalizeArchivePath(rawArchivePath);
+    if (requestedPath.isEmpty) return null;
+    final archivePath =
+        archiveLookup.canonicalPath(requestedPath) ?? requestedPath;
+    if (_isEncryptedPath(archivePath, archiveLookup, encryptedPaths)) {
+      return null;
+    }
     return _cache.putIfAbsent(archivePath, () {
-      final file = _findArchiveFile(archiveFiles, archivePath);
-      if (file == null || file.size <= 0 || file.size > maxSingleImageBytes) {
+      try {
+        final file = archiveLookup.find(archivePath);
+        if (file == null || file.size <= 0 || file.size > maxSingleImageBytes) {
+          return null;
+        }
+        final bytes = Uint8List.fromList(_bytesOf(file));
+        final extension = _safeImageExtension(archivePath, bytes);
+        if (extension == null) return null;
+        final encodedName = base64Url
+            .encode(utf8.encode(archivePath))
+            .replaceAll('=', '');
+        final target = File(
+          p.join(outputDirectory.path, '$encodedName$extension'),
+        );
+        target.writeAsBytesSync(bytes);
+        final dimensions = _imageDimensions(bytes, extension);
+        return _ExtractedImage(
+          target.path,
+          dimensions?.width,
+          dimensions?.height,
+        );
+      } on Object {
+        // A corrupt single image is an omitted illustration, not a failed book.
         return null;
       }
-      final bytes = Uint8List.fromList(_bytesOf(file));
-      final extension = _safeImageExtension(archivePath, bytes);
-      if (extension == null) return null;
-      final encodedName = base64Url
-          .encode(utf8.encode(archivePath))
-          .replaceAll('=', '');
-      final target = File(
-        p.join(outputDirectory.path, '$encodedName$extension'),
-      );
-      target.writeAsBytesSync(bytes);
-      final dimensions = _imageDimensions(bytes, extension);
-      return _ExtractedImage(
-        target.path,
-        dimensions?.width,
-        dimensions?.height,
-      );
     });
   }
 
@@ -1733,21 +2824,28 @@ class _EpubImageStore {
       final key =
           'data:${base64Url.encode(bytes.take(math.min(48, bytes.length)).toList())}:${bytes.length}';
       return _cache.putIfAbsent(key, () {
-        final target = File(
-          p.join(outputDirectory.path, 'inline_${_dataImageIndex++}$extension'),
-        );
-        target.writeAsBytesSync(bytes);
-        final dimensions = _imageDimensions(
-          Uint8List.fromList(bytes),
-          extension,
-        );
-        return _ExtractedImage(
-          target.path,
-          dimensions?.width,
-          dimensions?.height,
-        );
+        try {
+          final target = File(
+            p.join(
+              outputDirectory.path,
+              'inline_${_dataImageIndex++}$extension',
+            ),
+          );
+          target.writeAsBytesSync(bytes);
+          final dimensions = _imageDimensions(
+            Uint8List.fromList(bytes),
+            extension,
+          );
+          return _ExtractedImage(
+            target.path,
+            dimensions?.width,
+            dimensions?.height,
+          );
+        } on Object {
+          return null;
+        }
       });
-    } on FormatException {
+    } on Object {
       return null;
     }
   }
@@ -1892,7 +2990,7 @@ String? _safeImageExtension(String pathOrMime, Uint8List bytes) {
         );
       }
     }
-  } on RangeError {
+  } on Object {
     return null;
   }
   return null;
@@ -1933,18 +3031,29 @@ String _resolveArchiveReference(
   return normalized;
 }
 
-Iterable<XmlElement> _elementsNamed(XmlNode node, String localName) => node
-    .descendants
-    .whereType<XmlElement>()
-    .where((element) => element.name.local == localName);
+Iterable<XmlElement> _elementsNamed(XmlNode node, String localName) sync* {
+  final exact = node.descendants.whereType<XmlElement>().where(
+    (element) => element.name.local == localName,
+  );
+  if (exact.isNotEmpty) {
+    yield* exact;
+    return;
+  }
+  // The lenient HTML fallback lowercases element names. Only when the exact
+  // XML name is absent do we accept the case-folded spelling; an NCX repaired
+  // this way must still yield navMap/navPoint/navLabel.
+  final lower = localName.toLowerCase();
+  yield* node.descendants.whereType<XmlElement>().where(
+    (element) => element.name.local.toLowerCase() == lower,
+  );
+}
+
+bool _xmlNameIs(XmlElement element, String localName) =>
+    element.name.local == localName ||
+    element.name.local.toLowerCase() == localName.toLowerCase();
 
 String _firstElementText(XmlDocument document, String localName) =>
     _elementsNamed(document, localName).firstOrNull?.innerText.trim() ?? '';
-
-ArchiveFile? _findArchiveFile(
-  Map<String, ArchiveFile> archiveFiles,
-  String requestedPath,
-) => archiveFiles[_normalizeArchivePath(requestedPath)];
 
 String _safeDecodeUriComponent(String value) {
   try {
@@ -1954,54 +3063,94 @@ String _safeDecodeUriComponent(String value) {
   }
 }
 
+/// Normalizes a container-internal ZIP path.
+///
+/// A leading slash means the container root, never the device filesystem.
+/// Parent traversal is rejected by [_resolveArchiveReference] before lookup.
 String _normalizeArchivePath(String value) {
-  var normalized = p.posix.normalize(value.replaceAll('\\', '/'));
+  var normalized = value.replaceAll('\\', '/');
+  if (normalized.isEmpty) return '';
+  normalized = p.posix.normalize(normalized);
   while (normalized.startsWith('/')) {
     normalized = normalized.substring(1);
   }
+  if (normalized == '.') return '';
   return normalized;
 }
 
 List<int> _bytesOf(ArchiveFile file) {
   try {
     return file.content;
-  } on FormatException {
+  } on Object {
     throw FormatException('EPUB 条目已损坏：${file.name}');
   }
 }
 
-XmlDocument _parseXml(ArchiveFile file, String label) {
+XmlDocument _parseXml(ArchiveFile file, String label, {bool lenient = false}) {
+  final text = decodeEpubMarkup(_bytesOf(file));
   try {
-    return XmlDocument.parse(_decodeMarkup(_bytesOf(file)));
+    return XmlDocument.parse(text);
   } on XmlException {
+    if (lenient) {
+      final repaired = _parseXmlThroughHtml(text);
+      if (repaired != null) return repaired;
+    }
     throw FormatException('$label 格式错误，无法解析 EPUB');
   }
 }
 
-String _decodeMarkup(List<int> bytes) {
-  if (bytes.length >= 2 && bytes[0] == 0xff && bytes[1] == 0xfe) {
-    return _decodeUtf16(bytes.sublist(2), Endian.little);
+/// Last-resort repair for package documents with mismatched tags.
+///
+/// Exact XML is tried first. Only after it fails do we let the HTML parser
+/// repair the tree, then rebuild a minimal XML document for the existing
+/// local-name lookups. Prefixes are dropped from names because the parser only
+/// reads local names (title, item, itemref, navPoint, content, ...).
+XmlDocument? _parseXmlThroughHtml(String text) {
+  try {
+    final document = html_parser.parse(text);
+    final builder = XmlBuilder();
+    void copyNode(Node node) {
+      if (node is Text) {
+        builder.text(node.data);
+        return;
+      }
+      if (node is! Element) return;
+      final attributes = <String, String>{};
+      node.attributes.forEach((key, value) {
+        final name = _xmlSafeName(key.toString());
+        if (name.isNotEmpty) attributes[name] = value;
+      });
+      builder.element(
+        _xmlSafeName(node.localName ?? ''),
+        attributes: attributes,
+        nest: () {
+          for (final child in node.nodes) {
+            copyNode(child);
+          }
+        },
+      );
+    }
+
+    for (final node in document.nodes) {
+      copyNode(node);
+    }
+    return builder.buildDocument();
+  } on Object {
+    return null;
   }
-  if (bytes.length >= 2 && bytes[0] == 0xfe && bytes[1] == 0xff) {
-    return _decodeUtf16(bytes.sublist(2), Endian.big);
-  }
-  var payload = bytes;
-  if (payload.length >= 3 &&
-      payload[0] == 0xef &&
-      payload[1] == 0xbb &&
-      payload[2] == 0xbf) {
-    payload = payload.sublist(3);
-  }
-  return utf8.decode(payload, allowMalformed: true);
 }
 
-String _decodeUtf16(List<int> bytes, Endian endian) {
-  final data = ByteData.sublistView(Uint8List.fromList(bytes));
-  final codeUnits = <int>[];
-  for (var offset = 0; offset + 1 < data.lengthInBytes; offset += 2) {
-    codeUnits.add(data.getUint16(offset, endian));
+String _xmlSafeName(String raw) {
+  var value = raw.trim();
+  if (value.isEmpty) return '';
+  final colon = value.indexOf(':');
+  if (colon >= 0 && colon + 1 < value.length) {
+    value = value.substring(colon + 1);
   }
-  return String.fromCharCodes(codeUnits);
+  value = value.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
+  if (value.isEmpty) return '';
+  if (RegExp(r'^[0-9.-]').hasMatch(value)) return 'n_$value';
+  return value;
 }
 
 String? _extractDocumentTitle(Document document) {
