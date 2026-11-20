@@ -101,7 +101,19 @@ class EpubLinkTarget {
   /// Block the fragment resolved to, or -1 when only the chapter is known.
   final int blockIndex;
 
-  const EpubLinkTarget({required this.chapterIndex, this.blockIndex = -1});
+  /// Set for a link that came from a directory-style row.
+  ///
+  /// The target of such a row is a destination the reader chose, so the reader
+  /// jumps to it instead of showing the short-target footnote preview. Links in
+  /// ordinary prose keep their preview. Older payloads omit the flag and mean
+  /// false.
+  final bool needDirectJump;
+
+  const EpubLinkTarget({
+    required this.chapterIndex,
+    this.blockIndex = -1,
+    this.needDirectJump = false,
+  });
 
   bool get hasBlock => blockIndex >= 0;
 }
@@ -134,6 +146,22 @@ class EpubContentBlock {
   /// block. Footnote bodies carry the id that the marker in the text points at.
   final List<String> anchorIds;
 
+  /// UTF-16 offset in [text] where a table row's right-hand cell starts.
+  ///
+  /// Only a simple two-column row whose right cell carries a page number gets
+  /// this metadata. [text] remains the complete readable line (the separator is
+  /// the character before this offset), so search, copying and plain-text
+  /// fallbacks need no special case. The reader may then draw the trailing cell
+  /// as a narrow, end-aligned column. Null on every ordinary block.
+  final int? trailingCellStart;
+
+  /// Relative width of the trailing cell in em of the reader's base font.
+  ///
+  /// The parser resolves a publisher width against the cell's own font size and
+  /// stores the effective value, so layout only multiplies by the reader's font
+  /// size. Null when the row has no trailing-cell metadata.
+  final double? trailingCellWidthEm;
+
   const EpubContentBlock({
     required this.kind,
     this.text = '',
@@ -145,11 +173,21 @@ class EpubContentBlock {
     this.imageHeight,
     this.style = const EpubContentStyle(),
     this.anchorIds = const <String>[],
+    this.trailingCellStart,
+    this.trailingCellWidthEm,
   });
 
   bool get isText => kind == EpubContentBlockKind.text;
   bool get isImage => kind == EpubContentBlockKind.image;
   bool get hasLinks => runs.any((run) => run.link != null);
+
+  /// Whether this block carries a right-hand table cell that the reader can
+  /// lay out as its own narrow column.
+  bool get hasTrailingCell =>
+      isText &&
+      trailingCellStart != null &&
+      trailingCellStart! > 0 &&
+      trailingCellStart! < text.length;
 
   EpubContentBlock withRuns(List<EpubTextRun> replacement) => EpubContentBlock(
     kind: kind,
@@ -162,6 +200,8 @@ class EpubContentBlock {
     imageHeight: imageHeight,
     style: style,
     anchorIds: anchorIds,
+    trailingCellStart: trailingCellStart,
+    trailingCellWidthEm: trailingCellWidthEm,
   );
 }
 

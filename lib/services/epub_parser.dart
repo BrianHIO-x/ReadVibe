@@ -296,6 +296,7 @@ Book _parseEpubSync(
     pendingLinks: assembler.pendingLinks,
     chapterIndexByPath: assembler.chapterIndexByPath,
     anchorLocations: assembler.anchorLocations,
+    navigationBlocks: assembler.navigationBlocks,
   );
 
   final fallbackTitle = fileName
@@ -405,11 +406,21 @@ class _SpineDocument {
 }
 
 class _LoadedDocument {
-  const _LoadedDocument(this.blocks, this.linkHrefs, this.documentTitle);
+  const _LoadedDocument(
+    this.blocks,
+    this.linkHrefs,
+    this.documentTitle, {
+    this.navigationBlocks = const <int>{},
+  });
 
   final List<EpubContentBlock> blocks;
   final Map<int, Map<int, String>> linkHrefs;
   final String? documentTitle;
+
+  /// Blocks this document recognized as directory rows. Links collected from
+  /// one of these rows jump straight to their destination instead of opening
+  /// the footnote preview.
+  final Set<int> navigationBlocks;
 }
 
 class _ChapterPlan {
@@ -453,6 +464,7 @@ class _EpubBookAssembler {
       <String, _AnchorLocation>{};
   final Map<int, Map<int, Map<int, String>>> pendingLinks =
       <int, Map<int, Map<int, String>>>{};
+  final Map<int, Set<int>> navigationBlocks = <int, Set<int>>{};
   final Set<String> _processedPaths = <String>{};
   final Set<String> _newReferences = <String>{};
   final Map<String, String> _cssDocumentCache = <String, String>{};
@@ -510,6 +522,7 @@ class _EpubBookAssembler {
             parsed.blocks,
             parsed.linkHrefs,
             _extractDocumentTitle(document),
+            navigationBlocks: parsed.navigationBlocks,
           );
         case _EpubDocumentKind.svg:
           loaded = _svgPageDocument(item.path, file, imageStore);
@@ -564,6 +577,17 @@ class _EpubBookAssembler {
             final path = hash < 0 ? href : href.substring(0, hash);
             if (path.isNotEmpty) _newReferences.add(path);
           }
+        }
+      }
+
+      if (loaded.navigationBlocks.isNotEmpty) {
+        final localNavigationBlocks = <int>{
+          for (final blockIndex in loaded.navigationBlocks)
+            if (blockIndex >= plan.start && blockIndex < plan.end)
+              blockIndex - plan.start,
+        };
+        if (localNavigationBlocks.isNotEmpty) {
+          navigationBlocks[chapterIndex] = localNavigationBlocks;
         }
       }
 
@@ -826,6 +850,7 @@ void _resolveEpubLinks(
   required Map<int, Map<int, Map<int, String>>> pendingLinks,
   required Map<String, int> chapterIndexByPath,
   required Map<String, _AnchorLocation> anchorLocations,
+  required Map<int, Set<int>> navigationBlocks,
 }) {
   for (final entry in pendingLinks.entries) {
     final chapter = chapters[entry.key];
@@ -844,6 +869,8 @@ void _resolveEpubLinks(
           runEntry.value,
           chapterIndexByPath: chapterIndexByPath,
           anchorLocations: anchorLocations,
+          needDirectJump:
+              navigationBlocks[entry.key]?.contains(blockIndex) ?? false,
         );
         if (target == null) continue;
         runs[runIndex] = runs[runIndex].withLink(target);
@@ -868,19 +895,29 @@ EpubLinkTarget? _epubLinkTarget(
   String href, {
   required Map<String, int> chapterIndexByPath,
   required Map<String, _AnchorLocation> anchorLocations,
+  required bool needDirectJump,
 }) {
   final hashIndex = href.indexOf('#');
   final path = hashIndex < 0 ? href : href.substring(0, hashIndex);
   final firstChapter = chapterIndexByPath[path];
   if (firstChapter == null) return null;
-  if (hashIndex < 0) return EpubLinkTarget(chapterIndex: firstChapter);
+  if (hashIndex < 0) {
+    return EpubLinkTarget(
+      chapterIndex: firstChapter,
+      needDirectJump: needDirectJump,
+    );
+  }
   final location = anchorLocations[href];
   if (location == null) {
-    return EpubLinkTarget(chapterIndex: firstChapter);
+    return EpubLinkTarget(
+      chapterIndex: firstChapter,
+      needDirectJump: needDirectJump,
+    );
   }
   return EpubLinkTarget(
     chapterIndex: location.chapterIndex,
     blockIndex: location.blockIndex,
+    needDirectJump: needDirectJump,
   );
 }
 
@@ -1548,7 +1585,10 @@ class _ParsedDocument {
   /// blockIndex -> runIndex -> normalized `path` or `path#fragment`.
   final Map<int, Map<int, String>> linkHrefs;
 
-  const _ParsedDocument(this.blocks, this.linkHrefs);
+  /// Blocks recognized as directory rows with a trailing page number.
+  final Set<int> navigationBlocks;
+
+  const _ParsedDocument(this.blocks, this.linkHrefs, this.navigationBlocks);
 }
 
 _ParsedDocument _documentToBlocks(
@@ -1560,9 +1600,12 @@ _ParsedDocument _documentToBlocks(
 ) {
   final blocks = <EpubContentBlock>[];
   final linkHrefs = <int, Map<int, String>>{};
+  final navigationBlocks = <int>{};
   final pendingAnchorIds = <String>[];
   final root = document.body ?? document.documentElement;
-  if (root == null) return _ParsedDocument(blocks, linkHrefs);
+  if (root == null) {
+    return _ParsedDocument(blocks, linkHrefs, navigationBlocks);
+  }
 
   void noteAnchorId(Element element) {
     var id = element.attributes['id']?.trim();
@@ -1755,7 +1798,11 @@ _ParsedDocument _documentToBlocks(
         }
       }
       noteAnchorId(node);
-      if (tag == 'br' || tag == 'hr') collector.add(' ', style, href: href);
+      if (tag == 'br') {
+        collector.addHardBreak(style, href: href);
+      } else if (tag == 'hr') {
+        collector.add(' ', style, href: href);
+      }
       // An anchor nested inside another anchor is malformed markup; the
       // innermost href wins, matching how browsers resolve the same document.
       final childHref = tag == 'a'
@@ -1776,10 +1823,227 @@ _ParsedDocument _documentToBlocks(
     flushText();
   }
 
-  void walk(Element element, EpubContentStyle inheritedStyle) {
+  // Declared up front so the table helpers below can walk fallback content
+  // that includes nested tables and other blocks.
+  late void Function(Element element, EpubContentStyle inheritedStyle) walk;
+
+  /// Collects one simple table row into a single readable text block.
+  ///
+  /// A row stays on this path only while its cells hold inline content. Rows
+  /// with nested tables, images or block-level cells fall back to walking each
+  /// cell, because those elements cannot live inside one paragraph.
+  void appendTableRow(Element row, EpubContentStyle inheritedStyle) {
+    if (resolver.isHidden(row)) return;
+    noteAnchorId(row);
+    final rowStyle = resolver.styleFor(row, inherited: inheritedStyle);
+    final cells = <Element>[
+      for (final child in row.children)
+        if ((child.localName == 'td' || child.localName == 'th') &&
+            !resolver.isHidden(child))
+          child,
+    ];
+    if (cells.isEmpty) {
+      for (final node in row.nodes) {
+        if (node is Text) {
+          appendDirectText(node.data, rowStyle);
+        } else if (node is Element) {
+          walk(node, rowStyle);
+        }
+      }
+      return;
+    }
+    final hasDirectText = row.nodes.whereType<Text>().any(
+      (node) => node.data.trim().isNotEmpty,
+    );
+    if (hasDirectText || cells.any(_cellNeedsBlockWalk)) {
+      // The row is a container, never a leaf: walk its cells in document order
+      // so nested tables keep their own rows and images keep their own blocks.
+      for (final node in row.nodes) {
+        if (node is Text) {
+          appendDirectText(node.data, rowStyle);
+        } else if (node is Element) {
+          if (_nonContentElements.contains(node.localName)) continue;
+          walk(node, rowStyle);
+        }
+      }
+      return;
+    }
+
+    final cellStyles = <EpubContentStyle>[];
+    final cellTexts = <String>[];
+    final cellRuns = <List<_RawRun>>[];
+    for (final cell in cells) {
+      final cellStyle = resolver.styleFor(cell, inherited: rowStyle);
+      cellStyles.add(cellStyle);
+      noteAnchorId(cell);
+      final collector = _EpubRunCollector();
+
+      void visitInline(Node node, EpubContentStyle style, String? href) {
+        if (node is Text) {
+          collector.add(node.data, style, href: href);
+          return;
+        }
+        if (node is! Element || resolver.isHidden(node)) return;
+        final tag = node.localName;
+        if (_nonContentElements.contains(tag)) return;
+        noteAnchorId(node);
+        if (tag == 'br') {
+          collector.addHardBreak(style, href: href);
+          return;
+        }
+        if (tag == 'hr') {
+          collector.add(' ', style, href: href);
+          return;
+        }
+        if (_mediaElements.contains(tag)) return;
+        final childHref = tag == 'a'
+            ? (resolveLinkHref(_htmlAttribute(node, 'href') ?? '') ?? href)
+            : href;
+        // The cell style is already the resolved cascade. Passing it straight
+        // through keeps publisher font-size/weight on the cell's own runs.
+        final childStyle = resolver.styleFor(node, inherited: style);
+        for (final child in node.nodes) {
+          visitInline(child, childStyle, childHref);
+        }
+      }
+
+      for (final child in cell.nodes) {
+        visitInline(child, cellStyle, null);
+      }
+      final collected = collector.finish();
+      cellTexts.add(collected?.text ?? '');
+      cellRuns.add(collected?.runs ?? const <_RawRun>[]);
+    }
+
+    final blockStyle = _tableRowBlockStyle(
+      resolver: resolver,
+      rowStyle: rowStyle,
+      cells: cells,
+      cellStyles: cellStyles,
+    );
+    final buffer = StringBuffer();
+    final rawRuns = <_RawRun>[];
+    var wroteCell = false;
+    var lastCellStart = -1;
+    for (var index = 0; index < cells.length; index++) {
+      final cellText = cellTexts[index];
+      if (cellText.isEmpty) continue;
+      if (wroteCell) {
+        buffer.write(' ');
+        rawRuns.add(_RawRun(' ', blockStyle, null));
+      }
+      lastCellStart = buffer.length;
+      buffer.write(cellText);
+      rawRuns.addAll(cellRuns[index]);
+      wroteCell = true;
+    }
+    final text = buffer.toString();
+    if (text.isEmpty) return;
+
+    int? trailingCellStart;
+    double? trailingCellWidthEm;
+    if (cells.length == 2 &&
+        cellTexts[0].isNotEmpty &&
+        cellTexts[1].isNotEmpty &&
+        lastCellStart > 0 &&
+        lastCellStart < text.length &&
+        _isPageNumberText(cellTexts[1])) {
+      final widthEm = _tableCellWidthEm(resolver, cells[1], cellStyles[1]);
+      final endAligned = cellStyles[1].textAlign == 'end';
+      if (endAligned || widthEm != null) {
+        trailingCellStart = lastCellStart;
+        trailingCellWidthEm = math
+            .max(
+              widthEm ?? 0,
+              _estimatedTrailingCellWidthEm(cellTexts[1], cellStyles[1]),
+            )
+            .clamp(1.5, 16)
+            .toDouble();
+      }
+    }
+
+    final compact = _compactRuns(rawRuns, blockStyle);
+    final hrefs = <int, String>{};
+    for (var index = 0; index < compact.length; index++) {
+      final href = compact[index].href;
+      if (href != null) hrefs[index] = href;
+    }
+    if (hrefs.isNotEmpty) linkHrefs[blocks.length] = hrefs;
+    blocks.add(
+      EpubContentBlock(
+        kind: EpubContentBlockKind.text,
+        text: text,
+        runs: List<EpubTextRun>.unmodifiable(<EpubTextRun>[
+          for (final run in compact)
+            EpubTextRun(text: run.text, style: run.style),
+        ]),
+        style: blockStyle,
+        anchorIds: drainAnchorIds(),
+        trailingCellStart: trailingCellStart,
+        trailingCellWidthEm: trailingCellStart == null
+            ? null
+            : trailingCellWidthEm,
+      ),
+    );
+    if (hrefs.isNotEmpty && trailingCellStart != null) {
+      navigationBlocks.add(blocks.length - 1);
+    }
+  }
+
+  /// Walks a table in document order, keeping captions, sections and rows.
+  void walkTable(Element table, EpubContentStyle inheritedStyle) {
+    final style = resolver.styleFor(table, inherited: inheritedStyle);
+    for (final node in table.nodes) {
+      if (node is Text) {
+        appendDirectText(node.data, style);
+        continue;
+      }
+      if (node is! Element) continue;
+      final tag = node.localName;
+      if (tag == 'caption') {
+        walk(node, style);
+        continue;
+      }
+      if (tag == 'thead' || tag == 'tbody' || tag == 'tfoot') {
+        if (resolver.isHidden(node)) continue;
+        noteAnchorId(node);
+        final sectionStyle = resolver.styleFor(node, inherited: style);
+        for (final rowNode in node.nodes) {
+          if (rowNode is Text) {
+            appendDirectText(rowNode.data, sectionStyle);
+            continue;
+          }
+          if (rowNode is! Element) continue;
+          if (rowNode.localName == 'tr') {
+            appendTableRow(rowNode, sectionStyle);
+          } else if (!_nonContentElements.contains(rowNode.localName)) {
+            walk(rowNode, sectionStyle);
+          }
+        }
+        continue;
+      }
+      if (tag == 'tr') {
+        appendTableRow(node, style);
+        continue;
+      }
+      if (tag == 'colgroup' || tag == 'col') continue;
+      if (_nonContentElements.contains(tag)) continue;
+      walk(node, style);
+    }
+  }
+
+  walk = (Element element, EpubContentStyle inheritedStyle) {
     if (resolver.isHidden(element)) return;
     noteAnchorId(element);
     final style = resolver.styleFor(element, inherited: inheritedStyle);
+    if (element.localName == 'table') {
+      walkTable(element, inheritedStyle);
+      return;
+    }
+    if (element.localName == 'tr') {
+      appendTableRow(element, inheritedStyle);
+      return;
+    }
     if (element.localName == 'img' || element.localName == 'image') {
       appendImage(element, inheritedStyle);
       return;
@@ -1816,10 +2080,205 @@ _ParsedDocument _documentToBlocks(
         walk(node, style);
       }
     }
-  }
+  };
 
   walk(root, const EpubContentStyle(textIndentEm: 0));
-  return _ParsedDocument(blocks, linkHrefs);
+  return _ParsedDocument(blocks, linkHrefs, navigationBlocks);
+}
+
+/// Elements that force a table row onto the per-cell fallback path.
+///
+/// A simple row is one text block, so it can only hold inline content. Any
+/// block-level or replaced element inside a cell would be lost by that path;
+/// walking the cell instead preserves the nested table, image or paragraph.
+const _tableRowComplexElements = <String>{
+  'address',
+  'article',
+  'aside',
+  'audio',
+  'blockquote',
+  'canvas',
+  'dd',
+  'div',
+  'dl',
+  'dt',
+  'embed',
+  'fieldset',
+  'figcaption',
+  'figure',
+  'footer',
+  'form',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'header',
+  'hr',
+  'iframe',
+  'image',
+  'img',
+  'li',
+  'main',
+  'nav',
+  'object',
+  'ol',
+  'p',
+  'pre',
+  'section',
+  'svg',
+  'table',
+  'tbody',
+  'td',
+  'tfoot',
+  'th',
+  'thead',
+  'tr',
+  'ul',
+  'video',
+};
+
+const _nonContentElements = <String>{'head', 'script', 'style', 'title'};
+
+const _mediaElements = <String>{
+  'audio',
+  'canvas',
+  'embed',
+  'iframe',
+  'image',
+  'img',
+  'object',
+  'svg',
+  'video',
+};
+
+bool _cellNeedsBlockWalk(Element cell) {
+  bool scan(Element element) {
+    for (final child in element.children) {
+      if (_tableRowComplexElements.contains(child.localName)) return true;
+      if (scan(child)) return true;
+    }
+    return false;
+  }
+
+  return scan(cell);
+}
+
+/// The block style of a simple row, resolved from the row and its cells.
+///
+/// Chapter rows carry a bold face and top padding, section rows indent their
+/// first cell. Both are presentation only: a directory row stays an ordinary
+/// text block and is never promoted to a semantic heading.
+EpubContentStyle _tableRowBlockStyle({
+  required _EpubStyleResolver resolver,
+  required EpubContentStyle rowStyle,
+  required List<Element> cells,
+  required List<EpubContentStyle> cellStyles,
+}) {
+  var fontWeight = 400;
+  var fontScale = 1.0;
+  var marginTopEm = rowStyle.marginTopEm;
+  for (var index = 0; index < cells.length; index++) {
+    final style = cellStyles[index];
+    fontWeight = math.max(fontWeight, style.fontWeight);
+    fontScale = math.max(fontScale, style.fontScale);
+    marginTopEm = math.max(
+      marginTopEm,
+      _resolvedPaddingEm(resolver, cells[index], 'top'),
+    );
+  }
+  final firstCell = cells.first;
+  final declaredIndent = resolver.propertyFor(firstCell, 'text-indent');
+  final indent = math.max(
+    _resolvedPaddingEm(resolver, firstCell, 'left'),
+    declaredIndent == null ? 0.0 : _emLength(declaredIndent, fallback: 0),
+  );
+  return EpubContentStyle(
+    fontFamily: rowStyle.fontFamily,
+    fontScale: fontScale.clamp(0.6, 2.5).toDouble(),
+    fontWeight: fontWeight.clamp(100, 900),
+    textAlign: 'start',
+    textIndentEm: indent.clamp(0, 8).toDouble(),
+    marginTopEm: marginTopEm.clamp(0, 2).toDouble(),
+    colorArgb: rowStyle.colorArgb,
+    backgroundColorArgb: rowStyle.backgroundColorArgb,
+    backgroundImagePath: rowStyle.backgroundImagePath,
+  );
+}
+
+double _resolvedPaddingEm(
+  _EpubStyleResolver resolver,
+  Element element,
+  String side,
+) {
+  final direct = resolver.propertyFor(element, 'padding-$side');
+  final shorthand = resolver.propertyFor(element, 'padding');
+  final raw =
+      direct ??
+      (shorthand == null ? null : _paddingShorthandValue(shorthand, side));
+  if (raw == null) return 0;
+  final value = _emLength(raw, fallback: 0);
+  return value.isFinite && value > 0 ? value : 0;
+}
+
+String? _paddingShorthandValue(String shorthand, String side) {
+  final parts = shorthand.trim().split(RegExp(r'\s+'));
+  if (parts.isEmpty) return null;
+  if (parts.length == 1) return parts[0];
+  if (parts.length == 2) {
+    return side == 'top' || side == 'bottom' ? parts[0] : parts[1];
+  }
+  if (parts.length == 3) {
+    if (side == 'top') return parts[0];
+    if (side == 'bottom') return parts[2];
+    return parts[1];
+  }
+  return switch (side) {
+    'top' => parts[0],
+    'right' => parts[1],
+    'bottom' => parts[2],
+    _ => parts[3],
+  };
+}
+
+/// A publisher width for a page-number cell, as em of the reader's base font.
+///
+/// Percentages are not a column width this reader can honor without the
+/// table's own width, so they are ignored and the row stays a plain line.
+double? _tableCellWidthEm(
+  _EpubStyleResolver resolver,
+  Element cell,
+  EpubContentStyle style,
+) {
+  final raw =
+      resolver.propertyFor(cell, 'width') ??
+      resolver.propertyFor(cell, 'min-width');
+  if (raw == null) return null;
+  final normalized = raw.trim().toLowerCase();
+  if (normalized.isEmpty ||
+      normalized == 'auto' ||
+      normalized == 'normal' ||
+      normalized.endsWith('%')) {
+    return null;
+  }
+  final value = _emLength(normalized, fallback: 0);
+  if (!value.isFinite || value < 1 || value > 16) return null;
+  return (value * style.fontScale.clamp(0.6, 2.0)).toDouble();
+}
+
+double _estimatedTrailingCellWidthEm(String text, EpubContentStyle style) {
+  final count = text.trim().length.clamp(1, 7);
+  final scale = style.fontScale.clamp(0.6, 2.0);
+  return (count * 0.62 * scale + 0.4).clamp(2.0, 6.0).toDouble();
+}
+
+bool _isPageNumberText(String text) {
+  final value = text.trim();
+  if (value.isEmpty || value.length > 16) return false;
+  return RegExp(
+    r'^(?:[0-9０-９]+(?:\s*[-–—~〜]\s*[0-9０-９]+)?|[ivxlcdmIVXLCDM]{1,7})$',
+  ).hasMatch(value);
 }
 
 String? _firstSrcsetCandidate(String? raw) {
@@ -1853,6 +2312,7 @@ const _blockElements = <String>{
   'article',
   'aside',
   'blockquote',
+  'caption',
   'dd',
   'div',
   'dt',
@@ -1871,8 +2331,12 @@ const _blockElements = <String>{
   'p',
   'pre',
   'section',
+  'table',
+  'tbody',
   'td',
+  'tfoot',
   'th',
+  'thead',
   'tr',
 };
 
@@ -1948,6 +2412,8 @@ bool _promoteMatchingLeadingTitle(
       imageWidth: block.imageWidth,
       imageHeight: block.imageHeight,
       anchorIds: block.anchorIds,
+      trailingCellStart: block.trailingCellStart,
+      trailingCellWidthEm: block.trailingCellWidthEm,
       style: EpubContentStyle(
         fontFamily: style.fontFamily,
         fontScale: math.max(1.2, style.fontScale),
@@ -2115,11 +2581,44 @@ class _EpubRunCollector {
     _endsWithSpace = text.endsWith(' ');
   }
 
+  /// Records an explicit author line break.
+  ///
+  /// A `<br>` is content, not spacing between words: keeping it as a newline
+  /// preserves the line while the runs, their links and every text offset still
+  /// describe the same visible paragraph.
+  void addHardBreak(EpubContentStyle style, {String? href}) {
+    if (!_hasText || _runs.isEmpty) return;
+    final last = _runs.last;
+    final trimmed = last.text.replaceFirst(RegExp(r' +$'), '');
+    if (trimmed != last.text) {
+      if (trimmed.isEmpty) {
+        _runs.removeLast();
+      } else {
+        _runs[_runs.length - 1] = last.withText(trimmed);
+      }
+    }
+    _runs.add(_RawRun('\n', style, href));
+    _endsWithSpace = true;
+  }
+
   _CollectedRuns? finish() {
     if (_runs.isEmpty) return null;
-    final last = _runs.removeLast();
-    final lastText = last.text.trimRight();
-    if (lastText.isNotEmpty) _runs.add(last.withText(lastText));
+    // Drop every trailing whitespace run, not only the last one. Two <br> at
+    // the end of a cell leave two newline runs, while the visible text ends
+    // before them; keeping one would make the runs and the text disagree.
+    while (_runs.isNotEmpty) {
+      final last = _runs.last;
+      final trimmed = last.text.trimRight();
+      if (trimmed.isEmpty) {
+        _runs.removeLast();
+        continue;
+      }
+      if (trimmed != last.text) {
+        _runs[_runs.length - 1] = last.withText(trimmed);
+      }
+      break;
+    }
+    if (_runs.isEmpty) return null;
     final text = _runs.map((run) => run.text).join().trim();
     if (text.isEmpty) return null;
     return _CollectedRuns(text, List<_RawRun>.unmodifiable(_runs));
@@ -2379,8 +2878,12 @@ int _selectorSpecificity(String selector) {
 
 bool _matchesSelector(Element element, String rawSelector) {
   if (rawSelector.contains('+') || rawSelector.contains('~')) return false;
+  // Keep :first-child: a table row's chapter/section styling uses it to indent
+  // only the first cell. Every other pseudo-class is still ignored, exactly as
+  // before, so the ordinary cascade is unchanged.
   final selector = rawSelector
-      .replaceAll(RegExp(r'::?[\w-]+(?:\([^)]*\))?'), '')
+      .replaceAll(RegExp(r'::[\w-]+(?:\([^)]*\))?'), '')
+      .replaceAll(RegExp(r':(?!first-child\b)[\w-]+(?:\([^)]*\))?'), '')
       .replaceAll(RegExp(r'\[[^\]]+\]'), '')
       .trim();
   if (selector.isEmpty) return false;
@@ -2426,6 +2929,11 @@ bool _matchesSelector(Element element, String rawSelector) {
 
 bool _matchesCompoundSelector(Element element, String selector) {
   if (selector == '*') return true;
+  if (selector.contains(':first-child')) {
+    final parent = element.parent;
+    if (parent == null || parent.children.isEmpty) return false;
+    if (!identical(parent.children.first, element)) return false;
+  }
   final tag = RegExp(r'^[a-zA-Z][\w-]*').firstMatch(selector)?.group(0);
   if (tag != null &&
       (element.localName ?? '').toLowerCase() != tag.toLowerCase()) {

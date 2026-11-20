@@ -1498,6 +1498,36 @@ class _ReaderScreenState extends State<ReaderScreen>
           mode: mode,
           width: width,
         );
+        final row = _epubLayout.layoutTableRow(
+          block,
+          settings: settings,
+          mode: mode,
+          width: width,
+        );
+        if (row != null) {
+          // A directory row has two columns of different heights. The reading
+          // position is the left cell's line under the viewport's top edge;
+          // offsets past its end clamp to its last line.
+          try {
+            final localY = (safeOffset - cursor - metrics.leading)
+                .clamp(0.0, math.max(0.0, row.contentHeight - 0.01))
+                .toDouble();
+            final leftHeight = row.leftPainter.height;
+            final leftY = localY
+                .clamp(0.0, math.max(0.0, leftHeight - 0.01))
+                .toDouble();
+            final leftOffset = leftHeight <= 0
+                ? 0
+                : row.leftPainter.getPositionForOffset(Offset(0, leftY)).offset;
+            return ReadingTextAnchor(
+              chapterIndex: chapter.index,
+              paragraphIndex: paragraphIndex,
+              characterOffset: row.clampLeftOffset(leftOffset),
+            );
+          } finally {
+            row.dispose();
+          }
+        }
         final painter = _epubLayout.layoutTextBlock(
           block,
           settings: settings,
@@ -1552,6 +1582,26 @@ class _ReaderScreenState extends State<ReaderScreen>
       );
       if (block.isText && block.text.trim().isNotEmpty) {
         if (paragraphIndex == anchor.paragraphIndex) {
+          final row = _epubLayout.layoutTableRow(
+            block,
+            settings: settings,
+            mode: mode,
+            width: width,
+          );
+          if (row != null) {
+            // The offset lands in the left cell, the right cell, or the
+            // separator between them; the row maps each to its own column.
+            try {
+              final paragraph = _epubLayout.formatParagraph(block);
+              return cursor +
+                  metrics.leading +
+                  row.caretDyForOffset(
+                    anchor.characterOffset.clamp(0, paragraph.length),
+                  );
+            } finally {
+              row.dispose();
+            }
+          }
           final painter = _epubLayout.layoutTextBlock(
             block,
             settings: settings,
@@ -3427,7 +3477,11 @@ class _ReaderScreenState extends State<ReaderScreen>
       _showReaderMessage('这个链接指向的位置不在本书内');
       return;
     }
-    final note = target.hasBlock ? _epubLinkPreview(target) : null;
+    // A directory row is a destination, not an annotation reference: jump
+    // without showing its short target in a note sheet.
+    final note = target.hasBlock && !target.needDirectJump
+        ? _epubLinkPreview(target)
+        : null;
     if (note == null) {
       _jumpToEpubLink(target);
       return;
@@ -3515,6 +3569,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     final block = blocks[target.blockIndex];
     if (!block.isText) return null;
+    // A chapter or section heading is a destination even when its target was
+    // recorded without the directory flag; old books keep working this way.
+    if (block.isHeading) return null;
     final text = block.text.trim();
     if (text.isEmpty || text.length > _footnotePreviewLimit) return null;
     return text;

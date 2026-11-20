@@ -26,6 +26,130 @@ class EpubBlockLayoutMetrics {
   });
 }
 
+/// Column geometry of a directory-style table row.
+///
+/// The same values drive measurement, page-mode item extents and drawing, so a
+/// row cannot measure as one width and paint at another.
+class EpubTableRowGeometry {
+  /// Width of the left cell, which keeps wrapping naturally.
+  final double leftWidth;
+
+  /// Width of the narrow, end-aligned trailing cell.
+  final double rightWidth;
+
+  /// Gap that separates the two columns.
+  final double gap;
+
+  /// Offset in the formatted paragraph where the trailing cell starts.
+  final int trailingStart;
+
+  const EpubTableRowGeometry({
+    required this.leftWidth,
+    required this.rightWidth,
+    required this.gap,
+    required this.trailingStart,
+  });
+}
+
+/// A measured directory row: two painters that share one block layout.
+class EpubTableRowLayout {
+  const EpubTableRowLayout({
+    required this.geometry,
+    required this.leftPainter,
+    required this.rightPainter,
+    required this.leftTextLength,
+    required this.rightTextLength,
+    required this.trailingStart,
+  });
+
+  final EpubTableRowGeometry geometry;
+  final TextPainter leftPainter;
+  final TextPainter rightPainter;
+  final int leftTextLength;
+  final int rightTextLength;
+  final int trailingStart;
+
+  /// A row is as tall as its taller cell; both columns are top-aligned.
+  double get contentHeight => math.max(leftPainter.height, rightPainter.height);
+
+  /// Maps a left-column caret offset back into the block's formatted text.
+  int clampLeftOffset(int offset) => offset.clamp(0, leftTextLength).toInt();
+
+  /// The vertical caret position for [formattedOffset] in this row.
+  ///
+  /// Offsets inside the trailing cell are resolved against its own painter;
+  /// the separator between the cells belongs to neither column and falls back
+  /// to the top of the row.
+  double caretDyForOffset(int formattedOffset) {
+    if (formattedOffset <= leftTextLength) {
+      return leftPainter
+          .getOffsetForCaret(
+            TextPosition(offset: formattedOffset.clamp(0, leftTextLength)),
+            Rect.zero,
+          )
+          .dy;
+    }
+    if (formattedOffset >= trailingStart) {
+      return rightPainter
+          .getOffsetForCaret(
+            TextPosition(
+              offset: (formattedOffset - trailingStart).clamp(
+                0,
+                rightTextLength,
+              ),
+            ),
+            Rect.zero,
+          )
+          .dy;
+    }
+    return 0;
+  }
+
+  void dispose() {
+    leftPainter.dispose();
+    rightPainter.dispose();
+  }
+}
+
+class _EpubRowRun {
+  const _EpubRowRun({
+    required this.start,
+    required this.text,
+    required this.style,
+    required this.link,
+    required this.runIndex,
+  });
+
+  /// Offset in the block's formatted paragraph.
+  final int start;
+  final String text;
+  final EpubContentStyle style;
+  final EpubLinkTarget? link;
+
+  /// Index into the block's persisted run list, or -1 for the indent prefix.
+  final int runIndex;
+}
+
+class _EpubRowTextParts {
+  const _EpubRowTextParts({
+    required this.leftRuns,
+    required this.leftRunIndexes,
+    required this.rightRuns,
+    required this.rightRunIndexes,
+    required this.leftTextLength,
+    required this.rightTextLength,
+    required this.trailingStart,
+  });
+
+  final List<EpubTextRun> leftRuns;
+  final List<int> leftRunIndexes;
+  final List<EpubTextRun> rightRuns;
+  final List<int> rightRunIndexes;
+  final int leftTextLength;
+  final int rightTextLength;
+  final int trailingStart;
+}
+
 /// EPUB-specific text layout and rich-block rendering.
 ///
 /// The reader owns navigation and viewport state; this engine owns the EPUB
@@ -95,14 +219,25 @@ class ReaderEpubLayout {
     if (block.isImage) {
       content = imageHeight(block, width: width, settings: settings);
     } else {
-      final painter = layoutTextBlock(
+      final row = layoutTableRow(
         block,
         settings: settings,
         mode: mode,
         width: width,
       );
-      content = painter.height;
-      painter.dispose();
+      if (row != null) {
+        content = row.contentHeight;
+        row.dispose();
+      } else {
+        final painter = layoutTextBlock(
+          block,
+          settings: settings,
+          mode: mode,
+          width: width,
+        );
+        content = painter.height;
+        painter.dispose();
+      }
     }
     var total = leading + content + trailing;
     if (mode == ReaderReadingMode.simulation) {
@@ -159,6 +294,245 @@ class ReaderEpubLayout {
     required double width,
   }) => blockMetrics(block, settings: settings, mode: mode, width: width).total;
 
+  /// Column geometry for a directory-style row, or null when this block is a
+  /// normal line or the viewport is too narrow for two readable columns.
+  ///
+  /// Narrow screens fall back to the complete text line instead of squeezing
+  /// the title; that fallback is also what keeps older payloads unchanged.
+  EpubTableRowGeometry? tableRowGeometry(
+    EpubContentBlock block, {
+    required ReaderSettings settings,
+    required double width,
+  }) {
+    final parts = _rowTextParts(block);
+    if (parts == null) return null;
+    return _tableRowGeometryFor(block, parts, settings: settings, width: width);
+  }
+
+  EpubTableRowGeometry? _tableRowGeometryFor(
+    EpubContentBlock block,
+    _EpubRowTextParts parts, {
+    required ReaderSettings settings,
+    required double width,
+  }) {
+    // Columns are laid out in physical pixels, so the geometry uses the same
+    // scaled font size the painters and Text.rich widgets apply.
+    final fontSize = math.max(1.0, textScaler.scale(settings.fontSize));
+    final desiredRight = (block.trailingCellWidthEm ?? 3.2) * fontSize;
+    final gap = math.max(4.0, fontSize * 0.45);
+    if (!desiredRight.isFinite || desiredRight <= 0) return null;
+    // A right column wider than the reading measure cannot stay a column.
+    if (desiredRight > width * 0.42) return null;
+    final leftWidth = width - desiredRight - gap;
+    // Leave the left cell enough room for a real title; otherwise the whole row
+    // reads as an ordinary line.
+    final minimumLeft = math.max(fontSize * 7, width * 0.5);
+    if (leftWidth < minimumLeft) return null;
+    return EpubTableRowGeometry(
+      leftWidth: leftWidth,
+      rightWidth: desiredRight,
+      gap: gap,
+      trailingStart: parts.trailingStart,
+    );
+  }
+
+  /// Measures one trailing-cell row with the same geometry that draws it.
+  ///
+  /// The row's height is the taller of its cells. Callers own the painters and
+  /// must dispose the result.
+  EpubTableRowLayout? layoutTableRow(
+    EpubContentBlock block, {
+    required ReaderSettings settings,
+    required ReaderReadingMode mode,
+    required double width,
+  }) {
+    final parts = _rowTextParts(block);
+    if (parts == null) return null;
+    final geometry = _tableRowGeometryFor(
+      block,
+      parts,
+      settings: settings,
+      width: width,
+    );
+    if (geometry == null) return null;
+    final strutStyle = mode == ReaderReadingMode.simulation
+        ? _simulationStrutStyle(block, settings)
+        : null;
+    final leftPainter = TextPainter(
+      text: _textSpanForRuns(
+        parts.leftRuns,
+        parts.leftRunIndexes,
+        settings: settings,
+        foreground: Colors.black,
+        background: Colors.white,
+      ),
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.start,
+      textScaler: textScaler,
+      strutStyle: strutStyle,
+    )..layout(maxWidth: geometry.leftWidth);
+    final rightPainter = TextPainter(
+      text: _textSpanForRuns(
+        parts.rightRuns,
+        parts.rightRunIndexes,
+        settings: settings,
+        foreground: Colors.black,
+        background: Colors.white,
+      ),
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.end,
+      textScaler: textScaler,
+      strutStyle: strutStyle,
+    )..layout(maxWidth: geometry.rightWidth);
+    return EpubTableRowLayout(
+      geometry: geometry,
+      leftPainter: leftPainter,
+      rightPainter: rightPainter,
+      leftTextLength: parts.leftTextLength,
+      rightTextLength: parts.rightTextLength,
+      trailingStart: parts.trailingStart,
+    );
+  }
+
+  _EpubRowTextParts? _rowTextParts(EpubContentBlock block) {
+    if (!block.hasTrailingCell) return null;
+    final text = block.text;
+    final body = visibleParagraphBody(text);
+    if (body.isEmpty) return null;
+    final bodyStart = text.indexOf(body);
+    if (bodyStart < 0) return null;
+    final bodyEnd = bodyStart + body.length;
+    final trailingCellStart = block.trailingCellStart!;
+    if (trailingCellStart <= bodyStart || trailingCellStart >= bodyEnd) {
+      return null;
+    }
+    final formatted = formatParagraph(block);
+    final prefixLength = formatted.length - body.length;
+    final formattedTrailing = prefixLength + (trailingCellStart - bodyStart);
+    if (formattedTrailing <= 0 || formattedTrailing >= formatted.length) {
+      return null;
+    }
+    final rowRuns = _rowRuns(block, formatted, body, bodyStart);
+    if (rowRuns == null) return null;
+    var leftEnd = formattedTrailing;
+    while (leftEnd > 0 && _isRowSeparator(formatted.codeUnitAt(leftEnd - 1))) {
+      leftEnd--;
+    }
+    if (leftEnd <= 0) return null;
+    final leftRuns = <EpubTextRun>[];
+    final leftRunIndexes = <int>[];
+    final rightRuns = <EpubTextRun>[];
+    final rightRunIndexes = <int>[];
+    for (final run in rowRuns) {
+      final runStart = run.start;
+      final runEnd = runStart + run.text.length;
+      if (runStart < leftEnd) {
+        final start = math.max(0, runStart);
+        final end = math.min(runEnd, leftEnd);
+        if (end > start) {
+          leftRuns.add(
+            EpubTextRun(
+              text: formatted.substring(start, end),
+              style: run.style,
+              link: run.link,
+            ),
+          );
+          leftRunIndexes.add(run.runIndex);
+        }
+      }
+      if (runEnd > formattedTrailing) {
+        final start = math.max(formattedTrailing, runStart);
+        final end = math.min(runEnd, formatted.length);
+        if (end > start) {
+          rightRuns.add(
+            EpubTextRun(
+              text: formatted.substring(start, end),
+              style: run.style,
+              link: run.link,
+            ),
+          );
+          rightRunIndexes.add(run.runIndex);
+        }
+      }
+    }
+    if (leftRuns.isEmpty || rightRuns.isEmpty) return null;
+    return _EpubRowTextParts(
+      leftRuns: List<EpubTextRun>.unmodifiable(leftRuns),
+      leftRunIndexes: List<int>.unmodifiable(leftRunIndexes),
+      rightRuns: List<EpubTextRun>.unmodifiable(rightRuns),
+      rightRunIndexes: List<int>.unmodifiable(rightRunIndexes),
+      leftTextLength: leftEnd,
+      rightTextLength: formatted.length - formattedTrailing,
+      trailingStart: formattedTrailing,
+    );
+  }
+
+  /// Runs in formatted-paragraph coordinates, including the indent prefix.
+  ///
+  /// Persisted runs normally cover the complete block text. A partial run list
+  /// (an edited payload, for one) falls back to the plain style so no character
+  /// is dropped; only such a fallback loses inline styling.
+  List<_EpubRowRun>? _rowRuns(
+    EpubContentBlock block,
+    String formatted,
+    String body,
+    int bodyStart,
+  ) {
+    final prefixLength = formatted.length - body.length;
+    final bodyEnd = bodyStart + body.length;
+    var runLength = 0;
+    for (final run in block.runs) {
+      runLength += run.text.length;
+    }
+    if (block.runs.isEmpty || runLength != block.text.length) {
+      return <_EpubRowRun>[
+        _EpubRowRun(
+          start: 0,
+          text: formatted,
+          style: block.style,
+          link: null,
+          runIndex: -1,
+        ),
+      ];
+    }
+    final result = <_EpubRowRun>[];
+    // The indent prefix is part of the formatted paragraph but not of the
+    // persisted runs. Emit it first, in layout coordinates, so a section row's
+    // left cell keeps its indent and caret offsets stay in formatted space.
+    if (prefixLength > 0) {
+      result.add(
+        _EpubRowRun(
+          start: 0,
+          text: formatted.substring(0, prefixLength),
+          style: block.style,
+          link: null,
+          runIndex: -1,
+        ),
+      );
+    }
+    var cursor = 0;
+    for (var index = 0; index < block.runs.length; index++) {
+      final run = block.runs[index];
+      final start = math.max(cursor, bodyStart);
+      final end = math.min(cursor + run.text.length, bodyEnd);
+      cursor += run.text.length;
+      if (end <= start) continue;
+      result.add(
+        _EpubRowRun(
+          start: prefixLength + (start - bodyStart),
+          text: block.text.substring(start, end),
+          style: run.style,
+          link: run.link,
+          runIndex: index,
+        ),
+      );
+    }
+    return result.isEmpty ? null : result;
+  }
+
+  bool _isRowSeparator(int unit) =>
+      unit == 0x20 || unit == 0x09 || unit == 0xA0 || unit == 0x3000;
+
   /// The extent of every block, measured with one painter.
   ///
   /// Page mode measures a chapter's whole body before it draws the first page.
@@ -180,22 +554,33 @@ class ReaderEpubLayout {
         if (block.isImage) {
           content = imageHeight(block, width: width, settings: settings);
         } else {
-          final shared = painter ??= TextPainter(
-            textDirection: TextDirection.ltr,
-            textScaler: textScaler,
-          );
-          shared.text = _textSpan(
+          final row = layoutTableRow(
             block,
             settings: settings,
-            foreground: Colors.black,
-            background: Colors.white,
+            mode: mode,
+            width: width,
           );
-          shared.textAlign = _textAlign(block.style.textAlign);
-          shared.strutStyle = mode == ReaderReadingMode.simulation
-              ? _simulationStrutStyle(block, settings)
-              : null;
-          shared.layout(maxWidth: width);
-          content = shared.height;
+          if (row != null) {
+            content = row.contentHeight;
+            row.dispose();
+          } else {
+            final shared = painter ??= TextPainter(
+              textDirection: TextDirection.ltr,
+              textScaler: textScaler,
+            );
+            shared.text = _textSpan(
+              block,
+              settings: settings,
+              foreground: Colors.black,
+              background: Colors.white,
+            );
+            shared.textAlign = _textAlign(block.style.textAlign);
+            shared.strutStyle = mode == ReaderReadingMode.simulation
+                ? _simulationStrutStyle(block, settings)
+                : null;
+            shared.layout(maxWidth: width);
+            content = shared.height;
+          }
         }
         var total = spacing.leading + content + spacing.trailing;
         if (mode == ReaderReadingMode.simulation) {
@@ -331,6 +716,9 @@ class ReaderEpubLayout {
           ? themeColors.background
           : blockBackground;
       final openLink = onOpenLink;
+      final rowGeometry = block.hasTrailingCell
+          ? tableRowGeometry(block, settings: settings, width: width)
+          : null;
       final Widget text;
       if (openLink != null && block.hasLinks) {
         text = _EpubLinkedText(
@@ -342,6 +730,16 @@ class ReaderEpubLayout {
           background: background,
           simulationPage: simulationPage,
           onOpenLink: openLink,
+          rowGeometry: rowGeometry,
+        );
+      } else if (rowGeometry != null) {
+        text = _buildTableRow(
+          block,
+          settings: settings,
+          foreground: foreground,
+          background: background,
+          simulationPage: simulationPage,
+          geometry: rowGeometry,
         );
       } else {
         text = _blockText(
@@ -512,7 +910,8 @@ class ReaderEpubLayout {
             ? link == null
             : link != null &&
                   previousLink.chapterIndex == link.chapterIndex &&
-                  previousLink.blockIndex == link.blockIndex;
+                  previousLink.blockIndex == link.blockIndex &&
+                  previousLink.needDirectJump == link.needDirectJump;
         if (mergedText.isNotEmpty && style == mergedStyle && sameLink) {
           mergedText.write(run.text);
           continue;
@@ -531,6 +930,156 @@ class ReaderEpubLayout {
       }
       flushMerged();
     }
+    return TextSpan(children: children);
+  }
+
+  /// Builds the two-column body of a trailing-cell row.
+  ///
+  /// Both cells are separate text widgets so the right one can be end-aligned
+  /// and sized independently; they are top-aligned, and the block measures as
+  /// the taller cell. Left and right therefore stay one selectable block.
+  Widget _buildTableRow(
+    EpubContentBlock block, {
+    required ReaderSettings settings,
+    required Color foreground,
+    required Color background,
+    required bool simulationPage,
+    required EpubTableRowGeometry geometry,
+    Color? linkColor,
+    Map<int, TapGestureRecognizer>? linkRecognizers,
+  }) {
+    final parts = _rowTextParts(block);
+    if (parts == null) {
+      return _blockText(
+        _textSpan(
+          block,
+          settings: settings,
+          foreground: foreground,
+          background: background,
+          linkColor: linkColor,
+          linkRecognizers: linkRecognizers,
+        ),
+        align: _textAlign(block.style.textAlign),
+        strutStyle: simulationPage
+            ? _simulationStrutStyle(block, settings)
+            : null,
+      );
+    }
+    final strutStyle = simulationPage
+        ? _simulationStrutStyle(block, settings)
+        : null;
+    final left = Text.rich(
+      _textSpanForRuns(
+        parts.leftRuns,
+        parts.leftRunIndexes,
+        settings: settings,
+        foreground: foreground,
+        background: background,
+        linkColor: linkColor,
+        linkRecognizers: linkRecognizers,
+      ),
+      textAlign: TextAlign.start,
+      textDirection: TextDirection.ltr,
+      textScaler: textScaler,
+      strutStyle: strutStyle,
+    );
+    final right = Text.rich(
+      _textSpanForRuns(
+        parts.rightRuns,
+        parts.rightRunIndexes,
+        settings: settings,
+        foreground: foreground,
+        background: background,
+        linkColor: linkColor,
+        linkRecognizers: linkRecognizers,
+      ),
+      textAlign: TextAlign.end,
+      textDirection: TextDirection.ltr,
+      textScaler: textScaler,
+      strutStyle: strutStyle,
+    );
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(width: geometry.leftWidth, child: left),
+        SizedBox(width: geometry.gap),
+        SizedBox(width: geometry.rightWidth, child: right),
+      ],
+    );
+  }
+
+  /// The same span building as [_textSpan], for a pre-split run list.
+  TextSpan _textSpanForRuns(
+    List<EpubTextRun> runs,
+    List<int> runIndexes, {
+    required ReaderSettings settings,
+    required Color foreground,
+    required Color background,
+    Color? linkColor,
+    Map<int, TapGestureRecognizer>? linkRecognizers,
+  }) {
+    final children = <InlineSpan>[];
+    final mergedText = StringBuffer();
+    TextStyle? mergedStyle;
+    TapGestureRecognizer? mergedRecognizer;
+    EpubLinkTarget? mergedLink;
+    void flushMerged() {
+      if (mergedText.isEmpty) return;
+      children.add(
+        TextSpan(
+          text: mergedText.toString(),
+          style: mergedStyle,
+          recognizer: mergedRecognizer,
+        ),
+      );
+      mergedText.clear();
+      mergedStyle = null;
+      mergedRecognizer = null;
+      mergedLink = null;
+    }
+
+    for (var index = 0; index < runs.length; index++) {
+      final run = runs[index];
+      final isLink = run.link != null && linkColor != null;
+      final style = isLink
+          ? _runTextStyle(
+              run.style,
+              settings: settings,
+              foreground: foreground,
+              background: background,
+            ).copyWith(
+              color: linkColor,
+              decoration: TextDecoration.underline,
+              decorationColor: linkColor.withValues(alpha: 0.5),
+            )
+          : _runTextStyle(
+              run.style,
+              settings: settings,
+              foreground: foreground,
+              background: background,
+            );
+      final link = isLink ? run.link : null;
+      final previousLink = mergedLink;
+      final sameLink = previousLink == null
+          ? link == null
+          : link != null &&
+                previousLink.chapterIndex == link.chapterIndex &&
+                previousLink.blockIndex == link.blockIndex &&
+                previousLink.needDirectJump == link.needDirectJump;
+      if (mergedText.isNotEmpty && style == mergedStyle && sameLink) {
+        mergedText.write(run.text);
+        continue;
+      }
+      flushMerged();
+      mergedText.write(run.text);
+      mergedStyle = style;
+      final runIndex = index < runIndexes.length ? runIndexes[index] : -1;
+      mergedRecognizer = isLink && linkRecognizers != null
+          ? linkRecognizers[runIndex]
+          : null;
+      mergedLink = link;
+    }
+    flushMerged();
     return TextSpan(children: children);
   }
 
@@ -683,6 +1232,7 @@ class _EpubLinkedText extends StatefulWidget {
     required this.background,
     required this.simulationPage,
     required this.onOpenLink,
+    this.rowGeometry,
   });
 
   final ReaderEpubLayout layout;
@@ -693,6 +1243,9 @@ class _EpubLinkedText extends StatefulWidget {
   final Color background;
   final bool simulationPage;
   final void Function(EpubLinkTarget target) onOpenLink;
+
+  /// Set when this block is a directory row with a trailing page-number cell.
+  final EpubTableRowGeometry? rowGeometry;
 
   @override
   State<_EpubLinkedText> createState() => _EpubLinkedTextState();
@@ -740,20 +1293,35 @@ class _EpubLinkedTextState extends State<_EpubLinkedText> {
   }
 
   @override
-  Widget build(BuildContext context) => widget.layout._blockText(
-    widget.layout._textSpan(
-      widget.block,
-      settings: widget.settings,
-      foreground: widget.foreground,
-      background: widget.background,
-      linkColor: _safeLinkColor(),
-      linkRecognizers: _recognizers,
-    ),
-    align: widget.layout._textAlign(widget.block.style.textAlign),
-    strutStyle: widget.simulationPage
-        ? widget.layout._simulationStrutStyle(widget.block, widget.settings)
-        : null,
-  );
+  Widget build(BuildContext context) {
+    final rowGeometry = widget.rowGeometry;
+    if (rowGeometry != null) {
+      return widget.layout._buildTableRow(
+        widget.block,
+        settings: widget.settings,
+        foreground: widget.foreground,
+        background: widget.background,
+        simulationPage: widget.simulationPage,
+        geometry: rowGeometry,
+        linkColor: _safeLinkColor(),
+        linkRecognizers: _recognizers,
+      );
+    }
+    return widget.layout._blockText(
+      widget.layout._textSpan(
+        widget.block,
+        settings: widget.settings,
+        foreground: widget.foreground,
+        background: widget.background,
+        linkColor: _safeLinkColor(),
+        linkRecognizers: _recognizers,
+      ),
+      align: widget.layout._textAlign(widget.block.style.textAlign),
+      strutStyle: widget.simulationPage
+          ? widget.layout._simulationStrutStyle(widget.block, widget.settings)
+          : null,
+    );
+  }
 
   /// Keeps the accent readable on a publisher background by falling back to the
   /// block's own foreground when the two colors are too close.

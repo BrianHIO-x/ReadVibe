@@ -78,10 +78,15 @@ List<EpubContentBlock> _epubBlocksFromJson(Object? raw) {
         );
       }
     }
+    final text = map['text'] is String ? map['text'] as String : '';
+    final trailingCellStart = _trailingCellStartFromJson(
+      map['trailingCellStart'],
+      text,
+    );
     blocks.add(
       EpubContentBlock(
         kind: kind,
-        text: map['text'] is String ? map['text'] as String : '',
+        text: text,
         runs: List<EpubTextRun>.unmodifiable(runs),
         isHeading: map['isHeading'] == true,
         imagePath: map['imagePath'] is String
@@ -92,6 +97,10 @@ List<EpubContentBlock> _epubBlocksFromJson(Object? raw) {
         imageHeight: _jsonDouble(map['imageHeight']),
         style: style,
         anchorIds: _anchorIdsFromJson(map['anchorIds']),
+        trailingCellStart: trailingCellStart,
+        trailingCellWidthEm: trailingCellStart == null
+            ? null
+            : _trailingCellWidthFromJson(map['trailingCellWidthEm']),
       ),
     );
   }
@@ -122,7 +131,28 @@ EpubLinkTarget? _epubLinkFromJson(Object? raw) {
     blockIndex: block is num && block.isFinite && block >= 0
         ? block.toInt()
         : -1,
+    needDirectJump: raw['directJump'] == true,
   );
+}
+
+/// The saved offset must address a character inside [text]; anything else is
+/// dropped and the block renders as its complete, ordinary text line.
+int? _trailingCellStartFromJson(Object? raw, String text) {
+  if (raw is! num || !raw.isFinite) return null;
+  final value = raw.toDouble();
+  if (value != value.truncateToDouble()) return null;
+  final start = value.toInt();
+  if (start <= 0 || start >= text.length) return null;
+  return start;
+}
+
+/// Widths outside a plausible table-cell range are ignored rather than
+/// clamped: the row still reads, just without a narrow right column.
+double? _trailingCellWidthFromJson(Object? raw) {
+  if (raw is! num || !raw.isFinite) return null;
+  final value = raw.toDouble();
+  if (value < 1 || value > 24) return null;
+  return value;
 }
 
 Map<String, dynamic> _epubBlockToJson(EpubContentBlock block) => {
@@ -145,6 +175,9 @@ Map<String, dynamic> _epubBlockToJson(EpubContentBlock block) => {
     'altText': block.altText,
   if (block.imageWidth != null) 'imageWidth': block.imageWidth,
   if (block.imageHeight != null) 'imageHeight': block.imageHeight,
+  if (block.hasTrailingCell) 'trailingCellStart': block.trailingCellStart,
+  if (block.hasTrailingCell && block.trailingCellWidthEm != null)
+    'trailingCellWidthEm': block.trailingCellWidthEm,
   'style': _epubStyleToJson(block.style),
 };
 
@@ -206,6 +239,7 @@ Map<String, dynamic> _epubStyleToJson(EpubContentStyle style) => {
 Map<String, dynamic> _epubLinkToJson(EpubLinkTarget link) => {
   'chapter': link.chapterIndex,
   if (link.hasBlock) 'block': link.blockIndex,
+  if (link.needDirectJump) 'directJump': true,
 };
 
 double? _jsonDouble(Object? value) {

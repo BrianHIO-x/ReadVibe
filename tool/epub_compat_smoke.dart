@@ -1143,6 +1143,286 @@ Future<void> main() async {
     _expect(book.chapters[1].title == '第二章', 'repaired NCX second title');
   });
 
+  await _case('author line break stays inside one paragraph', () async {
+    final archive = _baseArchive(
+      _opf(
+        title: '换行',
+        manifest: <String>[_item('c1', 'c1.xhtml', 'application/xhtml+xml')],
+        spine: <String>[_spineRef('c1')],
+      ),
+      <String, ArchiveFile>{
+        'OEBPS/c1.xhtml': _textFile(
+          'OEBPS/c1.xhtml',
+          _chapterHtml('换行', '<p>第一行<br/>第二行<br/><br/></p><p>后段</p>'),
+        ),
+      },
+    );
+    final book = await _parseArchive(archive);
+    final blocks = book.chapters.single.epubBlocks;
+    final broken = blocks.firstWhere((block) => block.text.contains('第一行'));
+    _expect(broken.text == '第一行\n第二行', 'only internal breaks remain');
+    _expect(
+      broken.runs.isEmpty ||
+          broken.runs.map((run) => run.text).join() == broken.text,
+      'runs match the visible line break',
+    );
+    _expect(
+      blocks.any((block) => block.text == '后段'),
+      'paragraph after the breaks is unchanged',
+    );
+    final restored = decodeChapterPayload(
+      encodeChapterPayload(book.chapters.single),
+      0,
+    );
+    _expect(
+      restored.epubBlocks
+              .firstWhere((block) => block.text.contains('第一行'))
+              .text ==
+          '第一行\n第二行',
+      'codec keeps the line break',
+    );
+  });
+
+  await _case('directory table keeps rows, columns and links', () async {
+    const chapterOneTitle =
+        '第一章 星海彼岸的漫长归途与未寄出的信 The Long Way Home Across the Stars';
+    const sectionTitle = '第二节 旧港口与潮汐表 The Old Harbour and the Tide Tables';
+    final archive = _baseArchive(
+      _opf(
+        title: '目录结构',
+        manifest: <String>[
+          _item('nav', 'nav.xhtml', 'application/xhtml+xml', properties: 'nav'),
+          _item('toc', 'toc.xhtml', 'application/xhtml+xml'),
+          _item('ch1', 'text/ch1.xhtml', 'application/xhtml+xml'),
+          _item('px', 'images/px.png', 'image/png'),
+        ],
+        spine: <String>[_spineRef('toc'), _spineRef('ch1')],
+        version: '3.0',
+      ),
+      <String, ArchiveFile>{
+        'OEBPS/nav.xhtml': _textFile(
+          'OEBPS/nav.xhtml',
+          _navHtml(
+            '<li><a href="text/ch1.xhtml#ch1">第一章</a>'
+            '<ol><li><a href="text/ch1.xhtml#sec1">第二节</a></li></ol></li>'
+            '<li><a href="text/ch1.xhtml#ch2">第二章</a></li>',
+          ),
+        ),
+        'OEBPS/toc.xhtml': _textFile(
+          'OEBPS/toc.xhtml',
+          '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>目录</title>'
+                  '<style type="text/css">'
+                  '.entry td { padding: 0; }'
+                  '.entry.chapter td { font-weight: bold; padding-top: .85em; }'
+                  '.entry.section td:first-child { padding-left: 1em; }'
+                  '.entry td.range { text-align: right; width: 4.4em; font-size: .86em; }'
+                  '</style></head><body><h1>目录</h1>'
+                  '<table class="contents"><caption>目录</caption>'
+                  '<thead><tr><th>章节</th><th class="range">页码</th></tr></thead>'
+                  '<tbody>'
+                  '<tr class="entry chapter"><td><a href="text/ch1.xhtml#ch1">' +
+              chapterOneTitle +
+              '</a></td><td class="range">1–12</td></tr>'
+                  '<tr class="entry section"><td><a href="text/ch1.xhtml#sec1">' +
+              sectionTitle +
+              '</a></td><td class="range">13</td></tr>'
+                  '<tr class="entry chapter"><td><a href="text/ch1.xhtml#ch2">'
+                  '第二章 终章</a></td><td class="range">21</td></tr>'
+                  '<tr class="entry section"><td></td><td class="range">14</td></tr>'
+                  '</tbody>'
+                  '<tfoot><tr><td>附录</td><td class="range">—</td></tr></tfoot>'
+                  '</table></body></html>',
+        ),
+        'OEBPS/text/ch1.xhtml': _textFile(
+          'OEBPS/text/ch1.xhtml',
+          _chapterHtml(
+            '正文',
+            '<h1 id="ch1">第一章</h1><p>正文一。</p>'
+                '<h2 id="sec1">第二节</h2><p>正文二。</p>'
+                '<h2 id="br">第一节<br/>换行标题</h2><p>正文三。</p>'
+                '<table class="plain"><tr><td>单元甲</td><td>单元乙</td></tr></table>'
+                '<table><tr><td>图前</td><td><img src="../images/px.png" alt="小图"/>'
+                '</td><td>图后</td></tr></table>'
+                '<h1 id="ch2">第二章</h1>'
+                '<p>正文四<a href="ch1.xhtml#note1">[1]</a>。</p>'
+                '<aside id="note1"><p>注释一。</p></aside>',
+          ),
+        ),
+        'OEBPS/images/px.png': _bytesFile('OEBPS/images/px.png', _png),
+      },
+    );
+    final book = await _parseArchive(archive);
+    _expect(book.chapters.length == 3, 'directory and two body chapters');
+    final toc = book.chapters[0];
+    final blocks = toc.epubBlocks;
+    _expect(
+      blocks.length == 8,
+      'one block per caption, header, row and footer',
+    );
+    _expect(blocks[0].isHeading && blocks[0].text == '目录', 'heading kept');
+    _expect(blocks[1].text == '目录' && !blocks[1].isHeading, 'caption kept');
+    _expect(blocks[2].text == '章节 页码', 'header row kept');
+    final chapterRow = blocks[3];
+    _expect(
+      chapterRow.text == chapterOneTitle + ' 1–12',
+      'chapter row keeps both cells and its line',
+    );
+    _expect(!chapterRow.isHeading, 'bold directory row is not a heading');
+    _expect(chapterRow.style.fontWeight >= 700, 'chapter row keeps bold');
+    _expect(chapterRow.style.textIndentEm == 0, 'chapter row is not indented');
+    _expect(chapterRow.hasTrailingCell, 'page cell metadata');
+    _expect(
+      chapterRow.trailingCellStart == chapterRow.text.lastIndexOf('1–12'),
+      'page cell offset',
+    );
+    _expect(
+      (chapterRow.trailingCellWidthEm! - 3.784).abs() < 0.001,
+      'page cell width in em',
+    );
+    final sectionRow = blocks[4];
+    _expect(sectionRow.text == sectionTitle + ' 13', 'section row line');
+    _expect(sectionRow.style.textIndentEm == 1, 'only first cell indents');
+    _expect(sectionRow.style.fontWeight < 600, 'section row is not bold');
+    _expect(sectionRow.hasTrailingCell, 'section page cell metadata');
+    _expect(blocks[5].text == '第二章 终章 21', 'second chapter row');
+    _expect(blocks[6].text == '14', 'page cell beside an empty cell survives');
+    _expect(!blocks[6].hasTrailingCell, 'empty left cell has no column split');
+    _expect(blocks[7].text == '附录 —', 'footer row kept');
+    _expect(
+      !blocks[7].hasTrailingCell,
+      'non-numeric footer is not a page cell',
+    );
+
+    String joined(EpubContentBlock block) => block.runs.isEmpty
+        ? block.text
+        : block.runs.map((run) => run.text).join();
+    for (final block in blocks) {
+      _expect(joined(block) == block.text, 'runs partition the row text');
+    }
+
+    final chapterLink = chapterRow.runs
+        .map((run) => run.link)
+        .whereType<EpubLinkTarget>()
+        .single;
+    _expect(chapterLink.chapterIndex == 1, 'chapter link target chapter');
+    _expect(chapterLink.blockIndex == 0, 'chapter link target block');
+    _expect(chapterLink.needDirectJump, 'directory link jumps directly');
+    final sectionLink = sectionRow.runs
+        .map((run) => run.link)
+        .whereType<EpubLinkTarget>()
+        .single;
+    _expect(sectionLink.chapterIndex == 1, 'section link target chapter');
+    _expect(sectionLink.blockIndex == 2, 'section link target block');
+    _expect(
+      sectionLink.needDirectJump,
+      'section directory link jumps directly',
+    );
+
+    final body = book.chapters[1];
+    final brBlock = body.epubBlocks.firstWhere(
+      (block) => block.text.contains('换行标题'),
+    );
+    _expect(brBlock.text == '第一节\n换行标题', 'author line break preserved');
+    _expect(brBlock.isHeading, 'line break does not clear heading semantics');
+    final plainRow = body.epubBlocks.firstWhere(
+      (block) => block.text.contains('单元甲'),
+    );
+    _expect(plainRow.text == '单元甲 单元乙', 'ordinary table row joins cells');
+    _expect(!plainRow.hasTrailingCell, 'ordinary row has no page column');
+    final imageBlocks = body.epubBlocks
+        .where((block) => block.isImage)
+        .toList();
+    _expect(imageBlocks.length == 1, 'image inside a table is kept');
+    _expect(imageBlocks.single.imagePath != null, 'table image extracted');
+    _expect(
+      body.epubBlocks.every(
+        (block) => !(block.text.contains('图前') && block.text.contains('图后')),
+      ),
+      'complex row falls back per cell instead of one leaf',
+    );
+    _expect(
+      body.epubBlocks.any((block) => block.text == '图前') &&
+          body.epubBlocks.any((block) => block.text == '图后'),
+      'text beside the image is preserved',
+    );
+
+    final noteLink = book.chapters[2].epubBlocks
+        .expand((block) => block.runs)
+        .map((run) => run.link)
+        .whereType<EpubLinkTarget>()
+        .single;
+    _expect(noteLink.chapterIndex == 2, 'footnote target chapter');
+    _expect(noteLink.blockIndex == 2, 'footnote target block');
+    _expect(!noteLink.needDirectJump, 'ordinary footnote keeps its preview');
+
+    final encoded = encodeChapterPayload(toc);
+    final encodedBlocks = encoded['epubBlocks'] as List<dynamic>;
+    final encodedRow = encodedBlocks[3] as Map<String, dynamic>;
+    _expect(
+      encodedRow['trailingCellStart'] == chapterRow.trailingCellStart,
+      'codec writes the page cell offset',
+    );
+    final encodedRuns = encodedRow['runs'] as List<dynamic>;
+    final encodedLink =
+        (encodedRuns.cast<Map<String, dynamic>>().firstWhere(
+              (run) => run['link'] != null,
+            )['link'])
+            as Map<String, dynamic>;
+    _expect(encodedLink['directJump'] == true, 'codec writes direct jump');
+
+    final restored = decodeChapterPayload(encoded, 0);
+    _expect(restored.epubBlocks.length == blocks.length, 'codec block count');
+    final restoredRow = restored.epubBlocks[3];
+    _expect(restoredRow.hasTrailingCell, 'codec keeps page cell metadata');
+    _expect(
+      restoredRow.trailingCellStart == chapterRow.trailingCellStart,
+      'codec keeps page cell offset',
+    );
+    _expect(
+      (restoredRow.trailingCellWidthEm! - chapterRow.trailingCellWidthEm!)
+              .abs() <
+          0.000001,
+      'codec keeps page cell width',
+    );
+    final restoredLink = restoredRow.runs
+        .map((run) => run.link)
+        .whereType<EpubLinkTarget>()
+        .single;
+    _expect(restoredLink.needDirectJump, 'codec keeps direct jump');
+    _expect(
+      restoredRow.runs.map((run) => run.text).join() == restoredRow.text,
+      'codec keeps the run partition',
+    );
+
+    final legacy = decodeChapterPayload(<String, dynamic>{
+      'title': '旧章',
+      'content': '旧正文 12',
+      'epubBlocks': <dynamic>[
+        <String, dynamic>{
+          'kind': 'text',
+          'text': '旧正文 12',
+          'trailingCellStart': 99,
+          'trailingCellWidthEm': 99,
+          'runs': <dynamic>[
+            <String, dynamic>{
+              'text': '旧正文 12',
+              'style': <String, dynamic>{},
+              'link': <String, dynamic>{'chapter': 0, 'block': 0},
+            },
+          ],
+        },
+      ],
+    }, 0);
+    _expect(
+      !legacy.epubBlocks.single.hasTrailingCell,
+      'invalid saved offset is dropped',
+    );
+    _expect(
+      !legacy.epubBlocks.single.runs.single.link!.needDirectJump,
+      'legacy link defaults to preview',
+    );
+  });
+
   try {
     for (final directory in _tempDirs) {
       try {
