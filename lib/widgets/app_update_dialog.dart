@@ -39,7 +39,7 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
     setState(() {
       _busy = true;
       _error = null;
-      _status = _downloaded == null ? '正在测速下载线路…' : '正在检查安装包…';
+      _status = _downloaded == null ? '正在连接下载线路…' : '正在检查安装包…';
     });
     try {
       _downloaded ??= await _service.download(widget.info, (progress) {
@@ -135,8 +135,8 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
                 ),
               if (_progress != null && _busy && _downloaded == null) ...[
                 const SizedBox(height: AppSpacing.md),
-                // The probe keeps no bytes, so a percentage would be misleading
-                // while it runs.
+                // Backup probing keeps no committed progress bar state yet, so
+                // an indeterminate bar is shown until a line resumes downloading.
                 LinearProgressIndicator(
                   value: _progress!.probing ? null : _progress!.fraction,
                 ),

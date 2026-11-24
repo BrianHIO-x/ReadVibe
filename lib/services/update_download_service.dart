@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'update_service.dart';
 
@@ -74,24 +75,28 @@ class _ProbeSample {
   final int order;
   final _bytes = BytesBuilder(copy: false);
   final _clock = Stopwatch();
+  int _received = 0;
   int _timed = 0;
   bool complete = false;
 
-  int get total => _bytes.length;
+  int get total => _received;
 
-  void add(List<int> chunk, int limit) {
-    final room = limit - total;
+  void add(List<int> chunk, int limit, {bool keepBytes = true}) {
+    final room = limit - _received;
     if (room <= 0) return;
-    final kept = chunk.length > room ? chunk.sublist(0, room) : chunk;
-    _bytes.add(kept);
+    final count = math.min(chunk.length, room);
+    if (keepBytes) {
+      _bytes.add(count == chunk.length ? chunk : chunk.sublist(0, count));
+    }
+    _received += count;
     // Timing starts at the first chunk, so a line is judged on throughput
     // instead of on how quickly it answered.
     if (_clock.isRunning) {
-      _timed += kept.length;
+      _timed += count;
     } else {
       _clock.start();
     }
-    if (total >= limit) complete = true;
+    if (_received >= limit) complete = true;
   }
 
   /// Freezes the clock when the line stops, before the other lines finish.
@@ -99,26 +104,28 @@ class _ProbeSample {
 
   _ProbedSource result(Duration window) {
     final prefix = _bytes.takeBytes();
-    if (prefix.isEmpty) return _ProbedSource(uri, order, 0, prefix);
+    if (_received == 0) return _ProbedSource(uri, order, 0, prefix);
     final micros = math.max(1, _clock.elapsedMicroseconds);
     final double rate;
     if (_timed > 0) {
       rate = _timed * 1000000 / micros;
     } else if (complete) {
       // The whole sample came in one chunk, faster than the probe can resolve.
-      rate = prefix.length * 1000000.0;
+      rate = _received * 1000000.0;
     } else {
       // A single chunk and then silence: credited over the whole window.
-      rate = prefix.length * 1000000 / math.max(1, window.inMicroseconds);
+      rate = _received * 1000000 / math.max(1, window.inMicroseconds);
     }
     return _ProbedSource(uri, order, rate, prefix);
   }
 }
 
-/// Abandons a line that a probed alternative can clearly beat. It carries no
-/// message because the user never sees it; the switch itself is the outcome.
+/// Abandons a line that is too slow or that a probed alternative can clearly
+/// beat. It carries no message because the user never sees it; the switch
+/// itself is the outcome.
 class _SlowSource implements Exception {
-  const _SlowSource();
+  const _SlowSource(this.measuredRate);
+  final double measuredRate;
 }
 
 /// Streams into a private partial file; only complete, verified bytes become an APK.
@@ -126,19 +133,25 @@ class UpdateDownloadService implements UpdateDownloader {
   UpdateDownloadService({
     Future<Directory> Function()? directoryProvider,
     List<Uri> Function(AppUpdateInfo)? sources,
+    Future<String?> Function()? loadLastSource,
+    Future<void> Function(String source)? saveLastSource,
     this.connectTimeout = const Duration(seconds: 5),
     this.idleTimeout = const Duration(seconds: 15),
     this.probeDeadline = const Duration(seconds: 3),
     this.probeGrace = const Duration(milliseconds: 800),
     this.slowWindow = const Duration(seconds: 6),
+    this.lowSpeedThreshold = 512 * 1024.0,
   }) : _directoryProvider = directoryProvider ?? getTemporaryDirectory,
-       _sources = sources ?? downloadSources;
+       _sources = sources ?? downloadSources,
+       _loadLastSource = loadLastSource ?? _readLastSource,
+       _saveLastSource = saveLastSource ?? _writeLastSource;
 
   static const _channel = MethodChannel('com.readvibe.app/app_update');
+  static const _lastSourceKey = 'update_last_download_source';
 
   /// Sample size per line. Large enough that a fast line is judged past its
-  /// TCP slow start, and the winner's sample is kept as the start of the file,
-  /// so the race costs only what the losing lines fetched.
+  /// TCP slow start, and the winner's sample is kept as the start of the
+  /// resumed segment, so the race costs only what the losing lines fetched.
   static const _probeBytes = 1024 * 1024;
 
   /// How much faster direct GitHub has to be before it leads the mirrors.
@@ -146,6 +159,8 @@ class UpdateDownloadService implements UpdateDownloader {
 
   final Future<Directory> Function() _directoryProvider;
   final List<Uri> Function(AppUpdateInfo) _sources;
+  final Future<String?> Function() _loadLastSource;
+  final Future<void> Function(String source) _saveLastSource;
   final Duration connectTimeout;
   final Duration idleTimeout;
 
@@ -156,12 +171,48 @@ class UpdateDownloadService implements UpdateDownloader {
   /// Once one line finishes its sample, how long the rest still get.
   final Duration probeGrace;
 
-  /// How long a line has to stay behind a rival before it is given up on.
+  /// How long a line has to stay below the threshold before switching.
   final Duration slowWindow;
+
+  /// Minimum throughput expected from the initial unprobed line before backup
+  /// speed-testing is triggered.
+  final double lowSpeedThreshold;
 
   final Set<HttpClient> _clients = {};
   bool _cancelled = false;
   bool _running = false;
+
+  static String _sourceKey(Uri uri) =>
+      uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
+
+  static double _sourceScore(_ProbedSource source) =>
+      source.domestic ? source.rate : source.rate / _overseasMargin;
+
+  static Future<String?> _readLastSource() async =>
+      (await SharedPreferences.getInstance()).getString(_lastSourceKey);
+
+  static Future<void> _writeLastSource(String source) async {
+    await (await SharedPreferences.getInstance()).setString(
+      _lastSourceKey,
+      source,
+    );
+  }
+
+  Future<String?> _loadLastSourceSafe() async {
+    try {
+      return await _loadLastSource();
+    } on Object {
+      return null;
+    }
+  }
+
+  Future<void> _saveLastSourceSafe(String source) async {
+    try {
+      await _saveLastSource(source);
+    } on Object {
+      // Remembering the winning route is best-effort and must not fail the install.
+    }
+  }
 
   /// Mainland mirror relays first, direct GitHub last. Every relay here was
   /// measured to serve ranged release downloads without redirecting. The
@@ -197,21 +248,25 @@ class UpdateDownloadService implements UpdateDownloader {
     if (_cancelled) throw UpdateDownloadCancelled();
   }
 
-  /// Races every line over a short ranged read and returns them fastest first,
-  /// so the download starts on the quickest line instead of on whichever one
-  /// happens to be listed first.
-  ///
-  /// The race used to wait for every line to finish or time out, which took
-  /// over six seconds whenever one line hung. It now ends three seconds after
-  /// it starts at the latest, or shortly after the first line has delivered
-  /// its whole sample. Lines still running then are ranked on what they
-  /// delivered so far.
+  /// Races backup lines over a short ranged read from [offset] and returns
+  /// them fastest first, so switching skips slow lines instead of guessing.
   Future<List<_ProbedSource>> _rankSources(
     List<Uri> sources,
     AppUpdateInfo info,
-    void Function(UpdateDownloadProgress) onProgress,
-  ) async {
-    if (sources.length < 2) {
+    void Function(UpdateDownloadProgress) onProgress, {
+    int offset = 0,
+    bool probeSingle = false,
+    String? probingLabel,
+  }) async {
+    if (sources.isEmpty) return const [];
+    if (sources.length < 2 && !probeSingle) {
+      return [
+        for (var index = 0; index < sources.length; index++)
+          _ProbedSource(sources[index], index, 0, Uint8List(0)),
+      ];
+    }
+    final limit = math.min(_probeBytes, info.apkSize - offset);
+    if (limit <= 0) {
       return [
         for (var index = 0; index < sources.length; index++)
           _ProbedSource(sources[index], index, 0, Uint8List(0)),
@@ -219,13 +274,12 @@ class UpdateDownloadService implements UpdateDownloader {
     }
     onProgress(
       UpdateDownloadProgress(
-        0,
+        offset,
         info.apkSize,
-        '正在测速 ${sources.length} 条线路…',
+        probingLabel ?? '正在测速 ${sources.length} 条备用线路…',
         probing: true,
       ),
     );
-    final limit = math.min(_probeBytes, info.apkSize);
     final samples = [
       for (var index = 0; index < sources.length; index++)
         _ProbeSample(sources[index], index),
@@ -239,7 +293,7 @@ class UpdateDownloadService implements UpdateDownloader {
     Timer? grace;
     await Future.wait([
       for (final sample in samples)
-        _probe(sample, limit, stop.future, () {
+        _probe(sample, offset, limit, stop.future, () {
           grace ??= Timer(probeGrace, stopRace);
         }),
     ]);
@@ -248,19 +302,18 @@ class UpdateDownloadService implements UpdateDownloader {
     stopRace();
     _checkCancelled();
     final probed = [for (final sample in samples) sample.result(probeDeadline)];
-    double score(_ProbedSource source) =>
-        source.domestic ? source.rate : source.rate / _overseasMargin;
     // A probe failure is often transient, so unanswered lines keep their
     // declared order at the back rather than being dropped.
     return probed..sort((a, b) {
       if (a.answered != b.answered) return a.answered ? -1 : 1;
-      if (a.answered) return score(b).compareTo(score(a));
+      if (a.answered) return _sourceScore(b).compareTo(_sourceScore(a));
       return a.order.compareTo(b.order);
     });
   }
 
   Future<void> _probe(
     _ProbeSample sample,
+    int offset,
     int limit,
     Future<void> stop,
     void Function() onSampled,
@@ -274,14 +327,16 @@ class UpdateDownloadService implements UpdateDownloader {
       await (() async {
         final request = await client.getUrl(sample.uri);
         request.headers.set('User-Agent', 'ReadVibe-Android');
-        request.headers.set('Range', 'bytes=0-${limit - 1}');
+        request.headers.set('Range', 'bytes=$offset-${offset + limit - 1}');
         final response = await request.close();
         if (response.statusCode != 200 && response.statusCode != 206) return;
-        if (response.statusCode == 206 && !_rangeStartsAtZero(response)) {
+        if (response.statusCode == 206 && !_rangeStartsAt(response, offset)) {
           return;
         }
+        // Only bytes starting at [offset] can be appended to the partial file.
+        final keepBytes = offset == 0 || response.statusCode == 206;
         await for (final chunk in response) {
-          sample.add(chunk, limit);
+          sample.add(chunk, limit, keepBytes: keepBytes);
           if (sample.complete) {
             onSampled();
             break;
@@ -298,10 +353,11 @@ class UpdateDownloadService implements UpdateDownloader {
   }
 
   /// A relay that answers a ranged read from some other offset would put the
-  /// wrong bytes at the start of the file.
-  static bool _rangeStartsAtZero(HttpClientResponse response) {
+  /// wrong bytes at the resume point.
+  static bool _rangeStartsAt(HttpClientResponse response, int offset) {
     final range = response.headers.value(HttpHeaders.contentRangeHeader);
-    return range == null || range.trim().startsWith('bytes 0-');
+    if (range == null) return offset == 0;
+    return range.trim().startsWith('bytes $offset-');
   }
 
   @override
@@ -335,26 +391,41 @@ class UpdateDownloadService implements UpdateDownloader {
       session = await root.createTemp('download-');
       final partial = File('${session.path}/update.part');
       final target = File('${session.path}/ReadVibe-${info.version}.apk');
-      final sources = await _rankSources(_sources(info), info, onProgress);
+      final allSources = _sources(info);
+      if (allSources.isEmpty) {
+        throw const UpdateDownloadException('下载线路暂时不可用，请检查网络后重试');
+      }
+      final lastKey = await _loadLastSourceSafe();
+      final matchedIndex = lastKey == null
+          ? -1
+          : allSources.indexWhere((uri) => _sourceKey(uri) == lastKey);
+      final usedSavedSource = matchedIndex >= 0;
+      final initialIndex = usedSavedSource ? matchedIndex : 0;
+      final initialSource = allSources[initialIndex];
+      final unprobedAlternatives = <Uri>[
+        for (var i = 0; i < allSources.length; i++)
+          if (i != initialIndex) allSources[i],
+      ];
       // Leaving a line costs everything downloaded so far unless the bytes can
       // be carried over, and appending across two relays is only safe when the
       // joined file is checked against a digest.
       final canResume = info.sha256 != null;
       Object? lastError;
       var resumeFrom = 0;
-      // The winner's probe sample is the start of the file, so the download
-      // carries on from there instead of fetching those bytes again.
-      final head = sources.isEmpty ? Uint8List(0) : sources.first.prefix;
-      if (canResume && head.isNotEmpty && head.length < info.apkSize) {
-        await partial.writeAsBytes(head, flush: true);
-        resumeFrom = head.length;
-      }
-      for (var index = 0; index < sources.length; index++) {
+      var hasProbed = false;
+      var queue = <_ProbedSource>[
+        _ProbedSource(initialSource, 0, 0, Uint8List(0)),
+      ];
+
+      for (var index = 0; index < queue.length; index++) {
         _checkCancelled();
-        final uri = sources[index].uri;
-        final label = '线路 ${index + 1}/${sources.length} · ${uri.host}';
-        final rival = index + 1 < sources.length
-            ? sources[index + 1].rate
+        final current = queue[index];
+        final uri = current.uri;
+        final label = hasProbed
+            ? '线路 ${index + 1}/${queue.length} · ${uri.host}'
+            : '${usedSavedSource ? '上次线路' : '默认线路'} · ${uri.host}';
+        final rival = hasProbed && index + 1 < queue.length
+            ? queue[index + 1].rate
             : 0.0;
         final client = HttpClient()..connectionTimeout = connectTimeout;
         _clients.add(client);
@@ -372,6 +443,9 @@ class UpdateDownloadService implements UpdateDownloader {
           if (response.statusCode != 200 && response.statusCode != 206) {
             throw const UpdateDownloadException('下载线路返回了无效文件');
           }
+          if (response.statusCode == 206 && !_rangeStartsAt(response, received)) {
+            throw const UpdateDownloadException('下载线路返回了无效文件');
+          }
           // A relay that ignores the range answers 200 with the whole file, so
           // the carried-over bytes are dropped and this line starts from zero.
           if (response.statusCode == 200) received = 0;
@@ -387,6 +461,7 @@ class UpdateDownloadService implements UpdateDownloader {
           var windowStart = 0;
           var windowBase = received;
           var slowMillis = 0;
+          var slowBytes = 0;
           var rate = 0.0;
           try {
             await for (final chunk in response.timeout(idleTimeout)) {
@@ -399,16 +474,32 @@ class UpdateDownloadService implements UpdateDownloader {
               final elapsed = clock.elapsedMilliseconds;
               final window = elapsed - windowStart;
               if (window >= 1000) {
-                rate = (received - windowBase) * 1000 / window;
-                // A rival that never answered scores 0, which no rate falls
-                // below, so an unprobed line is never switched to on speed.
-                slowMillis = rate < rival / 2 ? slowMillis + window : 0;
+                final windowBytes = received - windowBase;
+                rate = windowBytes * 1000 / window;
+                final threshold = !hasProbed && unprobedAlternatives.isNotEmpty
+                    ? lowSpeedThreshold
+                    : rival / 2;
+                // Before probing, an unprobed primary triggers backup racing
+                // when it stays below [lowSpeedThreshold]; after probing, a
+                // line yields only when a probed rival is over twice as fast.
+                if (threshold > 0 && rate < threshold) {
+                  slowMillis += window;
+                  slowBytes += windowBytes;
+                } else {
+                  slowMillis = 0;
+                  slowBytes = 0;
+                }
                 windowStart = elapsed;
                 windowBase = received;
-                if (slowMillis >= slowWindow.inMilliseconds &&
-                    canResume &&
-                    received * 10 < info.apkSize * 9) {
-                  throw const _SlowSource();
+                final shouldSwitch = !hasProbed && unprobedAlternatives.isNotEmpty
+                    ? slowMillis >= slowWindow.inMilliseconds &&
+                          (canResume || received * 10 < info.apkSize) &&
+                          received * 10 < info.apkSize * 9
+                    : slowMillis >= slowWindow.inMilliseconds &&
+                          canResume &&
+                          received * 10 < info.apkSize * 9;
+                if (shouldSwitch) {
+                  throw _SlowSource(slowBytes * 1000 / slowMillis);
                 }
               }
               if (elapsed - lastProgress >= 100 || received == info.apkSize) {
@@ -451,7 +542,9 @@ class UpdateDownloadService implements UpdateDownloader {
             }
           }
           _checkCancelled();
-          return await partial.rename(target.path);
+          final finished = await partial.rename(target.path);
+          await _saveLastSourceSafe(_sourceKey(uri));
+          return finished;
         } on Object catch (error) {
           _checkCancelled();
           if (error is FileSystemException) {
@@ -471,6 +564,63 @@ class UpdateDownloadService implements UpdateDownloader {
             }
           }
           if (error is! _SlowSource) lastError = error;
+          if (!hasProbed && unprobedAlternatives.isNotEmpty) {
+            hasProbed = true;
+            final isSlow = error is _SlowSource;
+            final ranked = await _rankSources(
+              unprobedAlternatives,
+              info,
+              onProgress,
+              offset: resumeFrom,
+              probeSingle: isSlow,
+              probingLabel: isSlow
+                  ? '当前线路较慢，正在测速 ${unprobedAlternatives.length} 条备用线路…'
+                  : '当前线路不可用，正在测速 ${unprobedAlternatives.length} 条备用线路…',
+            );
+            if (error is _SlowSource) {
+              final slowPrimary = _ProbedSource(
+                current.uri,
+                allSources.length,
+                error.measuredRate,
+                Uint8List(0),
+              );
+              final best = ranked.firstOrNull;
+              final switchToAlternative =
+                  best != null &&
+                  best.answered &&
+                  _sourceScore(best) > _sourceScore(slowPrimary);
+              if (switchToAlternative) {
+                queue = [...ranked, slowPrimary];
+                final head = best.prefix;
+                if (canResume &&
+                    head.isNotEmpty &&
+                    resumeFrom + head.length < info.apkSize) {
+                  await partial.writeAsBytes(
+                    head,
+                    mode: resumeFrom > 0 ? FileMode.append : FileMode.write,
+                    flush: true,
+                  );
+                  resumeFrom += head.length;
+                }
+              } else {
+                queue = [slowPrimary, ...ranked];
+              }
+            } else {
+              queue = ranked;
+              final head = queue.isEmpty ? Uint8List(0) : queue.first.prefix;
+              if (canResume &&
+                  head.isNotEmpty &&
+                  resumeFrom + head.length < info.apkSize) {
+                await partial.writeAsBytes(
+                  head,
+                  mode: resumeFrom > 0 ? FileMode.append : FileMode.write,
+                  flush: true,
+                );
+                resumeFrom += head.length;
+              }
+            }
+            index = -1;
+          }
         } finally {
           _clients.remove(client);
           client.close(force: true);
