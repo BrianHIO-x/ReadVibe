@@ -129,6 +129,14 @@ class _LibraryScreenState extends State<LibraryScreen>
   // which also makes the app inactive. That dialog belongs to a flow still on
   // screen, so the inactive lock waits for a real hide instead.
   int _foregroundPromptDepth = 0;
+  // An unlock that finishes while the window is briefly inactive (for
+  // example, right as Android's biometric prompt begins dismissing) waits
+  // here for the foreground resume instead of being dropped or painting
+  // private covers while unfocused.
+  Completer<bool>? _pendingForegroundResume;
+  Timer? _pendingForegroundTimer;
+  bool _privateShelfFlowBusy = false;
+  static const _foregroundResumeTimeout = Duration(seconds: 3);
 
   late final AnimationController _gridEntranceController;
   late final AnimationController _emptyIconController;
@@ -170,8 +178,10 @@ class _LibraryScreenState extends State<LibraryScreen>
       // Android reports this state when the activity is paused, before it is
       // stopped. onHide stays as a safety net for platforms that skip it.
       onInactive: _handleAppInactive,
-      onHide: _lockPrivateShelfOnLeave,
-      onResume: _syncAutomaticUpdateCheck,
+      onHide: _handleAppHide,
+      onPause: _cancelPendingForegroundResume,
+      onDetach: _cancelPendingForegroundResume,
+      onResume: _handleAppResume,
     );
     _maintenance = LibraryMaintenanceController(
       repository: _storage,
@@ -396,6 +406,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   void dispose() {
     _loadSerial++;
     _automaticUpdateTimer?.cancel();
+    _cancelPendingForegroundResume();
     _lifecycle.dispose();
     _maintenance.dispose();
     _reorderFocusTimer?.cancel();
@@ -1128,6 +1139,29 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
+  void _handleAppResume() {
+    _resolvePendingForegroundResume(true);
+    _syncAutomaticUpdateCheck();
+  }
+
+  void _handleAppHide() {
+    _resolvePendingForegroundResume(false);
+    _lockPrivateShelfOnLeave();
+  }
+
+  void _resolvePendingForegroundResume(bool resumed) {
+    _pendingForegroundTimer?.cancel();
+    _pendingForegroundTimer = null;
+    final pending = _pendingForegroundResume;
+    _pendingForegroundResume = null;
+    if (pending != null && !pending.isCompleted) {
+      pending.complete(resumed);
+    }
+  }
+
+  void _cancelPendingForegroundResume() =>
+      _resolvePendingForegroundResume(false);
+
   /// Inactive can mean a system dialog still on screen opened by this shelf
   /// (the biometric prompt from its settings). Hide is the point at which the
   /// app really left, so only that state interrupts those local flows.
@@ -1150,6 +1184,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _setPrivateMode(bool private) {
+    if (!private) {
+      _cancelPendingForegroundResume();
+    }
     if (_privateMode == private || !mounted) return;
     _librarySearchController.clear();
     _librarySearchFocus.unfocus();
@@ -1171,28 +1208,63 @@ class _LibraryScreenState extends State<LibraryScreen>
     _syncShelfAnimations();
   }
 
-  /// Whether an unlock that just finished may still open the private shelf.
+  /// Waits for the window to be active before acting on a completed unlock.
   ///
-  /// The PIN sheet or biometric prompt can outlive the foreground window. If
-  /// the shelf were opened after the app had gone to the background, it would
-  /// be waiting unlocked on return without a fresh check, so a result that
-  /// arrives while the app is no longer resumed is dropped.
-  bool get _canOpenPrivateShelfNow =>
-      mounted &&
-      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+  /// Android's system biometric prompt makes the app
+  /// [AppLifecycleState.inactive] while it is visible, and delivers its
+  /// success callback before the prompt window finishes dismissing and focus
+  /// returns. Dropping an unlock whenever the state is not yet
+  /// [AppLifecycleState.resumed] therefore breaks biometric entry; opening
+  /// immediately while unfocused would paint private covers into a recents
+  /// snapshot if the reader was actually leaving. Waiting for the resume
+  /// transition handles both: a dismissing prompt resumes right away, while
+  /// leaving the app hides and cancels the pending open.
+  Future<bool> _awaitPrivateShelfForeground() async {
+    if (!mounted) return false;
+    switch (WidgetsBinding.instance.lifecycleState) {
+      case null:
+      case AppLifecycleState.resumed:
+        return true;
+      case AppLifecycleState.inactive:
+        _cancelPendingForegroundResume();
+        final completer = Completer<bool>();
+        _pendingForegroundResume = completer;
+        _pendingForegroundTimer = Timer(_foregroundResumeTimeout, () {
+          _resolvePendingForegroundResume(false);
+        });
+        final resumed = await completer.future;
+        return resumed && mounted;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        return false;
+    }
+  }
 
   Future<void> _handlePrivateShelfEntry() async {
-    if (!_privateConfig.configured) {
-      if (await _setUpPrivateShelf() && _canOpenPrivateShelfNow) {
-        _setPrivateMode(true);
-      }
-    } else if (_privateMode) {
+    if (_privateShelfFlowBusy) return;
+    if (_privateConfig.configured && _privateMode) {
       _setPrivateMode(false);
-    } else {
-      final result = await _unlockPrivateShelf('进入隐私书架');
-      if (result == PrivateShelfUnlock.unlocked && _canOpenPrivateShelfNow) {
-        _setPrivateMode(true);
+      return;
+    }
+    _privateShelfFlowBusy = true;
+    try {
+      if (!_privateConfig.configured) {
+        if (await _setUpPrivateShelf() &&
+            await _awaitPrivateShelfForeground() &&
+            _privateConfig.configured) {
+          _setPrivateMode(true);
+        }
+      } else {
+        final result = await _unlockPrivateShelf('进入隐私书架');
+        if (result == PrivateShelfUnlock.unlocked &&
+            await _awaitPrivateShelfForeground() &&
+            _privateConfig.configured) {
+          _setPrivateMode(true);
+        }
       }
+    } finally {
+      _privateShelfFlowBusy = false;
     }
   }
 
@@ -1229,28 +1301,37 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _managePrivateShelf() async {
-    if (!_privateConfig.configured) return;
-    // An open private shelf was unlocked earlier in this visit to the app.
-    if (!_privateMode &&
-        await _unlockPrivateShelf('修改隐私书架设置') != PrivateShelfUnlock.unlocked) {
-      return;
-    }
-    if (!mounted) return;
-    // Enabling a biometric raises the system prompt from inside this sheet.
-    // Treat the inactive state while the sheet owns that prompt as part of the
-    // foreground flow; a real hide still locks through onHide.
-    _foregroundPromptDepth++;
+    if (_privateShelfFlowBusy || !_privateConfig.configured) return;
+    _privateShelfFlowBusy = true;
     try {
-      await showPrivateShelfSettings(
-        context,
-        lock: _privateLock,
-        colors: _feedbackColors,
-        onDisable: _disablePrivateShelf,
-      );
+      // An open private shelf was unlocked earlier in this visit to the app.
+      if (!_privateMode) {
+        final result = await _unlockPrivateShelf('修改隐私书架设置');
+        if (result != PrivateShelfUnlock.unlocked ||
+            !await _awaitPrivateShelfForeground() ||
+            !_privateConfig.configured) {
+          return;
+        }
+      }
+      if (!mounted) return;
+      // Enabling a biometric raises the system prompt from inside this sheet.
+      // Treat the inactive state while the sheet owns that prompt as part of the
+      // foreground flow; a real hide still locks through onHide.
+      _foregroundPromptDepth++;
+      try {
+        await showPrivateShelfSettings(
+          context,
+          lock: _privateLock,
+          colors: _feedbackColors,
+          onDisable: _disablePrivateShelf,
+        );
+      } finally {
+        _foregroundPromptDepth--;
+      }
+      await _loadPrivateConfig();
     } finally {
-      _foregroundPromptDepth--;
+      _privateShelfFlowBusy = false;
     }
-    await _loadPrivateConfig();
   }
 
   Future<void> _moveBookToShelf(Book book, {required bool private}) async {
