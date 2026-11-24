@@ -17,6 +17,7 @@ class LibraryGroupBar extends StatelessWidget {
     required this.selectedGroup,
     required this.onSelected,
     required this.onManageGroups,
+    this.onClose,
   });
 
   final ReaderThemeColors colors;
@@ -24,6 +25,7 @@ class LibraryGroupBar extends StatelessWidget {
   final String? selectedGroup;
   final ValueChanged<String?> onSelected;
   final VoidCallback onManageGroups;
+  final VoidCallback? onClose;
 
   @override
   Widget build(BuildContext context) {
@@ -55,6 +57,15 @@ class LibraryGroupBar extends StatelessWidget {
             colors: colors,
             onTap: onManageGroups,
           ),
+          if (onClose != null) ...[
+            const SizedBox(width: AppSpacing.xs),
+            _GroupActionChip(
+              icon: Icons.close_rounded,
+              label: '收起',
+              colors: colors,
+              onTap: onClose!,
+            ),
+          ],
         ],
       ),
     );

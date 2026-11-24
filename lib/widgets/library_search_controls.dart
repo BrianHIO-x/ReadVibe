@@ -4,41 +4,99 @@ import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_popup_menu.dart';
 
+sealed class _FilterMenuAction {
+  const _FilterMenuAction();
+}
+
+final class _SelectShelfFilter extends _FilterMenuAction {
+  const _SelectShelfFilter(this.filter);
+
+  final ShelfFilter filter;
+}
+
+final class _ToggleGroupBarAction extends _FilterMenuAction {
+  const _ToggleGroupBarAction();
+}
+
+final class _SelectGroupAction extends _FilterMenuAction {
+  const _SelectGroupAction(this.group);
+
+  final String group;
+}
+
 class LibraryFilterButton extends StatelessWidget {
   const LibraryFilterButton({
     super.key,
     required this.filter,
     required this.colors,
     required this.onSelected,
+    this.groups = const <String>[],
+    this.selectedGroup,
+    this.groupBarVisible = false,
+    this.onToggleGroupBar,
+    this.onGroupSelected,
   });
+
   final ShelfFilter filter;
   final ReaderThemeColors colors;
   final ValueChanged<ShelfFilter> onSelected;
+  final List<String> groups;
+  final String? selectedGroup;
+  final bool groupBarVisible;
+  final VoidCallback? onToggleGroupBar;
+  final ValueChanged<String>? onGroupSelected;
 
   @override
-  Widget build(BuildContext context) => AppPopupMenuButton<ShelfFilter>(
-    colors: colors,
-    tooltip: '筛选书架',
-    onSelected: onSelected,
-    // Lands the menu's right edge on the shelf grid's right edge instead of
-    // trailing the icon, so it lines up with the last column of covers.
-    menuRightInset:
-        MediaQuery.viewPaddingOf(context).right + AppSpacing.md,
-    icon: Icon(
-      filter == ShelfFilter.all
-          ? Icons.filter_list_rounded
-          : Icons.filter_list_alt,
-      color: filter == ShelfFilter.all ? colors.secondary : colors.accent,
-    ),
-    entries: [
-      for (final choice in ShelfFilter.values)
-        AppMenuEntry(
-          value: choice,
-          label: choice.label,
-          selected: choice == filter,
-        ),
-    ],
-  );
+  Widget build(BuildContext context) {
+    final groupBarActive = groupBarVisible || selectedGroup != null;
+    final hasActive = filter != ShelfFilter.all || groupBarActive;
+    return AppPopupMenuButton<_FilterMenuAction>(
+      colors: colors,
+      tooltip: '筛选书架',
+      onSelected: (action) {
+        switch (action) {
+          case _SelectShelfFilter(:final filter):
+            onSelected(filter);
+          case _ToggleGroupBarAction():
+            onToggleGroupBar?.call();
+          case _SelectGroupAction(:final group):
+            onGroupSelected?.call(group);
+        }
+      },
+      // Lands the menu's right edge on the shelf grid's right edge instead of
+      // trailing the icon, so it lines up with the last column of covers.
+      menuRightInset:
+          MediaQuery.viewPaddingOf(context).right + AppSpacing.md,
+      icon: Icon(
+        hasActive ? Icons.filter_list_alt : Icons.filter_list_rounded,
+        color: hasActive ? colors.accent : colors.secondary,
+      ),
+      entries: [
+        for (final choice in ShelfFilter.values)
+          AppMenuEntry(
+            value: _SelectShelfFilter(choice),
+            label: choice.label,
+            selected: choice == filter,
+          ),
+        if (onToggleGroupBar != null)
+          AppMenuEntry(
+            value: const _ToggleGroupBarAction(),
+            label: groupBarActive ? '隐藏分组栏' : '显示分组栏',
+            icon: Icons.label_outline_rounded,
+            selected: groupBarActive,
+            dividerBefore: true,
+          ),
+        if (onGroupSelected != null)
+          for (final group in groups)
+            AppMenuEntry(
+              value: _SelectGroupAction(group),
+              label: group,
+              icon: Icons.folder_outlined,
+              selected: selectedGroup == group,
+            ),
+      ],
+    );
+  }
 }
 
 class LibrarySearchControls extends StatelessWidget {

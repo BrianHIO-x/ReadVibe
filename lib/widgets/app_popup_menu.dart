@@ -11,11 +11,13 @@ class AppMenuEntry<T> {
     required this.label,
     this.icon,
     this.selected = false,
+    this.dividerBefore = false,
   });
   final T value;
   final String label;
   final IconData? icon;
   final bool selected;
+  final bool dividerBefore;
 }
 
 class AppPopupMenuButton<T> extends StatefulWidget {
@@ -85,8 +87,11 @@ class _AppPopupMenuButtonState<T> extends State<AppPopupMenuButton<T>> {
       menuPadding: const EdgeInsets.all(6),
       clipBehavior: Clip.antiAlias,
       shape: AppOverlayTheme.shape(colors, AppRadius.lg),
-      items: [
-        for (final entry in widget.entries) _buildItem(entry, colors),
+      items: <PopupMenuEntry<T>>[
+        for (final entry in widget.entries) ...[
+          if (entry.dividerBefore) _AppMenuDivider(color: colors.border),
+          _buildItem(entry, colors),
+        ],
       ],
     );
     if (!mounted || selected == null) return;
@@ -144,4 +149,32 @@ class _AppPopupMenuButtonState<T> extends State<AppPopupMenuButton<T>> {
       style: IconButton.styleFrom(minimumSize: const Size(44, 44)),
     ),
   );
+}
+
+class _AppMenuDivider extends PopupMenuEntry<Never> {
+  const _AppMenuDivider({required this.color});
+
+  final Color color;
+
+  @override
+  double get height => 11;
+
+  @override
+  bool represents(Never? value) => false;
+
+  @override
+  State<_AppMenuDivider> createState() => _AppMenuDividerState();
+}
+
+class _AppMenuDividerState extends State<_AppMenuDivider> {
+  @override
+  Widget build(BuildContext context) {
+    return Divider(
+      height: widget.height,
+      thickness: 1,
+      indent: 10,
+      endIndent: 10,
+      color: widget.color,
+    );
+  }
 }

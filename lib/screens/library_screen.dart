@@ -109,6 +109,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   final _librarySearchController = TextEditingController();
   final _librarySearchFocus = FocusNode();
   bool _librarySearchVisible = false;
+  bool _groupBarVisible = false;
   ShelfFilter _shelfFilter = ShelfFilter.all;
 
   late final AnimationController _gridEntranceController;
@@ -228,6 +229,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       _shelfFilter = ShelfFilter.all;
       _selectedGroup = null;
       _librarySearchVisible = false;
+      _groupBarVisible = false;
       _reorderMode = false;
       _reorderFocusBookId = null;
       _draggingBookId = null;
@@ -341,6 +343,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       _shelfFilter = ShelfFilter.all;
       _selectedGroup = null;
       _librarySearchVisible = false;
+      _groupBarVisible = false;
     });
   }
 
@@ -1695,7 +1698,26 @@ class _LibraryScreenState extends State<LibraryScreen>
                 LibraryFilterButton(
                   filter: _shelfFilter,
                   colors: colors,
+                  groups: _shelfGroups,
+                  selectedGroup: _selectedGroup,
+                  groupBarVisible: _groupBarVisible,
                   onSelected: (value) => setState(() => _shelfFilter = value),
+                  onToggleGroupBar: () => setState(() {
+                    if (_groupBarVisible || _selectedGroup != null) {
+                      _groupBarVisible = false;
+                      _selectedGroup = null;
+                    } else {
+                      _groupBarVisible = true;
+                    }
+                  }),
+                  onGroupSelected: (group) => setState(() {
+                    if (_selectedGroup == group) {
+                      _selectedGroup = null;
+                    } else {
+                      _selectedGroup = group;
+                      _groupBarVisible = true;
+                    }
+                  }),
                 ),
               ],
               if (selecting) ...[
@@ -1889,7 +1911,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             child:
                 !_reorderMode &&
                     !selecting &&
-                    (_shelfBooks.isNotEmpty || _shelfGroups.isNotEmpty)
+                    (_groupBarVisible || _selectedGroup != null)
                 ? Padding(
                     padding: const EdgeInsets.only(top: AppSpacing.sm),
                     child: LibraryGroupBar(
@@ -1899,6 +1921,10 @@ class _LibraryScreenState extends State<LibraryScreen>
                       onSelected: (group) =>
                           setState(() => _selectedGroup = group),
                       onManageGroups: _openGroupManager,
+                      onClose: () => setState(() {
+                        _groupBarVisible = false;
+                        _selectedGroup = null;
+                      }),
                     ),
                   )
                 : const SizedBox.shrink(),

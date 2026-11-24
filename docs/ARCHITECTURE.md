@@ -255,10 +255,10 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `global_settings_sheet.dart` | 全局设置侧栏（书架右上打开），根部使用带圆角与底色的 `Material` 以消除内部 `SwitchListTile.adaptive` 在 Debug 下的水波纹断言与遮挡。集中隐私书架入口、本地备份与恢复入口（`onOpenBackup`）、字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口、存储空间区与开源许可页入口；版本号由书架层传入。同文件的 `StorageUsageSection` 自行异步统计并展示分类占用，提供清理缓存与重新统计；`formatStorageBytes` 负责字节展示。 |
 | `library_backup_sheet.dart` | 本地备份与恢复面板。提供“导出备份”与“从备份恢复”双页签；导出按需勾选书籍文件/封面、设置/字体及隐私书架（先经隐私验证解锁，清理系统临时备份拷贝）；恢复通过 `AndroidBookPicker.pickBackup` 选包预览后执行非破坏性合并恢复。 |
 | `library_batch_bar.dart` | 书架多选底栏。多选模式下提供批量设组（“分组”）、“移入隐私”/“移出隐私”与批量“删除”操作。 |
-| `library_group_bar.dart` | 书架分组筛选与管理控件。包含水平分组胶囊栏 `LibraryGroupBar`、自定义分组管理面板 `showShelfGroupManagerSheet`（新建/重命名/删除）及单本与三态批量分配面板 `showAssignBookGroupsSheet`。 |
+| `library_group_bar.dart` | 书架分组筛选与管理控件。包含水平分组胶囊栏 `LibraryGroupBar`（支持尾部 `onClose` 收起按钮）、自定义分组管理面板 `showShelfGroupManagerSheet`（新建/重命名/删除）及单本与三态批量分配面板 `showAssignBookGroupsSheet`。 |
 | `library_reorder_grid.dart` | 书架网格展示、拖动排序视图与固定视口物理边界 `PinnedShelfScrollPhysics`。 |
 | `private_shelf_sheets.dart` | 隐私书架的交互面板。`_PinSheet` 自绘 6 位数字键盘，同时承担创建密码和验证密码两种用途。由于键盘是自绘的，系统输入法接触不到密码。`unlockPrivateShelf` 先调起默认的生物验证，失败或取消后再显示密码键盘。忘记密码的时候，已开启的生物验证可以用来重设密码。两种验证都没开启时，只能交由调用方清空隐私书架。`showPrivateShelfSettings` 负责开关指纹和人脸、选择默认方式、修改密码与关闭隐私书架，开启某一种之前会先验证一次。 |
-| `library_search_controls.dart` | 书架搜索与筛选用控件。`LibraryFilterButton` 弹出筛选菜单（当前项在菜单中打勾），菜单右缘与书架网格右边线对齐；`LibrarySearchControls` 组合圆角搜索框（可清除）与激活筛选 `InputChip`。 |
+| `library_search_controls.dart` | 书架搜索与筛选用控件。`LibraryFilterButton` 弹出筛选菜单（支持格式与状态筛选、`显示/隐藏分组栏`切换与直选自定义分组，当前项打勾，菜单右缘与书架网格右边线对齐）；`LibrarySearchControls` 组合圆角搜索框（可清除）与激活筛选 `InputChip`。 |
 | `app_update_dialog.dart` | 新版本对话框。展示安装包体积与发布说明（限高滚动），一个按钮串起下载、校验与调起安装三步；测速阶段显示不定进度条，下载中显示线路、百分比与实时速率且可随时取消；下载成功后失败重试不再重复下载，安装权限缺失时提示去系统设置开启后直接重试。 |
 
 ### lib/screens/
