@@ -4,7 +4,6 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/book.dart';
 import '../controllers/reader_window_controller.dart';
@@ -82,6 +81,9 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     WidgetsBinding.instance.addObserver(this);
     unawaited(_windowController.initialize());
     unawaited(_setWakelock(true));
+    if (widget.book.isPrivate) {
+      unawaited(ReaderWindowController.setSecure(this, true));
+    }
     _loadProgress();
   }
 
@@ -150,11 +152,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
 
   Future<void> _setWakelock(bool enabled) async {
     try {
-      if (enabled) {
-        await WakelockPlus.enable();
-      } else {
-        await WakelockPlus.disable();
-      }
+      await ReaderWindowController.setKeepScreenOn(this, enabled);
     } on Object catch (error, stackTrace) {
       debugPrint(
         'Failed to ${enabled ? 'enable' : 'disable'} PDF wakelock: $error',
@@ -816,6 +814,9 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
       unawaited(_savePage(_currentPage));
     }
     unawaited(_setWakelock(false));
+    if (widget.book.isPrivate) {
+      unawaited(ReaderWindowController.setSecure(this, false));
+    }
     _renderTasks.clear();
     for (final controller in _transformControllers.values) {
       controller.dispose();

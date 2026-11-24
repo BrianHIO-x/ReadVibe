@@ -24,46 +24,63 @@ class AppUpdateHandler(private val activity: Activity, messenger: BinaryMessenge
 
     init {
         channel.setMethodCallHandler { call, result ->
-            if (call.method != "installApk") {
-                result.notImplemented()
-            } else if (busy) {
-                result.error("UPDATE_BUSY", "正在检查安装包，请稍候", null)
-            } else {
-                busy = true
-                val path = call.argument<String>("path").orEmpty()
-                val version = call.argument<String>("version").orEmpty()
-                runner.submit(
-                    work = { validateApk(path, version) },
-                    onSuccess = { file ->
-                        busy = false
-                        try {
-                            if (!activity.packageManager.canRequestPackageInstalls()) {
-                                activity.startActivity(Intent(
-                                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                    Uri.parse("package:${activity.packageName}"),
-                                ))
-                                result.success("permissionRequired")
-                            } else {
-                                val uri = FileProvider.getUriForFile(
-                                    activity, "${activity.packageName}.updates", file,
-                                )
-                                activity.startActivity(Intent(Intent.ACTION_VIEW).apply {
-                                    setDataAndType(uri, "application/vnd.android.package-archive")
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                    clipData = ClipData.newRawUri("ReadVibe update", uri)
-                                })
-                                result.success("started")
-                            }
-                        } catch (error: Exception) {
-                            result.error("UPDATE_INSTALL_FAILED", "无法打开安装程序或安装权限设置：${error.message}", null)
-                        }
-                    },
-                    onError = { error ->
-                        busy = false
-                        result.error("UPDATE_INVALID", error.message ?: "安装包校验失败", null)
-                    },
-                )
+            when (call.method) {
+                "appVersion" -> result.success(readVersionName())
+                "installApk" -> handleInstallApk(call.argument<String>("path").orEmpty(), call.argument<String>("version").orEmpty(), result)
+                else -> result.notImplemented()
             }
+        }
+    }
+
+    private fun readVersionName(): String {
+        val info = if (Build.VERSION.SDK_INT >= 33) {
+            activity.packageManager.getPackageInfo(
+                activity.packageName,
+                PackageManager.PackageInfoFlags.of(0),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            activity.packageManager.getPackageInfo(activity.packageName, 0)
+        }
+        return info.versionName.orEmpty()
+    }
+
+    private fun handleInstallApk(path: String, version: String, result: MethodChannel.Result) {
+        if (busy) {
+            result.error("UPDATE_BUSY", "正在检查安装包，请稍候", null)
+        } else {
+            busy = true
+            runner.submit(
+                work = { validateApk(path, version) },
+                onSuccess = { file ->
+                    busy = false
+                    try {
+                        if (!activity.packageManager.canRequestPackageInstalls()) {
+                            activity.startActivity(Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:${activity.packageName}"),
+                            ))
+                            result.success("permissionRequired")
+                        } else {
+                            val uri = FileProvider.getUriForFile(
+                                activity, "${activity.packageName}.updates", file,
+                            )
+                            activity.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, "application/vnd.android.package-archive")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                clipData = ClipData.newRawUri("ReadVibe update", uri)
+                            })
+                            result.success("started")
+                        }
+                    } catch (error: Exception) {
+                        result.error("UPDATE_INSTALL_FAILED", "无法打开安装程序或安装权限设置：${error.message}", null)
+                    }
+                },
+                onError = { error ->
+                    busy = false
+                    result.error("UPDATE_INVALID", error.message ?: "安装包校验失败", null)
+                },
+            )
         }
     }
 

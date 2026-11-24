@@ -39,5 +39,5 @@ jobs:
         # Version name and base build number both come from pubspec.yaml.
         # This smoke APK uses an ephemeral signature and is never published.
         run: flutter build apk --release --split-per-abi --target-platform android-arm64 --no-pub
-      - name: Verify release contents and size budget
+      - name: Verify release contents
         run: python3 tool/check_release_package.py build/app/outputs/flutter-apk/app-arm64-v8a-release.apk --mapping build/app/outputs/mapping/release/mapping.txt

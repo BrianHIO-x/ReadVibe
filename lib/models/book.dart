@@ -259,6 +259,38 @@ class Chapter {
       epubBlocks.isNotEmpty || _storedHasSemanticHeading != null;
 }
 
+List<String> normalizeBookGroups(
+  Iterable<Object?> rawGroups, {
+  int maxGroups = 12,
+  int maxLength = 24,
+}) {
+  final normalized = <String>[];
+  final seen = <String>{};
+  for (final raw in rawGroups) {
+    if (raw is! String) continue;
+    final collapsed = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (collapsed.isEmpty) continue;
+    final clamped = _clampBookGroupName(collapsed, maxLength);
+    if (clamped.isEmpty || !seen.add(clamped)) continue;
+    normalized.add(clamped);
+    if (normalized.length >= maxGroups) break;
+  }
+  return List<String>.unmodifiable(normalized);
+}
+
+String _clampBookGroupName(String value, int maxUnits) {
+  if (value.length <= maxUnits) return value;
+  var cut = maxUnits;
+  if (cut > 0 && cut < value.length) {
+    final prev = value.codeUnitAt(cut - 1);
+    final next = value.codeUnitAt(cut);
+    if (prev >= 0xD800 && prev <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) {
+      cut -= 1;
+    }
+  }
+  return value.substring(0, cut).trimRight();
+}
+
 class Book {
   final String id;
   final String title;
@@ -280,6 +312,7 @@ class Book {
   /// Shown only on the private shelf. Shelf membership is changed through
   /// the library, never by saving a book's content.
   final bool isPrivate;
+  final List<String> groups;
 
   const Book({
     required this.id,
@@ -299,6 +332,7 @@ class Book {
     this.pageCount,
     this.embeddedFonts = const <String, String>{},
     this.isPrivate = false,
+    this.groups = const <String>[],
   }) : _storedChapterCount = chapterCount;
 
   bool get isPdf => format == BookFormat.pdf;
@@ -324,6 +358,7 @@ class Book {
     if (pageCount != null) 'pageCount': pageCount,
     if (embeddedFonts.isNotEmpty) 'embeddedFonts': embeddedFonts,
     if (isPrivate) 'private': true,
+    if (groups.isNotEmpty) 'groups': groups,
     // Note: chapters are stored separately to reduce JSON size
     'chapterCount': chapterCount,
   };
@@ -340,6 +375,7 @@ class Book {
     int? pageCount,
     Map<String, String>? embeddedFonts,
     bool? isPrivate,
+    List<String>? groups,
     bool clearWordCounts = false,
   }) {
     final nextChapters = chapters ?? this.chapters;
@@ -363,6 +399,7 @@ class Book {
       pageCount: pageCount ?? this.pageCount,
       embeddedFonts: embeddedFonts ?? this.embeddedFonts,
       isPrivate: isPrivate ?? this.isPrivate,
+      groups: groups == null ? this.groups : normalizeBookGroups(groups),
     );
   }
 
@@ -463,6 +500,9 @@ class Book {
       pageCount: pageCount,
       embeddedFonts: Map<String, String>.unmodifiable(embeddedFonts),
       isPrivate: json['private'] == true,
+      groups: json['groups'] is Iterable
+          ? normalizeBookGroups((json['groups'] as Iterable).cast<Object?>())
+          : const <String>[],
     );
   }
 }

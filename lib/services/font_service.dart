@@ -1,10 +1,10 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
+import 'android_book_picker.dart';
 import 'book_import_format.dart';
 
 class FontService {
@@ -46,55 +46,49 @@ class FontService {
   Future<ReaderSettings?> pickAndInstallFont(
     ReaderSettings currentSettings,
   ) async {
-    late final FilePickerResult? result;
+    final picked = await AndroidBookPicker.pickFont();
+    if (picked == null) return null;
     try {
-      result = await FilePicker.platform.pickFiles(
-        type: Platform.isAndroid ? FileType.any : FileType.custom,
-        allowedExtensions: Platform.isAndroid ? null : const ['ttf', 'otf'],
-      );
-    } on PlatformException catch (error) {
-      throw FormatException(describeFilePickerFailure(error));
-    }
-    if (result == null || result.files.isEmpty) return null;
-
-    final picked = result.files.single;
-    final sourcePath = await materializePickedLocalFile(
-      path: picked.path,
-      bytes: picked.bytes,
-      fileName: picked.name,
-    );
-    if (sourcePath == null) {
-      throw const FormatException('无法读取所选字体文件');
-    }
-    final extension = fileExtension(sourcePath).isNotEmpty
-        ? fileExtension(sourcePath)
-        : fileExtension(picked.name);
-    if (extension != 'ttf' && extension != 'otf') {
-      throw const FormatException('仅支持 .ttf 或 .otf 字体文件');
-    }
-    final displayName = fileExtension(picked.name) == extension
-        ? picked.name
-        : '${picked.name}.$extension';
-
-    final saved = await _storage.saveImportedFont(sourcePath, displayName);
-    final family = 'ReadVibeImported_${DateTime.now().microsecondsSinceEpoch}';
-    try {
-      await loadFont(family: family, path: saved.path);
-    } on Object {
-      try {
-        if (await saved.exists()) await saved.delete();
-      } on FileSystemException {
-        // Preserve the original font loading error for the caller.
+      final sourcePath = picked.path;
+      final extension = fileExtension(sourcePath).isNotEmpty
+          ? fileExtension(sourcePath)
+          : fileExtension(picked.name);
+      if (extension != 'ttf' && extension != 'otf') {
+        throw const FormatException('仅支持 .ttf 或 .otf 字体文件');
       }
-      rethrow;
-    }
+      final displayName = fileExtension(picked.name) == extension
+          ? picked.name
+          : '${picked.name}.$extension';
 
-    return currentSettings.copyWith(
-      fontFamily: family,
-      importedFontFamily: family,
-      importedFontName: displayName,
-      importedFontPath: saved.path,
-    );
+      final saved = await _storage.saveImportedFont(sourcePath, displayName);
+      final family = 'ReadVibeImported_${DateTime.now().microsecondsSinceEpoch}';
+      try {
+        await loadFont(family: family, path: saved.path);
+      } on Object {
+        try {
+          if (await saved.exists()) await saved.delete();
+        } on FileSystemException {
+          // Preserve the original font loading error for the caller.
+        }
+        rethrow;
+      }
+
+      return currentSettings.copyWith(
+        fontFamily: family,
+        importedFontFamily: family,
+        importedFontName: displayName,
+        importedFontPath: saved.path,
+      );
+    } finally {
+      if (picked.deleteAfterImport) {
+        try {
+          final temporary = File(picked.path);
+          if (await temporary.exists()) await temporary.delete();
+        } on FileSystemException {
+          // Picker cache cleanup is best-effort.
+        }
+      }
+    }
   }
 
   Future<void> loadFont({required String family, required String path}) async {

@@ -12,6 +12,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.Charset
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Inspects a SAF URI without copying the payload, then copies only files that
@@ -22,9 +23,13 @@ object BookImportProbe {
     const val ANDROID_PACKAGE_MESSAGE = "这是 Android 安装包，不是书籍"
     const val UNSUPPORTED_MESSAGE =
         "不支持的文件格式，请选择 TXT、EPUB、MOBI、AZW、AZW3、PDF、DOCX 或 DOC"
+    const val INVALID_FONT_MESSAGE = "仅支持 .ttf 或 .otf 字体文件"
+    const val INVALID_BACKUP_MESSAGE = "请选择 ReadVibe 导出的 .zip 备份文件"
 
     private const val PACKAGE_MIME = "application/vnd.android.package-archive"
     private const val MAX_COPY_BYTES = 1024L * 1024L * 1024L
+    private const val MAX_FONT_BYTES = 64L * 1024L * 1024L
+    private const val MAX_BACKUP_BYTES = 2L * 1024L * 1024L * 1024L
     private const val MAX_CENTRAL_DIRECTORY_BYTES = 2 * 1024 * 1024
     private const val MAX_ZIP_ENTRIES = 4096
     private const val EOCD_MIN_SIZE = 22
@@ -40,11 +45,16 @@ object BookImportProbe {
     private val BOOK_EXTENSIONS = setOf(
         "txt", "epub", "mobi", "azw", "azw3", "pdf", "doc", "docx",
     )
+    private val FONT_EXTENSIONS = setOf("ttf", "otf")
     private val DEX_ENTRY = Regex("^classes\\d+\\.dex$")
+    private val copySequence = AtomicInteger(0)
 
     enum class Kind {
         APK, EPUB, DOCX, PDF, DOC, MOBI, TXT, UNKNOWN, UNSEEKABLE,
     }
+
+    fun resolveDisplayName(context: Context, uri: Uri): String =
+        queryMeta(context, uri).displayName
 
     fun copyPickedBook(
         context: Context,
@@ -59,12 +69,64 @@ object BookImportProbe {
         if (kind == Kind.APK) error(ANDROID_PACKAGE_MESSAGE)
         if (!shouldCopy(kind, meta.displayName)) error(UNSUPPORTED_MESSAGE)
         return copyToCache(
-            context,
-            uri,
-            meta.displayName,
-            kind,
-            "readvibe_picked",
-            onBytesCopied,
+            context = context,
+            uri = uri,
+            displayName = labeledName(meta.displayName, kind),
+            directoryName = "readvibe_picked",
+            maxBytes = MAX_COPY_BYTES,
+            onBytesCopied = onBytesCopied,
+        )
+    }
+
+    fun copyPickedFont(
+        context: Context,
+        uri: Uri,
+        onBytesCopied: (Long) -> Unit = {},
+    ): Map<String, String> {
+        val meta = queryMeta(context, uri)
+        if (isAndroidPackage(meta.names, meta.mimes)) {
+            error(ANDROID_PACKAGE_MESSAGE)
+        }
+        if (peek(context, uri) == Kind.APK) error(ANDROID_PACKAGE_MESSAGE)
+        val header = readHeaderBytes(context, uri, 4)
+        val namedExtension = extensionOf(meta.displayName)
+        val detectedExtension = when {
+            namedExtension in FONT_EXTENSIONS -> namedExtension
+            isOpenTypeFont(header) -> "otf"
+            isTrueTypeFont(header) -> "ttf"
+            else -> error(INVALID_FONT_MESSAGE)
+        }
+        val labeled = withExtension(meta.displayName, detectedExtension)
+        return copyToCache(
+            context = context,
+            uri = uri,
+            displayName = labeled,
+            directoryName = "readvibe_picked_fonts",
+            maxBytes = MAX_FONT_BYTES,
+            onBytesCopied = onBytesCopied,
+        )
+    }
+
+    fun copyPickedBackup(
+        context: Context,
+        uri: Uri,
+        onBytesCopied: (Long) -> Unit = {},
+    ): Map<String, String> {
+        val meta = queryMeta(context, uri)
+        if (isAndroidPackage(meta.names, meta.mimes)) {
+            error(ANDROID_PACKAGE_MESSAGE)
+        }
+        if (peek(context, uri) == Kind.APK) error(ANDROID_PACKAGE_MESSAGE)
+        val header = readHeaderBytes(context, uri, 4)
+        if (!isZip(header)) error(INVALID_BACKUP_MESSAGE)
+        val labeled = withExtension(meta.displayName, "zip")
+        return copyToCache(
+            context = context,
+            uri = uri,
+            displayName = labeled,
+            directoryName = "readvibe_backup_import",
+            maxBytes = MAX_BACKUP_BYTES,
+            onBytesCopied = onBytesCopied,
         )
     }
 
@@ -362,12 +424,50 @@ object BookImportProbe {
         return pairs >= 8
     }
 
+    private fun readHeaderBytes(context: Context, uri: Uri, count: Int): ByteArray {
+        val input = when (uri.scheme) {
+            "file" -> FileInputStream(File(requireNotNull(uri.path)))
+            else -> context.contentResolver.openInputStream(uri)
+        } ?: return ByteArray(0)
+        return input.use { stream ->
+            val buffer = ByteArray(count)
+            var offset = 0
+            while (offset < count) {
+                val read = stream.read(buffer, offset, count - offset)
+                if (read < 0) break
+                offset += read
+            }
+            if (offset == count) buffer else buffer.copyOf(offset)
+        }
+    }
+
+    private fun isTrueTypeFont(bytes: ByteArray): Boolean {
+        if (bytes.size < 4) return false
+        val sfnt = bytes[0] == 0x00.toByte() &&
+            bytes[1] == 0x01.toByte() &&
+            bytes[2] == 0x00.toByte() &&
+            bytes[3] == 0x00.toByte()
+        val appleTrue = bytes[0] == 0x74.toByte() &&
+            bytes[1] == 0x72.toByte() &&
+            bytes[2] == 0x75.toByte() &&
+            bytes[3] == 0x65.toByte()
+        return sfnt || appleTrue
+    }
+
+    private fun isOpenTypeFont(bytes: ByteArray): Boolean {
+        return bytes.size >= 4 &&
+            bytes[0] == 0x4f.toByte() &&
+            bytes[1] == 0x54.toByte() &&
+            bytes[2] == 0x54.toByte() &&
+            bytes[3] == 0x4f.toByte()
+    }
+
     private fun copyToCache(
         context: Context,
         uri: Uri,
         displayName: String,
-        kind: Kind,
         directoryName: String,
+        maxBytes: Long,
         onBytesCopied: (Long) -> Unit = {},
     ): Map<String, String> {
         val directory = File(context.cacheDir, directoryName)
@@ -376,9 +476,12 @@ object BookImportProbe {
         directory.listFiles()?.forEach { file ->
             if (file.lastModified() < staleBefore) file.delete()
         }
-        val labeled = labeledName(displayName, kind)
-        val sanitized = labeled.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_")
-        val target = File(directory, "${System.currentTimeMillis()}_${sanitized.ifEmpty { "file" }}")
+        val sanitized = displayName.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_")
+        val sequence = copySequence.getAndIncrement()
+        val target = File(
+            directory,
+            "${System.currentTimeMillis()}_${sequence}_${sanitized.ifEmpty { "file" }}",
+        )
         val input = when (uri.scheme) {
             "file" -> FileInputStream(File(requireNotNull(uri.path)))
             else -> context.contentResolver.openInputStream(uri)
@@ -392,7 +495,7 @@ object BookImportProbe {
                         val count = source.read(buffer)
                         if (count < 0) break
                         copied += count
-                        if (copied > MAX_COPY_BYTES) error("外部文件超过 1 GB，无法导入")
+                        if (copied > maxBytes) error("所选文件过大，无法导入")
                         output.write(buffer, 0, count)
                         // A document provider may stream from the network, so
                         // the caller needs to see that bytes are still moving
@@ -405,7 +508,7 @@ object BookImportProbe {
             require(copied > 0) { "外部文件为空" }
             return mapOf(
                 "path" to target.absolutePath,
-                "name" to labeled,
+                "name" to displayName,
             )
         } catch (error: Throwable) {
             target.delete()
@@ -423,6 +526,10 @@ object BookImportProbe {
             Kind.TXT -> "txt"
             else -> ""
         }
+        return withExtension(displayName, extension)
+    }
+
+    private fun withExtension(displayName: String, extension: String): String {
         val current = extensionOf(displayName)
         if (extension.isEmpty() || current == extension) return displayName
         if (current.isEmpty()) return "$displayName.$extension"

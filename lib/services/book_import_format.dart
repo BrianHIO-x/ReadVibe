@@ -45,28 +45,6 @@ String describeFilePickerFailure(Object error) {
   return '无法选择文件';
 }
 
-/// Writes picker bytes to a cache file when the plugin did not return a path.
-Future<String?> materializePickedLocalFile({
-  required String? path,
-  required List<int>? bytes,
-  required String fileName,
-}) async {
-  if (path != null && path.isNotEmpty) return path;
-  if (bytes == null || bytes.isEmpty) return null;
-  final directory = Directory('${Directory.systemTemp.path}/readvibe_picked');
-  if (!await directory.exists()) {
-    await directory.create(recursive: true);
-  }
-  final safeName = fileName
-      .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F\x7F]'), '_')
-      .trim();
-  final file = File(
-    '${directory.path}/${DateTime.now().microsecondsSinceEpoch}_${safeName.isEmpty ? 'file' : safeName}',
-  );
-  await file.writeAsBytes(bytes, flush: true);
-  return file.path;
-}
-
 /// Resolves a supported book format from names first, then file contents.
 ///
 /// Throws [FormatException] for an Android package or an unrecognized file.

@@ -6,6 +6,8 @@ import android.hardware.biometrics.BiometricManager
 import android.hardware.biometrics.BiometricPrompt
 import android.os.Build
 import android.os.CancellationSignal
+import android.os.SystemClock
+import android.provider.Settings
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 
@@ -26,6 +28,7 @@ class BiometricHandler(private val activity: Activity, messenger: BinaryMessenge
         channel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "capabilities" -> result.success(capabilities())
+                "clock" -> result.success(clockSnapshot())
                 "authenticate" -> authenticate(
                     title = call.argument<String>("title").orEmpty(),
                     subtitle = call.argument<String>("subtitle"),
@@ -66,6 +69,19 @@ class BiometricHandler(private val activity: Activity, messenger: BinaryMessenge
                 BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE -> "noHardware"
                 else -> "unavailable"
             },
+        )
+    }
+
+    private fun clockSnapshot(): Map<String, Any> {
+        val bootCount = try {
+            Settings.Global.getInt(activity.contentResolver, Settings.Global.BOOT_COUNT, -1)
+        } catch (_: Exception) {
+            -1
+        }
+        return mapOf(
+            "elapsedRealtimeMs" to SystemClock.elapsedRealtime(),
+            "bootCount" to bootCount,
+            "wallTimeMs" to System.currentTimeMillis(),
         )
     }
 

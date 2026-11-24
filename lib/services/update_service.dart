@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:package_info_plus/package_info_plus.dart';
+import 'package:flutter/services.dart';
 
 /// Release metadata fetched from GitHub for a newer version.
 class AppUpdateInfo {
@@ -73,15 +73,21 @@ class UpdateService implements UpdateChecker {
 
   static const _apiUrl =
       'https://api.github.com/repos/BrianHIO-x/ReadVibe/releases/latest';
+  static const _appUpdateChannel = MethodChannel('com.readvibe.app/app_update');
   final List<Uri> _feeds;
   final Future<String> Function()? versionReader;
   final Duration timeout;
   Future<UpdateCheckResult>? _checking;
 
   @override
-  Future<String> currentVersion() async => versionReader != null
-      ? await versionReader!()
-      : (await PackageInfo.fromPlatform()).version;
+  Future<String> currentVersion() async {
+    if (versionReader != null) return versionReader!();
+    final version = await _appUpdateChannel.invokeMethod<String>('appVersion');
+    if (version == null || version.trim().isEmpty) {
+      throw const FormatException('无法获取应用版本');
+    }
+    return version.trim();
+  }
 
   /// Checks the release feed: a newer release when available, up-to-date
   /// when the feed answers with the current version, or an error when the

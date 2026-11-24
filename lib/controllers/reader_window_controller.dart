@@ -10,6 +10,8 @@ class ReaderWindowController extends ChangeNotifier
     with WidgetsBindingObserver {
   static const _channel = MethodChannel('com.readvibe.app/reader_window');
   static Future<void> _commands = Future<void>.value();
+  static final Set<Object> _secureTokens = <Object>{};
+  static final Set<Object> _keepScreenOnTokens = <Object>{};
   EdgeInsets? _cutout;
   EdgeInsets? _bars;
   bool _visible = true;
@@ -63,13 +65,47 @@ class ReaderWindowController extends ChangeNotifier
   static Future<void> _enqueueChrome(bool visible) {
     // Serial across routes too: an old reader's restoration cannot arrive
     // after a new reader has already hidden its chrome.
+    return _enqueueCommand('setChrome', {'visible': visible});
+  }
+
+  /// Controls Android FLAG_SECURE using caller-owned tokens so overlapping
+  /// private routes (shelf + open private book) never clear each other's lock.
+  static Future<void> setSecure(Object token, bool enabled) {
+    final wasEnabled = _secureTokens.isNotEmpty;
+    if (enabled) {
+      _secureTokens.add(token);
+    } else {
+      _secureTokens.remove(token);
+    }
+    final isEnabled = _secureTokens.isNotEmpty;
+    if (wasEnabled == isEnabled) return Future<void>.value();
+    return _enqueueCommand('setSecure', {'enabled': isEnabled});
+  }
+
+  /// Controls Android FLAG_KEEP_SCREEN_ON using caller-owned tokens.
+  static Future<void> setKeepScreenOn(Object token, bool enabled) {
+    final wasEnabled = _keepScreenOnTokens.isNotEmpty;
+    if (enabled) {
+      _keepScreenOnTokens.add(token);
+    } else {
+      _keepScreenOnTokens.remove(token);
+    }
+    final isEnabled = _keepScreenOnTokens.isNotEmpty;
+    if (wasEnabled == isEnabled) return Future<void>.value();
+    return _enqueueCommand('setKeepScreenOn', {'enabled': isEnabled});
+  }
+
+  static Future<void> _enqueueCommand(
+    String method,
+    Map<String, Object?> arguments,
+  ) {
     return _commands = _commands.then((_) async {
       try {
-        await _channel.invokeMethod<void>('setChrome', {'visible': visible});
+        await _channel.invokeMethod<void>(method, arguments);
       } on MissingPluginException {
-        // Non-Android hosts retain Flutter's edge-to-edge surface.
+        // Non-Android hosts retain Flutter's default surface behavior.
       } on Object catch (error) {
-        debugPrint('Reader window update failed: $error');
+        debugPrint('Reader window $method failed: $error');
       }
     });
   }

@@ -15,7 +15,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.7.21+97
+version: 0.7.22+98
 
 environment:
   sdk: ^3.12.2
@@ -30,9 +30,6 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # 11.x assumes AGP 9 built-in Kotlin, while this Flutter template keeps the
-  # compatibility Kotlin plugin enabled for wakelock_plus/package_info_plus.
-  file_picker: 10.3.10
   archive: ^4.0.0
   shared_preferences: ^2.3.0
   path_provider: ^2.1.0
@@ -43,10 +40,8 @@ dependencies:
   crypto: ^3.0.7
   html: ^0.15.6
   xml: ^7.0.1
-  wakelock_plus: ^1.5.2
   flutter_localizations:
     sdk: flutter
-  package_info_plus: ^9.0.1
 
 dev_dependencies:
   # The "flutter_lints" package below contains a set of recommended lints to

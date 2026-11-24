@@ -41,6 +41,22 @@ class ReaderWindowHandler(private val activity: Activity, messenger: BinaryMesse
                     }
                     result.success(null)
                 }
+                "setSecure" -> {
+                    if (call.argument<Boolean>("enabled") == true) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    }
+                    result.success(null)
+                }
+                "setKeepScreenOn" -> {
+                    if (call.argument<Boolean>("enabled") == true) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                    result.success(null)
+                }
                 "metrics" -> {
                     val insets = ViewCompat.getRootWindowInsets(window.decorView)
                     if (insets == null) {

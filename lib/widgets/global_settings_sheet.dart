@@ -25,6 +25,7 @@ class GlobalSettingsSheet extends StatelessWidget {
   /// Sets up, enters or locks the private shelf, depending on its state.
   final VoidCallback onPrivateShelf;
   final VoidCallback onPrivateShelfSettings;
+  final VoidCallback? onOpenBackup;
 
   const GlobalSettingsSheet({
     super.key,
@@ -40,26 +41,28 @@ class GlobalSettingsSheet extends StatelessWidget {
     required this.privateShelfOpen,
     required this.onPrivateShelf,
     required this.onPrivateShelfSettings,
+    this.onOpenBackup,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: colors.headerBg,
-        borderRadius: const BorderRadius.horizontal(
-          right: Radius.circular(AppRadius.pill),
-        ),
+    return Material(
+      color: colors.headerBg,
+      surfaceTintColor: Colors.transparent,
+      borderRadius: const BorderRadius.horizontal(
+        right: Radius.circular(AppRadius.pill),
       ),
+      clipBehavior: Clip.antiAlias,
       // The trailing gap lives on the scroll view instead of the panel, so the
       // list keeps running underneath the gesture bar.
-      padding: EdgeInsets.fromLTRB(
-        AppSpacing.xl,
-        MediaQuery.viewPaddingOf(context).top + AppSpacing.xl,
-        AppSpacing.xl,
-        0,
-      ),
-      child: SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          AppSpacing.xl,
+          MediaQuery.viewPaddingOf(context).top + AppSpacing.xl,
+          AppSpacing.xl,
+          0,
+        ),
+        child: SafeArea(
         top: false,
         right: false,
         bottom: false,
@@ -247,6 +250,36 @@ class GlobalSettingsSheet extends StatelessWidget {
                         side: BorderSide(color: colors.border),
                       ),
                     ),
+                    if (onOpenBackup != null) ...[
+                      const SizedBox(height: AppSpacing.xl),
+                      Text(
+                        '备份与恢复',
+                        style: TextStyle(
+                          color: colors.text,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.sm),
+                      Text(
+                        '导出阅读进度、书签笔记、设置或完整书籍压缩包，便于换机与本地迁移。',
+                        style: TextStyle(
+                          color: colors.secondary,
+                          fontSize: 12,
+                          height: 1.5,
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.sm),
+                      OutlinedButton.icon(
+                        onPressed: onOpenBackup,
+                        icon: const Icon(Icons.archive_outlined, size: 18),
+                        label: const Text('备份与恢复'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: colors.accent,
+                          side: BorderSide(color: colors.border),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: AppSpacing.xl),
                     StorageUsageSection(
                       colors: colors,
@@ -283,6 +316,7 @@ class GlobalSettingsSheet extends StatelessWidget {
             ),
           ],
         ),
+      ),
       ),
     );
   }

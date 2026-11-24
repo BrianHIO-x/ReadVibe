@@ -19,6 +19,8 @@ class BookCard extends StatefulWidget {
   final Key? coverKey;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
+  final bool selectionMode;
+  final bool selected;
 
   static const _inset = 6.0;
   static const _coverAspectRatio = 0.7;
@@ -64,6 +66,8 @@ class BookCard extends StatefulWidget {
     this.coverKey,
     required this.onTap,
     this.onLongPress,
+    this.selectionMode = false,
+    this.selected = false,
   });
 
   @override
@@ -387,6 +391,45 @@ class _BookCardState extends State<BookCard> {
                                 ),
                               ),
                             ),
+                            if (widget.selectionMode)
+                              Positioned.fill(
+                                child: DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(
+                                      AppRadius.md,
+                                    ),
+                                    border: Border.all(
+                                      color: widget.selected
+                                          ? palette.accent
+                                          : palette.border.withValues(
+                                              alpha: 0.7,
+                                            ),
+                                      width: widget.selected ? 2.2 : 1,
+                                    ),
+                                    color: widget.selected
+                                        ? palette.accent.withValues(alpha: 0.14)
+                                        : null,
+                                  ),
+                                  child: Align(
+                                    alignment: Alignment.bottomRight,
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(6),
+                                      child: Icon(
+                                        widget.selected
+                                            ? Icons.check_circle_rounded
+                                            : Icons
+                                                  .radio_button_unchecked_rounded,
+                                        size: 20,
+                                        color: widget.selected
+                                            ? palette.accent
+                                            : Colors.white.withValues(
+                                                alpha: 0.9,
+                                              ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
                       ),

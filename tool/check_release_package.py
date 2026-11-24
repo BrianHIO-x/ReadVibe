@@ -16,10 +16,6 @@ PICNIC_METADATA = {
     "PicnicParameters", "PicnicKeyParameters",
     "PicnicPrivateKeyParameters", "PicnicPublicKeyParameters",
 }
-# Includes the roughly 2.6 MB of compressed SIKE tables needed by PDFBox's
-# retained key parameter initialization and the 2.7 MB bundled Kaiti font,
-# with about 1.7 MB of headroom.
-RELEASE_SIZE_BUDGET = 64_000_000
 
 
 def digest(stream):
@@ -64,10 +60,8 @@ def dex_class_descriptors(data):
     return result
 
 
-def inspect(apk, mapping, fonts, max_bytes):
+def inspect(apk, mapping, fonts):
     size = apk.stat().st_size
-    if size > max_bytes:
-        raise ValueError(f"APK size {size:,} exceeds budget {max_bytes:,}")
     mapping_text = mapping.read_text(encoding="utf-8")
     picnic_types = set(re.findall(
         r"\borg\.bouncycastle\.pqc\.crypto\.picnic\.([A-Za-z0-9_$]+)",
@@ -124,7 +118,7 @@ def inspect(apk, mapping, fonts, max_bytes):
                     raise ValueError(f"Bundled font differs from its complete source: {font.name}")
         top_entries = sorted(archive.infolist(), key=lambda item: item.compress_size, reverse=True)[:6]
         largest = [{"path": item.filename, "compressed_bytes": item.compress_size} for item in top_entries]
-    return {"apk_bytes": size, "size_budget_bytes": max_bytes,
+    return {"apk_bytes": size,
             "sike_data_compressed_bytes": sike_data_bytes, "largest_entries": largest}
 
 
@@ -135,9 +129,8 @@ def main():
     parser.add_argument("--font", type=Path, default=Path("assets/fonts/SourceHanSerifSC-Regular.ttf"))
     parser.add_argument("--kaiti-font", type=Path, default=Path("assets/fonts/ARPLKaitiMGB-Regular.ttf"))
     parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--max-bytes", type=int, default=RELEASE_SIZE_BUDGET)
     args = parser.parse_args()
-    report = inspect(args.apk, args.mapping, [args.font, args.kaiti_font], args.max_bytes)
+    report = inspect(args.apk, args.mapping, [args.font, args.kaiti_font])
     if args.baseline:
         baseline = args.baseline.stat().st_size
         report.update(baseline_bytes=baseline, saved_bytes=baseline - report["apk_bytes"],

@@ -6,38 +6,43 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import '../theme/app_theme.dart';
-import '../theme/app_spacing.dart';
-import '../theme/app_motion.dart';
-import '../services/font_service.dart';
+
+import '../controllers/library_maintenance_controller.dart';
+import '../controllers/library_selection_controller.dart';
+import '../controllers/library_update_controller.dart';
+import '../controllers/private_shelf_controller.dart';
+import '../models/book.dart';
+import '../models/library_filter.dart';
+import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
-import '../services/book_import_coordinator.dart';
-import '../services/book_import_format.dart';
 import '../services/android_book_picker.dart';
 import '../services/book_export_service.dart';
-import '../models/library_filter.dart';
-import '../widgets/library_search_controls.dart';
+import '../services/book_import_coordinator.dart';
+import '../services/book_import_format.dart';
 import '../services/chinese_text.dart';
-import '../services/storage_service.dart';
-import '../controllers/library_maintenance_controller.dart';
-import '../services/update_service.dart';
+import '../services/font_service.dart';
 import '../services/incoming_file_service.dart';
+import '../services/library_backup_service.dart';
 import '../services/private_shelf_lock.dart';
-import '../models/book.dart';
-import '../models/reader_settings.dart';
-import '../widgets/app_toast.dart';
+import '../services/storage_service.dart';
+import '../services/update_service.dart';
+import '../theme/app_motion.dart';
+import '../theme/app_overlay_theme.dart';
+import '../theme/app_spacing.dart';
+import '../theme/app_theme.dart';
 import '../widgets/app_dialog.dart';
 import '../widgets/app_sheet.dart';
-import '../theme/app_overlay_theme.dart';
-import '../widgets/app_update_dialog.dart';
+import '../widgets/app_toast.dart';
 import '../widgets/book_card.dart';
 import '../widgets/global_settings_sheet.dart';
-import '../widgets/private_shelf_sheets.dart';
+import '../widgets/library_backup_sheet.dart';
+import '../widgets/library_batch_bar.dart';
+import '../widgets/library_group_bar.dart';
+import '../widgets/library_reorder_grid.dart';
+import '../widgets/library_search_controls.dart';
 import '../widgets/side_drawer.dart';
-import 'reader_screen.dart';
 import 'pdf_reader_screen.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'reader_screen.dart';
 
 /// Library / bookshelf screen
 class LibraryScreen extends StatefulWidget {
@@ -58,33 +63,19 @@ class LibraryScreen extends StatefulWidget {
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
 
-enum _BookAction { rename, move, togglePrivate, delete, exportFile }
-
-/// How long a reporting import may stay quiet before the shelf gives up.
-///
-/// Chapters are written in batches and every batch is reported, so a gap this
-/// long means nothing is coming back.
-const _importStallLimit = Duration(seconds: 100);
-
-/// How long a step that cannot report its own progress may take.
-///
-/// Reading a file and parsing it are each a single call that says nothing
-/// until it returns, and a book close to the accepted size limit legitimately
-/// spends minutes inside them on a slow device. This bound therefore only has
-/// to be short enough that a wedged import still releases the shelf.
-const _importSilentStepLimit = Duration(minutes: 12);
-
-/// How long a file handed over by another app waits for a busy shelf.
-const _incomingImportQueueLimit = Duration(minutes: 10);
-
-Offset _centerDragAnchorStrategy(
-  Draggable<Object> draggable,
-  BuildContext context,
-  Offset position,
-) {
-  final renderBox = context.findRenderObject()! as RenderBox;
-  return renderBox.size.center(Offset.zero);
+enum _BookAction {
+  rename,
+  groups,
+  multiSelect,
+  move,
+  togglePrivate,
+  delete,
+  exportFile,
 }
+
+const _importStallLimit = Duration(seconds: 100);
+const _importSilentStepLimit = Duration(minutes: 12);
+const _incomingImportQueueLimit = Duration(minutes: 10);
 
 class _LibraryScreenState extends State<LibraryScreen>
     with TickerProviderStateMixin {
@@ -92,62 +83,39 @@ class _LibraryScreenState extends State<LibraryScreen>
   late final FontService _fontService;
   late final BookImportCoordinator _bookImporter;
   late final BookExporter _bookExporter;
-  bool _exporting = false;
-  late final UpdateChecker _updateChecker;
+  late final LibraryBackupService _backupService;
+  late final LibraryMaintenanceController _maintenance;
+  late final LibraryUpdateController _updateController;
+  late final PrivateShelfController _privateShelf;
+  final _selection = LibrarySelectionController();
+
   List<Book> _books = [];
   Map<String, ReadingProgress> _progressMap = {};
   Map<String, BookAvailability> _availabilityMap = {};
+  List<String> _shelfGroups = const <String>[];
+  String? _selectedGroup;
   ReaderSettings _settings = const ReaderSettings();
+
   bool _loading = true;
   bool _importing = false;
   BookImportProgress? _importProgress;
+  int _importBatchIndex = 0;
+  int _importBatchTotal = 0;
+  bool _exporting = false;
   bool _openingBook = false;
   bool _settingsOpen = false;
   int _loadSerial = 0;
-  Timer? _automaticUpdateTimer;
-  late final LibraryMaintenanceController _maintenance;
-  bool _automaticUpdateRunning = false;
-  DateTime? _automaticUpdateRetryAt;
-  bool _manualUpdateChecking = false;
-  bool _updateDialogVisible = false;
-  String _applicationVersion = '—';
+
   final _librarySearchController = TextEditingController();
   final _librarySearchFocus = FocusNode();
   bool _librarySearchVisible = false;
   ShelfFilter _shelfFilter = ShelfFilter.all;
 
-  late final PrivateShelfLock _privateLock;
-  late final AppLifecycleListener _lifecycle;
-  PrivateShelfConfig _privateConfig = const PrivateShelfConfig();
-  // The private shelf opens for this session only and locks whenever the
-  // reader leaves the app, so the flag is never persisted.
-  bool _privateMode = false;
-  // A system picker or save dialog covers the app while the shelf is still
-  // using it. Leaving for one of those does not lock the private shelf.
-  int _systemDialogDepth = 0;
-  // The private shelf settings sheet may raise the system biometric prompt,
-  // which also makes the app inactive. That dialog belongs to a flow still on
-  // screen, so the inactive lock waits for a real hide instead.
-  int _foregroundPromptDepth = 0;
-  // An unlock that finishes while the window is briefly inactive (for
-  // example, right as Android's biometric prompt begins dismissing) waits
-  // here for the foreground resume instead of being dropped or painting
-  // private covers while unfocused.
-  Completer<bool>? _pendingForegroundResume;
-  Timer? _pendingForegroundTimer;
-  bool _privateShelfFlowBusy = false;
-  static const _foregroundResumeTimeout = Duration(seconds: 3);
-
   late final AnimationController _gridEntranceController;
   late final AnimationController _emptyIconController;
-  // The shelf (private or not) whose empty state has already floated its icon.
   bool? _floatedEmptyShelf;
 
   final _gridScrollController = ScrollController();
-  static const _minShelfColumns = 3;
-  static const _maxShelfColumns = 8;
-  static const _shelfCardAspectRatio = 0.52;
-
   final _reorderScrollController = ScrollController();
   bool _reorderShelfFits = false;
   bool _gridScrolled = false;
@@ -168,20 +136,43 @@ class _LibraryScreenState extends State<LibraryScreen>
     _fontService = FontService(_storage);
     _bookImporter = BookImportCoordinator(_storage);
     _bookExporter = widget.exporter ?? BookExportService();
-    _updateChecker = widget.updateChecker ?? UpdateService();
-    _privateLock = widget.privateShelfLock ?? PrivateShelfLock();
-    _lifecycle = AppLifecycleListener(
-      // Lock while the window still draws. The framework disables frames as
-      // soon as the app becomes hidden, so a lock performed there cannot take
-      // the private covers (or their semantics) out of the last rendered
-      // frame, which is exactly the frame the recents snapshot keeps.
-      // Android reports this state when the activity is paused, before it is
-      // stopped. onHide stays as a safety net for platforms that skip it.
-      onInactive: _handleAppInactive,
-      onHide: _handleAppHide,
-      onPause: _cancelPendingForegroundResume,
-      onDetach: _cancelPendingForegroundResume,
-      onResume: _handleAppResume,
+    final checker = widget.updateChecker ?? UpdateService();
+    _backupService = LibraryBackupService(
+      _storage is StorageService ? _storage : StorageService(),
+      readAppVersion: checker.currentVersion,
+    );
+    _updateController = LibraryUpdateController(
+      updateChecker: checker,
+      contextProvider: () => context,
+      isMounted: () => mounted,
+      isAutomaticEnabled: () => _settings.automaticUpdateChecks,
+      canPromptAutomaticUpdate: () =>
+          (ModalRoute.of(context)?.isCurrent == true || _settingsOpen) &&
+          !_openingBook &&
+          !_importing,
+      colorsProvider: () => _feedbackColors,
+      onMessage: _showMessage,
+      onError: _showError,
+      onVersionUpdated: () {
+        if (mounted) setState(() {});
+      },
+    );
+    _privateShelf = PrivateShelfController(
+      lock: widget.privateShelfLock ?? PrivateShelfLock(),
+      storage: _storage,
+      contextProvider: () => context,
+      isMounted: () => mounted,
+      isOpeningBook: () => _openingBook,
+      allBooksProvider: () => _books,
+      colorsProvider: () => _feedbackColors,
+      onPrivateModeChanged: _handlePrivateModeChanged,
+      onConfigChanged: () {
+        if (mounted) setState(() {});
+      },
+      onReloadLibrary: _loadData,
+      onMessage: _showMessage,
+      onError: _showError,
+      onAppResume: _updateController.syncAutomaticUpdateCheck,
     );
     _maintenance = LibraryMaintenanceController(
       repository: _storage,
@@ -212,24 +203,36 @@ class _LibraryScreenState extends State<LibraryScreen>
       duration: const Duration(milliseconds: 2400),
     );
     _gridScrollController.addListener(_handleGridScroll);
-    unawaited(_loadApplicationVersion());
-    unawaited(_loadPrivateConfig());
+    _selection.addListener(_handleSelectionChanged);
+    unawaited(_updateController.loadApplicationVersion());
+    unawaited(_privateShelf.loadConfig());
     _loadData();
     unawaited(
       IncomingFileService.start(_importIncomingBook, onError: _showError),
     );
   }
 
-  Future<void> _loadApplicationVersion() async {
-    try {
-      final version = await _updateChecker.currentVersion();
-      if (mounted && version.trim().isNotEmpty) {
-        setState(() => _applicationVersion = version.trim());
-      }
-    } on Object catch (error, stackTrace) {
-      debugPrint('Failed to read application version: $error');
-      debugPrintStack(stackTrace: stackTrace);
-    }
+  void _handleSelectionChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _handlePrivateModeChanged(bool private) {
+    _selection.exit();
+    _librarySearchController.clear();
+    _librarySearchFocus.unfocus();
+    _reorderFocusTimer?.cancel();
+    setState(() {
+      _shelfFilter = ShelfFilter.all;
+      _selectedGroup = null;
+      _librarySearchVisible = false;
+      _reorderMode = false;
+      _reorderFocusBookId = null;
+      _draggingBookId = null;
+    });
+    _rewindShelfScroll(_gridScrollController);
+    _gridEntranceController.reset();
+    _syncShelfAnimations();
+    unawaited(_reloadShelfGroups());
   }
 
   ReaderThemeColors get _feedbackColors => AppTheme.getReaderTheme(
@@ -237,157 +240,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     systemBrightness: MediaQuery.platformBrightnessOf(context),
   );
 
-  static const _updateCheckInterval = Duration(hours: 24);
-  static const _updateRetryDelay = Duration(hours: 1);
-  static const _updateCheckedAtKey = 'update_last_checked_at';
-
-  /// Silent GitHub release check, at most once every 24 hours.
-  ///
-  /// The check used to run once per process, two seconds after the shelf
-  /// first loaded. Android keeps the process alive for days, and a failed
-  /// first attempt was never retried, so a new release could go unnoticed
-  /// for a long time. The time of the last answered check is now stored, and
-  /// the check runs whenever the shelf loads, the app comes back to the
-  /// foreground, or the 24 hours run out while the shelf is open.
-  void _syncAutomaticUpdateCheck() {
-    _automaticUpdateTimer?.cancel();
-    _automaticUpdateTimer = null;
-    if (!_settings.automaticUpdateChecks) return;
-    unawaited(_runAutomaticUpdateCheck());
-  }
-
-  void _scheduleAutomaticUpdateCheck(Duration delay) {
-    _automaticUpdateTimer?.cancel();
-    _automaticUpdateTimer = null;
-    if (!mounted || !_settings.automaticUpdateChecks) return;
-    _automaticUpdateTimer = Timer(delay, () {
-      _automaticUpdateTimer = null;
-      unawaited(_runAutomaticUpdateCheck());
-    });
-  }
-
-  /// The prompt may cover the shelf or its settings sheet, never a book being
-  /// read. A skipped check runs again when the reader closes, since that
-  /// reloads the shelf, or when the app returns to the foreground.
-  bool get _canPromptAutomaticUpdate =>
-      mounted &&
-      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
-      (ModalRoute.of(context)?.isCurrent == true || _settingsOpen) &&
-      !_openingBook &&
-      !_importing &&
-      !_manualUpdateChecking &&
-      !_updateDialogVisible;
-
-  Future<void> _runAutomaticUpdateCheck() async {
-    if (_automaticUpdateRunning ||
-        !_settings.automaticUpdateChecks ||
-        !_canPromptAutomaticUpdate) {
-      return;
-    }
-    _automaticUpdateRunning = true;
-    try {
-      final now = DateTime.now();
-      final retryAt = _automaticUpdateRetryAt;
-      if (retryAt != null && now.isBefore(retryAt)) {
-        _scheduleAutomaticUpdateCheck(retryAt.difference(now));
-        return;
-      }
-      final prefs = await SharedPreferences.getInstance();
-      final checkedAt = DateTime.fromMillisecondsSinceEpoch(
-        prefs.getInt(_updateCheckedAtKey) ?? 0,
-      );
-      final due = checkedAt.add(_updateCheckInterval);
-      // A stored time ahead of the clock means the clock was set back. It is
-      // treated as due, so the next check cannot be held off indefinitely.
-      if (now.isBefore(due) && !checkedAt.isAfter(now)) {
-        _scheduleAutomaticUpdateCheck(due.difference(now));
-        return;
-      }
-
-      final result = await _updateChecker.checkForUpdate();
-      if (!mounted || !_settings.automaticUpdateChecks) return;
-      if (result.failed) {
-        // An unreachable feed is retried within the hour instead of waiting
-        // for another full day.
-        _automaticUpdateRetryAt = DateTime.now().add(_updateRetryDelay);
-        _scheduleAutomaticUpdateCheck(_updateRetryDelay);
-        return;
-      }
-      _automaticUpdateRetryAt = null;
-      final info = result.info;
-      // A release found while a book was opening is not counted as shown, so
-      // returning to the shelf checks again and prompts.
-      if (info != null && !_canPromptAutomaticUpdate) return;
-      await prefs.setInt(
-        _updateCheckedAtKey,
-        DateTime.now().millisecondsSinceEpoch,
-      );
-      _scheduleAutomaticUpdateCheck(_updateCheckInterval);
-      if (info != null) await _showUpdateDialog(info);
-    } on Object catch (error, stackTrace) {
-      debugPrint('Automatic update check failed: $error');
-      debugPrintStack(stackTrace: stackTrace);
-    } finally {
-      _automaticUpdateRunning = false;
-    }
-  }
-
-  /// Manual check from the global settings sheet. Reports every outcome —
-  /// new version, up to date, or unreachable — and ignores the 24-hour
-  /// cadence because the user explicitly asked.
-  Future<void> _checkUpdateManually() async {
-    if (_manualUpdateChecking || _updateDialogVisible) return;
-    _manualUpdateChecking = true;
-    try {
-      AppToast.loading(context, '正在检查更新…', colors: _feedbackColors);
-      final result = await _updateChecker.checkForUpdate();
-      if (!mounted) return;
-      AppToast.hide(context);
-      final info = result.info;
-      if (info != null) {
-        await _showUpdateDialog(info);
-        return;
-      }
-      if (result.failed) {
-        _showError('更新线路暂时不可用，请检查网络后重试');
-        return;
-      }
-      _showMessage('当前已是最新版本');
-    } on Object {
-      if (mounted) {
-        AppToast.hide(context);
-        _showError('检查更新失败，请稍后重试');
-      }
-    } finally {
-      _manualUpdateChecking = false;
-    }
-  }
-
-  Future<void> _showUpdateDialog(AppUpdateInfo info) async {
-    if (_updateDialogVisible) return;
-    _updateDialogVisible = true;
-    try {
-      final colors = AppTheme.getReaderTheme(
-        _settings.theme,
-        systemBrightness: MediaQuery.platformBrightnessOf(context),
-      );
-      await showAppDialog<void>(
-        context: context,
-        colors: colors,
-        barrierDismissible: false,
-        builder: (_) => AppUpdateDialog(info: info, colors: colors),
-      );
-    } finally {
-      _updateDialogVisible = false;
-    }
-  }
-
   void _handleGridScroll() {
-    // One shelf grid is mounted at a time, so this controller normally owns a
-    // single position. Reading [ScrollController.offset] would throw as soon as
-    // a second one existed, which is what a cross-fading shelf used to create.
-    // Measure the attached positions instead: the header only needs to know
-    // whether any of them has left the top.
     var scrolled = false;
     for (final position in List<ScrollPosition>.of(
       _gridScrollController.positions,
@@ -405,10 +258,11 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   void dispose() {
     _loadSerial++;
-    _automaticUpdateTimer?.cancel();
-    _cancelPendingForegroundResume();
-    _lifecycle.dispose();
+    _updateController.dispose();
+    _privateShelf.dispose();
     _maintenance.dispose();
+    _selection.removeListener(_handleSelectionChanged);
+    _selection.dispose();
     _reorderFocusTimer?.cancel();
     _librarySearchController.dispose();
     _librarySearchFocus.dispose();
@@ -421,20 +275,21 @@ class _LibraryScreenState extends State<LibraryScreen>
     super.dispose();
   }
 
-  /// Books on the shelf being shown. [_books] keeps the whole library, so
-  /// ordering and maintenance always see every book.
+  bool get _privateMode => _privateShelf.isOpen;
+
   List<Book> get _shelfBooks => _books
       .where((book) => book.isPrivate == _privateMode)
       .toList(growable: false);
 
   List<Book> get _visibleBooks {
-    // Fold before matching so a title typed with full-width punctuation or
-    // digits still finds the book that stored the half-width form.
     final query = foldFullWidth(
       _librarySearchController.text,
     ).trim().toLowerCase();
     final filtered = _shelfBooks
         .where((book) {
+          if (_selectedGroup != null && !book.groups.contains(_selectedGroup)) {
+            return false;
+          }
           final matchesQuery =
               query.isEmpty ||
               foldFullWidth(book.title).toLowerCase().contains(query) ||
@@ -474,23 +329,46 @@ class _LibraryScreenState extends State<LibraryScreen>
       _librarySearchController.text.trim().isNotEmpty ||
       _shelfFilter != ShelfFilter.all;
 
+  bool get _hasAnyShelfConstraint =>
+      _hasShelfQueryOrFilter || _selectedGroup != null;
+
   void _clearShelfQueryAndFilter() {
     _librarySearchController.clear();
     setState(() {
       _shelfFilter = ShelfFilter.all;
+      _selectedGroup = null;
       _librarySearchVisible = false;
     });
   }
 
+  Future<void> _reloadShelfGroups() async {
+    final private = _privateMode;
+    try {
+      final groups = await _storage.getShelfGroups(private: private);
+      if (!mounted || _privateMode != private) return;
+      setState(() {
+        _shelfGroups = groups;
+        if (_selectedGroup != null && !groups.contains(_selectedGroup)) {
+          _selectedGroup = null;
+        }
+      });
+    } on Object {
+      // Keep existing group chips on transient read failure.
+    }
+  }
+
   Future<void> _loadData() async {
     final serial = ++_loadSerial;
+    final private = _privateMode;
     try {
       final results = await Future.wait<Object>([
         _storage.getBookSummaries(),
         _storage.getSettings(),
+        _storage.getShelfGroups(private: private),
       ]);
       final books = results[0] as List<Book>;
       final storedSettings = results[1] as ReaderSettings;
+      final groups = results[2] as List<String>;
       final settings = await _fontService.ensureImportedFontLoaded(
         storedSettings,
       );
@@ -515,11 +393,20 @@ class _LibraryScreenState extends State<LibraryScreen>
           _books = books;
           _progressMap = pMap;
           _availabilityMap = availabilityMap;
+          if (_privateMode == private) {
+            _shelfGroups = groups;
+            if (_selectedGroup != null && !groups.contains(_selectedGroup)) {
+              _selectedGroup = null;
+            }
+          }
           _settings = settings;
           _loading = false;
         });
+        _selection.retainValid(<String>{
+          for (final book in _shelfBooks) book.id,
+        });
         _syncShelfAnimations();
-        _syncAutomaticUpdateCheck();
+        _updateController.syncAutomaticUpdateCheck();
         _maintenance.schedule();
       }
     } catch (e) {
@@ -544,9 +431,6 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
-  /// Floats the empty-shelf icon twice when that empty state appears, then
-  /// rests it. An endless loop would keep the whole screen redrawing for as
-  /// long as the empty shelf stayed open.
   void _floatEmptyIcon() {
     if (_floatedEmptyShelf == _privateMode) return;
     _floatedEmptyShelf = _privateMode;
@@ -575,29 +459,60 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   Future<void> _importBook() async {
     if (_importing || _exporting) return;
-    // The shelf the reader tapped from decides where the book lands.
     final private = _privateMode;
-    String? materializedPath;
+    final pickedPaths = <String>[];
     var startedImport = false;
     try {
-      final PickedImportFile? picked;
-      _systemDialogDepth++;
-      try {
-        picked = Platform.isAndroid
-            ? await AndroidBookPicker.pick()
-            : await _pickBookWithFilePicker();
-      } finally {
-        _systemDialogDepth--;
+      final batch = await _privateShelf.runWithSystemDialog(
+        AndroidBookPicker.pickBooks,
+      );
+      if (batch == null || !mounted) return;
+      for (final file in batch.files) {
+        if (file.deleteAfterImport) pickedPaths.add(file.path);
       }
-      if (picked == null || !mounted) return;
+      if (batch.files.isEmpty) {
+        if (batch.errors.isNotEmpty) {
+          _showError(batch.errors.first);
+        }
+        return;
+      }
 
       startedImport = true;
       setState(() {
         _importing = true;
         _importProgress = null;
+        _importBatchIndex = 0;
+        _importBatchTotal = batch.files.length;
       });
-      if (picked.deleteAfterImport) materializedPath = picked.path;
-      await _importBookPath(picked.path, picked.name, private: private);
+      var importedCount = 0;
+      final errors = <String>[...batch.errors];
+      for (var i = 0; i < batch.files.length; i++) {
+        if (!mounted) break;
+        setState(() {
+          _importBatchIndex = i + 1;
+          _importProgress = null;
+        });
+        final file = batch.files[i];
+        try {
+          await _importBookPath(file.path, file.name, private: private);
+          importedCount++;
+        } on Object catch (error) {
+          errors.add(
+            error is FormatException && error.message.trim().isNotEmpty
+                ? '「${file.name}」${error.message}'
+                : '「${file.name}」导入失败',
+          );
+        }
+      }
+      if (mounted) {
+        if (errors.isNotEmpty && importedCount == 0) {
+          _showError(errors.first);
+        } else if (errors.isNotEmpty) {
+          _showMessage('已导入 $importedCount 本，${errors.length} 个文件失败：${errors.first}');
+        } else if (batch.files.length > 1 && importedCount > 1) {
+          _showMessage('已导入 $importedCount 本书');
+        }
+      }
     } on FormatException catch (error) {
       if (mounted) {
         _showError(
@@ -609,7 +524,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     } on FileSystemException {
       if (mounted) _showError('无法读取所选文件');
     } finally {
-      if (materializedPath != null) {
+      for (final materializedPath in pickedPaths) {
         try {
           final temporary = File(materializedPath);
           if (await temporary.exists()) await temporary.delete();
@@ -621,37 +536,14 @@ class _LibraryScreenState extends State<LibraryScreen>
         setState(() {
           _importing = false;
           _importProgress = null;
+          _importBatchIndex = 0;
+          _importBatchTotal = 0;
         });
       }
     }
   }
 
-  Future<PickedImportFile?> _pickBookWithFilePicker() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: BookImportCoordinator.supportedExtensions,
-    );
-    if (result == null || result.files.isEmpty) return null;
-    final file = result.files.first;
-    final path = await materializePickedLocalFile(
-      path: file.path,
-      bytes: file.bytes,
-      fileName: file.name,
-    );
-    if (path == null) {
-      throw const FormatException('无法获取文件路径');
-    }
-    return PickedImportFile(
-      path: path,
-      name: file.name,
-      deleteAfterImport: file.path == null,
-    );
-  }
-
   Future<void> _importIncomingBook(IncomingBookFile file) async {
-    // A file handed over by another app waits for the shelf to be free. The
-    // wait is bounded so a shelf that never becomes free drops this copy with
-    // a message instead of spinning for the rest of the session.
     final waitUntil = DateTime.now().add(_incomingImportQueueLimit);
     while (mounted && (_importing || _loading || _exporting)) {
       if (DateTime.now().isAfter(waitUntil)) {
@@ -664,6 +556,8 @@ class _LibraryScreenState extends State<LibraryScreen>
     setState(() {
       _importing = true;
       _importProgress = null;
+      _importBatchIndex = 1;
+      _importBatchTotal = 1;
     });
     try {
       await _importBookPath(file.path, file.name, private: _privateMode);
@@ -678,6 +572,8 @@ class _LibraryScreenState extends State<LibraryScreen>
         setState(() {
           _importing = false;
           _importProgress = null;
+          _importBatchIndex = 0;
+          _importBatchTotal = 0;
         });
       }
     }
@@ -697,7 +593,6 @@ class _LibraryScreenState extends State<LibraryScreen>
             fileName: fileName,
             requestPdfPassword: () async {
               if (!active || !mounted) return null;
-              // Waiting for the reader's password is not a stalled parser.
               beat(const Duration(days: 1));
               try {
                 return await _requestPdfPassword(fileName);
@@ -709,8 +604,6 @@ class _LibraryScreenState extends State<LibraryScreen>
             isPrivate: private,
             onProgress: (progress) {
               beat(_stepLimit(progress.stage));
-              // An import the shelf has already given up on keeps running until
-              // it unwinds. Its late reports are no longer anyone's progress.
               if (active && mounted && _importing) {
                 setState(() => _importProgress = progress);
               }
@@ -724,39 +617,30 @@ class _LibraryScreenState extends State<LibraryScreen>
         onStalled: () => active = false,
       );
       if (importedBook == null) return;
-      _showMessage(
-        private
-            ? '「${importedBook.title}」已导入隐私书架'
-            : '「${importedBook.title}」已导入书架',
-      );
+      if (_importBatchTotal <= 1) {
+        _showMessage(
+          private
+              ? '「${importedBook.title}」已导入隐私书架'
+              : '「${importedBook.title}」已导入书架',
+        );
+      }
     } catch (error, stack) {
-      // The reader gets a sentence they can act on. A failure that is not
-      // already phrased for them still has to be recoverable from a device
-      // log, which is the only evidence a release build leaves behind.
       if (error is! FormatException) {
         debugPrint('Book import failed for $fileName: $error');
         debugPrintStack(stackTrace: stack);
       }
-      _showError(
-        error is FormatException && error.message.trim().isNotEmpty
-            ? error.message
-            : '导入失败于「${_importProgress?.label ?? '读取文件'}」，'
-                  '请确认文件未损坏后重试',
-      );
+      final message = error is FormatException && error.message.trim().isNotEmpty
+          ? error.message
+          : '导入失败于「${_importProgress?.label ?? '读取文件'}」，请确认文件未损坏后重试';
+      if (_importBatchTotal > 1) {
+        throw FormatException(message);
+      }
+      _showError(message);
     } finally {
       active = false;
     }
   }
 
-  /// Runs an import and stops waiting on it once it goes quiet.
-  ///
-  /// A long serial legitimately spends minutes writing chapters, so a limit on
-  /// total time would abandon healthy imports. Silence is the signal that
-  /// matters: every step reports as it advances, so a stretch with nothing
-  /// reported means no result is coming, and the shelf has to become usable
-  /// again instead of showing 导入中 for the rest of the session. The work
-  /// itself is left to unwind on its own; each import writes its own private
-  /// directory, so a late finisher cannot corrupt the retry.
   Future<T> _withoutStalling<T>(
     Future<T> Function(void Function(Duration within) beat) body,
     Duration firstStep, {
@@ -770,7 +654,6 @@ class _LibraryScreenState extends State<LibraryScreen>
       watchdog = Timer(within, () {
         if (result.isCompleted) return;
         onStalled?.call();
-        // Naming the step turns a repeat report into something actionable.
         final step = _importProgress?.label ?? '读取文件';
         result.completeError(
           FormatException('「$step」长时间没有响应，已停止等待。请重试，或换一个文件'),
@@ -792,25 +675,21 @@ class _LibraryScreenState extends State<LibraryScreen>
     return result.future;
   }
 
-  /// How long the step that follows [stage] may stay quiet.
-  ///
-  /// Saving reports after every batch of chapters, so it is held to the short
-  /// limit. Everything else is one opaque call whose only report is that it
-  /// finished.
   Duration _stepLimit(BookImportStage stage) => switch (stage) {
     BookImportStage.saving => _importStallLimit,
     BookImportStage.inspecting ||
     BookImportStage.parsing => _importSilentStepLimit,
   };
 
-  /// Label for the import control while an import is running.
-  ///
-  /// The toolbar button sits beside the search and filter controls and has to
-  /// stay narrow, so it carries only the share already saved. The empty-shelf
-  /// button is what a reader watches during their first import, and there is
-  /// room there to name the step as well.
   String _importLabel({required bool compact}) {
     final progress = _importProgress;
+    if (_importBatchTotal > 1 && _importBatchIndex > 0) {
+      final batchTag = '$_importBatchIndex/$_importBatchTotal';
+      if (compact) return '导入 $batchTag';
+      final fraction = progress?.fraction;
+      if (fraction == null) return '正在导入 $batchTag...';
+      return '${progress!.label} ($batchTag) ${(fraction * 100).round()}%';
+    }
     if (progress == null) return '导入中...';
     final fraction = progress.fraction;
     if (fraction == null) return compact ? '导入中...' : '${progress.label}...';
@@ -828,39 +707,38 @@ class _LibraryScreenState extends State<LibraryScreen>
       barrierDismissible: false,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AppDialog(
-          title: const Text('PDF 需要密码'),
+          title: const Text('输入 PDF 密码'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(fileName, maxLines: 2, overflow: TextOverflow.ellipsis),
+              Text(
+                '「$fileName」受密码保护，请输入解锁密码：',
+                style: TextStyle(fontSize: 13, color: _feedbackColors.secondary),
+              ),
               const SizedBox(height: AppSpacing.md),
               TextField(
                 controller: controller,
-                autofocus: true,
                 obscureText: obscure,
+                autofocus: true,
                 textInputAction: TextInputAction.done,
-                onChanged: (_) => setDialogState(() {}),
                 decoration: InputDecoration(
-                  labelText: '打开密码',
+                  labelText: '密码',
                   suffixIcon: IconButton(
                     tooltip: obscure ? '显示密码' : '隐藏密码',
-                    onPressed: () => setDialogState(() => obscure = !obscure),
                     icon: Icon(
                       obscure
                           ? Icons.visibility_outlined
                           : Icons.visibility_off_outlined,
                     ),
+                    onPressed: () => setDialogState(() => obscure = !obscure),
                   ),
                 ),
-                onSubmitted: (value) {
-                  if (value.isNotEmpty) Navigator.pop(dialogContext, value);
+                onSubmitted: (_) {
+                  if (controller.text.isNotEmpty) {
+                    Navigator.pop(dialogContext, controller.text);
+                  }
                 },
-              ),
-              const SizedBox(height: AppSpacing.sm),
-              const Text(
-                '密码只在本次导入时使用。应用会在本地保存一个已解锁副本，不会保存或上传密码。',
-                style: TextStyle(fontSize: 12),
               ),
             ],
           ),
@@ -894,7 +772,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _handleShelfPointerDown(PointerDownEvent event) {
-    if (_reorderMode) return;
+    if (_reorderMode || _selection.isSelecting) return;
     _shelfPointerStart = event.position;
     _shelfPointerStartTime = DateTime.now();
   }
@@ -905,7 +783,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _handleShelfPointerUp(PointerUpEvent event) {
-    if (_reorderMode) {
+    if (_reorderMode || _selection.isSelecting) {
       _shelfPointerStart = null;
       _shelfPointerStartTime = null;
       return;
@@ -927,6 +805,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _enterReorderMode(String bookId) {
+    _selection.exit();
     _reorderFocusTimer?.cancel();
     setState(() {
       _reorderMode = true;
@@ -968,8 +847,6 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _updateBookDrag(DragUpdateDetails details) {
-    // A shelf that fits keeps still, even when a cell's blank strip reaches a
-    // little past the screen and leaves a sliver of scroll range.
     if (_reorderShelfFits || !_reorderScrollController.hasClients) return;
     final screenHeight = MediaQuery.sizeOf(context).height;
     final y = details.globalPosition.dy;
@@ -1068,28 +945,19 @@ class _LibraryScreenState extends State<LibraryScreen>
                 onChange: (newSettings) {
                   setSheetState(() => sheetSettings = newSettings);
                   if (mounted) setState(() => _settings = newSettings);
-                  _syncAutomaticUpdateCheck();
+                  _updateController.syncAutomaticUpdateCheck();
                   _persistSettings(newSettings);
                 },
                 onImportFont: () async {
                   try {
-                    _systemDialogDepth++;
-                    final ReaderSettings? picked;
-                    try {
-                      picked = await _fontService.pickAndInstallFont(
-                        sheetSettings,
-                      );
-                    } finally {
-                      _systemDialogDepth--;
-                    }
-                    final newSettings = picked;
-                    if (newSettings == null) return;
+                    final picked = await _privateShelf.runWithSystemDialog(
+                      () => _fontService.pickAndInstallFont(sheetSettings),
+                    );
+                    if (picked == null) return;
                     if (!context.mounted || !mounted) return;
-                    setSheetState(() => sheetSettings = newSettings);
-                    if (mounted) {
-                      setState(() => _settings = newSettings);
-                    }
-                    await _storage.saveSettings(newSettings);
+                    setSheetState(() => sheetSettings = picked);
+                    if (mounted) setState(() => _settings = picked);
+                    await _storage.saveSettings(picked);
                     _showMessage('字体已导入并应用');
                   } catch (e) {
                     _showError(
@@ -1100,23 +968,25 @@ class _LibraryScreenState extends State<LibraryScreen>
                   }
                 },
                 onCheckUpdate: () async {
-                  // Close the sheet first so the result dialog or
-                  // snackbar lands on the shelf instead of the sheet.
                   Navigator.of(context).pop();
-                  await _checkUpdateManually();
+                  await _updateController.checkUpdateManually();
                 },
                 onMeasureStorage: _storage.measureStorageUsage,
                 onClearCaches: _storage.clearTemporaryCaches,
-                applicationVersion: _applicationVersion,
-                privateShelfConfigured: _privateConfig.configured,
+                applicationVersion: _updateController.applicationVersion,
+                privateShelfConfigured: _privateShelf.configured,
                 privateShelfOpen: _privateMode,
                 onPrivateShelf: () {
                   Navigator.of(context).pop();
-                  unawaited(_handlePrivateShelfEntry());
+                  unawaited(_privateShelf.handlePrivateShelfEntry());
                 },
                 onPrivateShelfSettings: () {
                   Navigator.of(context).pop();
-                  unawaited(_managePrivateShelf());
+                  unawaited(_privateShelf.managePrivateShelf());
+                },
+                onOpenBackup: () {
+                  Navigator.of(context).pop();
+                  unawaited(_openBackupSheet());
                 },
               ),
             );
@@ -1127,297 +997,99 @@ class _LibraryScreenState extends State<LibraryScreen>
     unawaited(dialog.whenComplete(() => _settingsOpen = false));
   }
 
-  // ── Private shelf ─────────────────────────────────
-
-  Future<void> _loadPrivateConfig() async {
-    try {
-      final config = await _privateLock.load();
-      if (mounted) setState(() => _privateConfig = config);
-    } on Object catch (error, stack) {
-      debugPrint('Failed to load private shelf settings: $error');
-      debugPrintStack(stackTrace: stack);
-    }
-  }
-
-  void _handleAppResume() {
-    _resolvePendingForegroundResume(true);
-    _syncAutomaticUpdateCheck();
-  }
-
-  void _handleAppHide() {
-    _resolvePendingForegroundResume(false);
-    _lockPrivateShelfOnLeave();
-  }
-
-  void _resolvePendingForegroundResume(bool resumed) {
-    _pendingForegroundTimer?.cancel();
-    _pendingForegroundTimer = null;
-    final pending = _pendingForegroundResume;
-    _pendingForegroundResume = null;
-    if (pending != null && !pending.isCompleted) {
-      pending.complete(resumed);
-    }
-  }
-
-  void _cancelPendingForegroundResume() =>
-      _resolvePendingForegroundResume(false);
-
-  /// Inactive can mean a system dialog still on screen opened by this shelf
-  /// (the biometric prompt from its settings). Hide is the point at which the
-  /// app really left, so only that state interrupts those local flows.
-  void _handleAppInactive() {
-    if (_foregroundPromptDepth > 0) return;
-    _lockPrivateShelfOnLeave();
-  }
-
-  void _lockPrivateShelfOnLeave() {
-    if (!_privateMode || _systemDialogDepth > 0 || !mounted) return;
-    // A sheet or dialog opened from the private shelf may name a private
-    // book, so it closes with the shelf. An open book stays as it was.
-    if (!_openingBook) {
-      final shelfRoute = ModalRoute.of(context);
-      Navigator.of(
-        context,
-      ).popUntil((route) => route == shelfRoute || route is! PopupRoute);
-    }
-    _setPrivateMode(false);
-  }
-
-  void _setPrivateMode(bool private) {
-    if (!private) {
-      _cancelPendingForegroundResume();
-    }
-    if (_privateMode == private || !mounted) return;
-    _librarySearchController.clear();
-    _librarySearchFocus.unfocus();
-    _reorderFocusTimer?.cancel();
-    // Every card of the outgoing shelf leaves the tree in this same frame.
-    // Nothing of it is kept for an exit animation, so a locked private shelf
-    // cannot be painted, tapped, or read by a screen reader afterwards.
-    setState(() {
-      _privateMode = private;
-      _shelfFilter = ShelfFilter.all;
-      _librarySearchVisible = false;
-      _reorderMode = false;
-      _reorderFocusBookId = null;
-      _draggingBookId = null;
-    });
-    _rewindShelfScroll(_gridScrollController);
-    // Replays the entrance so switching shelves reads as a new page.
-    _gridEntranceController.reset();
-    _syncShelfAnimations();
-  }
-
-  /// Waits for the window to be active before acting on a completed unlock.
-  ///
-  /// Android's system biometric prompt makes the app
-  /// [AppLifecycleState.inactive] while it is visible, and delivers its
-  /// success callback before the prompt window finishes dismissing and focus
-  /// returns. Dropping an unlock whenever the state is not yet
-  /// [AppLifecycleState.resumed] therefore breaks biometric entry; opening
-  /// immediately while unfocused would paint private covers into a recents
-  /// snapshot if the reader was actually leaving. Waiting for the resume
-  /// transition handles both: a dismissing prompt resumes right away, while
-  /// leaving the app hides and cancels the pending open.
-  Future<bool> _awaitPrivateShelfForeground() async {
-    if (!mounted) return false;
-    switch (WidgetsBinding.instance.lifecycleState) {
-      case null:
-      case AppLifecycleState.resumed:
-        return true;
-      case AppLifecycleState.inactive:
-        _cancelPendingForegroundResume();
-        final completer = Completer<bool>();
-        _pendingForegroundResume = completer;
-        _pendingForegroundTimer = Timer(_foregroundResumeTimeout, () {
-          _resolvePendingForegroundResume(false);
-        });
-        final resumed = await completer.future;
-        return resumed && mounted;
-      case AppLifecycleState.hidden:
-      case AppLifecycleState.paused:
-      case AppLifecycleState.detached:
-        return false;
-    }
-  }
-
-  Future<void> _handlePrivateShelfEntry() async {
-    if (_privateShelfFlowBusy) return;
-    if (_privateConfig.configured && _privateMode) {
-      _setPrivateMode(false);
-      return;
-    }
-    _privateShelfFlowBusy = true;
-    try {
-      if (!_privateConfig.configured) {
-        if (await _setUpPrivateShelf() &&
-            await _awaitPrivateShelfForeground() &&
-            _privateConfig.configured) {
-          _setPrivateMode(true);
-        }
-      } else {
-        final result = await _unlockPrivateShelf('进入隐私书架');
-        if (result == PrivateShelfUnlock.unlocked &&
-            await _awaitPrivateShelfForeground() &&
-            _privateConfig.configured) {
-          _setPrivateMode(true);
-        }
-      }
-    } finally {
-      _privateShelfFlowBusy = false;
-    }
-  }
-
-  Future<PrivateShelfUnlock> _unlockPrivateShelf(String purpose) async {
-    final result = await unlockPrivateShelf(
+  Future<void> _openBackupSheet() {
+    return showLibraryBackupSheet(
       context,
-      lock: _privateLock,
+      backupService: _backupService,
+      privateShelf: _privateShelf,
       colors: _feedbackColors,
-      purpose: purpose,
-      onClearShelf: _clearPrivateShelf,
+      onRestored: _loadData,
     );
-    // A reset or a cleared shelf changes what is stored.
-    await _loadPrivateConfig();
-    return result;
   }
 
-  /// Creates the PIN, then offers biometrics. Returns whether a PIN exists.
-  Future<bool> _setUpPrivateShelf() async {
-    final saved = await showPrivateShelfPinSetup(
+  Future<void> _openGroupManager() {
+    return showShelfGroupManagerSheet(
       context,
-      lock: _privateLock,
+      storage: _storage,
       colors: _feedbackColors,
+      private: _privateMode,
+      onChanged: _loadData,
     );
-    if (!saved || !mounted) return false;
-    await showPrivateShelfSettings(
-      context,
-      lock: _privateLock,
-      colors: _feedbackColors,
-      onDisable: _disablePrivateShelf,
-      justCreated: true,
-    );
-    await _loadPrivateConfig();
-    return _privateConfig.configured;
   }
 
-  Future<void> _managePrivateShelf() async {
-    if (_privateShelfFlowBusy || !_privateConfig.configured) return;
-    _privateShelfFlowBusy = true;
-    try {
-      // An open private shelf was unlocked earlier in this visit to the app.
-      if (!_privateMode) {
-        final result = await _unlockPrivateShelf('修改隐私书架设置');
-        if (result != PrivateShelfUnlock.unlocked ||
-            !await _awaitPrivateShelfForeground() ||
-            !_privateConfig.configured) {
-          return;
-        }
-      }
-      if (!mounted) return;
-      // Enabling a biometric raises the system prompt from inside this sheet.
-      // Treat the inactive state while the sheet owns that prompt as part of the
-      // foreground flow; a real hide still locks through onHide.
-      _foregroundPromptDepth++;
-      try {
-        await showPrivateShelfSettings(
-          context,
-          lock: _privateLock,
-          colors: _feedbackColors,
-          onDisable: _disablePrivateShelf,
-        );
-      } finally {
-        _foregroundPromptDepth--;
-      }
-      await _loadPrivateConfig();
-    } finally {
-      _privateShelfFlowBusy = false;
+  List<Book> get _selectedBooks {
+    final ids = _selection.selectedIds;
+    return <Book>[
+      for (final book in _shelfBooks)
+        if (ids.contains(book.id)) book,
+    ];
+  }
+
+  Future<void> _assignGroups(List<Book> targets) async {
+    if (targets.isEmpty) return;
+    final saved = await showAssignBookGroupsSheet(
+      context,
+      storage: _storage,
+      colors: _feedbackColors,
+      private: _privateMode,
+      targets: targets,
+      onApplied: _loadData,
+    );
+    if (saved && mounted) {
+      _showMessage(targets.length > 1 ? '已更新选中书籍的分组' : '分组设置已保存');
     }
   }
 
-  Future<void> _moveBookToShelf(Book book, {required bool private}) async {
-    if (private && !_privateConfig.configured && !await _setUpPrivateShelf()) {
+  Future<void> _moveBooksToShelf(
+    List<Book> books, {
+    required bool private,
+  }) async {
+    if (books.isEmpty) return;
+    if (private &&
+        !_privateShelf.configured &&
+        !await _privateShelf.ensureConfigured()) {
       return;
     }
     try {
-      await _storage.setBooksPrivate([book.id], private: private);
-      if (!mounted) return;
-      final index = _books.indexWhere((item) => item.id == book.id);
-      if (index >= 0) {
-        setState(
-          () => _books[index] = _books[index].copyWith(isPrivate: private),
-        );
-      }
-      _syncShelfAnimations();
-      _showMessage(
-        private ? '「${book.title}」已移入隐私书架' : '「${book.title}」已移回普通书架',
+      await _storage.setBooksPrivate(
+        books.map((book) => book.id),
+        private: private,
       );
+      if (!mounted) return;
+      _selection.exit();
+      await _loadData();
+      if (!mounted) return;
+      if (books.length == 1) {
+        final book = books.first;
+        _showMessage(
+          private ? '「${book.title}」已移入隐私书架' : '「${book.title}」已移回普通书架',
+        );
+      } else {
+        _showMessage(
+          private
+              ? '已将 ${books.length} 本书移入隐私书架'
+              : '已将 ${books.length} 本书移回普通书架',
+        );
+      }
     } on Object catch (error, stack) {
-      debugPrint('Failed to move book between shelves: $error');
+      debugPrint('Failed to move books between shelves: $error');
       debugPrintStack(stackTrace: stack);
       _showError('移动失败，请稍后重试');
     }
   }
 
-  /// Turns the private shelf off. Its books return to the normal shelf.
-  Future<bool> _disablePrivateShelf() async {
-    final privateIds = [
-      for (final book in _books)
-        if (book.isPrivate) book.id,
-    ];
+  Future<void> _confirmDeleteBooks(List<Book> books) async {
+    if (books.isEmpty) return;
+    final singleTitle = books.length == 1 ? books.first.title : null;
     final confirmed = await showAppDialog<bool>(
       context: context,
       colors: _feedbackColors,
       builder: (dialogContext) => AppDialog(
-        title: const Text('关闭隐私书架'),
+        title: const Text('删除书籍'),
         content: Text(
-          '关闭之后，隐私书架里的 ${privateIds.length} 本书会移回普通书架。'
-          '与此同时，密码和已开启的验证方式也会一并清除。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('关闭'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return false;
-    try {
-      // Books move first. A failure after that leaves an empty but still
-      // locked shelf, never private books without a PIN.
-      await _storage.setBooksPrivate(privateIds, private: false);
-      await _privateLock.clear();
-    } on Object catch (error, stack) {
-      debugPrint('Failed to turn off the private shelf: $error');
-      debugPrintStack(stackTrace: stack);
-      _showError('关闭隐私书架失败，请稍后重试');
-      return false;
-    }
-    _setPrivateMode(false);
-    await _loadPrivateConfig();
-    await _loadData();
-    _showMessage('隐私书架已关闭');
-    return true;
-  }
-
-  /// The only way back from a forgotten PIN when no biometric is enabled.
-  Future<bool> _clearPrivateShelf() async {
-    final privateBooks = [
-      for (final book in _books)
-        if (book.isPrivate) book,
-    ];
-    final confirmed = await showAppDialog<bool>(
-      context: context,
-      colors: _feedbackColors,
-      builder: (dialogContext) => AppDialog(
-        title: const Text('清空隐私书架'),
-        content: Text(
-          '没有开启指纹或人脸验证时，只能清空隐私书架后重新设置。'
-          '清空会删除其中的 ${privateBooks.length} 本书和阅读记录，并且无法恢复。',
+          singleTitle != null
+              ? '确定要删除「$singleTitle」吗？'
+              : '确定要删除选中的 ${books.length} 本书吗？删除后无法恢复。',
         ),
         actions: [
           TextButton(
@@ -1426,27 +1098,22 @@ class _LibraryScreenState extends State<LibraryScreen>
           ),
           AppDestructiveButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('清空'),
+            child: const Text('删除'),
           ),
         ],
       ),
     );
-    if (confirmed != true || !mounted) return false;
+    if (confirmed != true || !mounted) return;
     try {
-      for (final book in privateBooks) {
-        await _storage.deleteBook(book.id);
-      }
-      await _privateLock.clear();
-    } on Object catch (error, stack) {
-      debugPrint('Failed to clear the private shelf: $error');
-      debugPrintStack(stackTrace: stack);
-      _showError('清空失败，请稍后重试');
+      await _storage.deleteBooks(books.map((book) => book.id));
+      _selection.exit();
       await _loadData();
-      return false;
+      if (mounted && books.length > 1) {
+        _showMessage('已删除 ${books.length} 本书');
+      }
+    } on Object {
+      _showError('删除失败，请稍后重试');
     }
-    await _loadData();
-    _showMessage('隐私书架已清空');
-    return true;
   }
 
   Future<void> _showBookActions(Book book) async {
@@ -1468,6 +1135,22 @@ class _LibraryScreenState extends State<LibraryScreen>
             title: const Text('修改信息'),
             subtitle: const Text('修改书名和作者'),
             onTap: () => Navigator.pop(sheetContext, _BookAction.rename),
+          ),
+          ListTile(
+            leading: const Icon(Icons.label_outline_rounded),
+            title: const Text('设置分组'),
+            subtitle: Text(
+              book.groups.isEmpty
+                  ? '归类到自定义分组，便于筛选'
+                  : '当前分组：${book.groups.join('、')}',
+            ),
+            onTap: () => Navigator.pop(sheetContext, _BookAction.groups),
+          ),
+          ListTile(
+            leading: const Icon(Icons.checklist_rounded),
+            title: const Text('多选管理'),
+            subtitle: const Text('批量分组、移入隐私或删除'),
+            onTap: () => Navigator.pop(sheetContext, _BookAction.multiSelect),
           ),
           ListTile(
             leading: const Icon(Icons.save_alt_rounded),
@@ -1512,12 +1195,16 @@ class _LibraryScreenState extends State<LibraryScreen>
         await _exportBook(book);
       case _BookAction.rename:
         await _renameBook(book);
+      case _BookAction.groups:
+        await _assignGroups(<Book>[book]);
+      case _BookAction.multiSelect:
+        _selection.enter(book.id);
       case _BookAction.move:
         _enterReorderMode(book.id);
       case _BookAction.togglePrivate:
-        await _moveBookToShelf(book, private: !book.isPrivate);
+        await _moveBooksToShelf(<Book>[book], private: !book.isPrivate);
       case _BookAction.delete:
-        _confirmDeleteBook(book);
+        await _confirmDeleteBooks(<Book>[book]);
     }
   }
 
@@ -1529,13 +1216,9 @@ class _LibraryScreenState extends State<LibraryScreen>
       final book = await _storage.getBook(summary.id);
       if (!mounted) return;
       if (book == null) throw const FormatException('书籍已不存在或正文无法读取');
-      final bool saved;
-      _systemDialogDepth++;
-      try {
-        saved = await _bookExporter.exportBook(book);
-      } finally {
-        _systemDialogDepth--;
-      }
+      final saved = await _privateShelf.runWithSystemDialog(
+        () => _bookExporter.exportBook(book),
+      );
       if (!mounted) return;
       AppToast.hide(context);
       _showMessage(saved ? '「${book.title}」已导出' : '已取消导出');
@@ -1659,34 +1342,6 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
-  Future<void> _confirmDeleteBook(Book book) async {
-    final confirmed = await showAppDialog<bool>(
-      context: context,
-      colors: _feedbackColors,
-      builder: (dialogContext) => AppDialog(
-        title: const Text('删除书籍'),
-        content: Text('确定要删除「${book.title}」吗？'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
-          ),
-          AppDestructiveButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    try {
-      await _storage.deleteBook(book.id);
-      await _loadData();
-    } on Object {
-      _showError('删除失败，请稍后重试');
-    }
-  }
-
   Rect? _rectForKey(GlobalKey key) {
     final cardContext = key.currentContext;
     final renderObject = cardContext?.findRenderObject();
@@ -1756,14 +1411,8 @@ class _LibraryScreenState extends State<LibraryScreen>
           transitionColors: transitionColors,
         );
         await Navigator.of(context).push(readerRoute);
-        // Navigator.push completes as soon as pop is requested, before the
-        // reverse transition has even started. The route still paints the
-        // cover snapshot and listens to transitionColors while closing, so
-        // both resources must stay alive until the overlay is truly removed.
         await readerRoute.completed;
       } catch (error, stackTrace) {
-        // The custom book-opening route is an enhancement, not a reason a
-        // reader should fail to open. Fall back to a normal Material route.
         debugPrint('Book opening animation failed: $error');
         debugPrintStack(stackTrace: stackTrace);
         if (!mounted) return;
@@ -1834,7 +1483,6 @@ class _LibraryScreenState extends State<LibraryScreen>
     _openingBook = true;
     try {
       final sourceRect = _rectForKey(coverKey);
-      // Snapshot the cover image for use by the page-curl route transition.
       ui.Image? coverImage;
       try {
         final repaintBoundary = coverKey.currentContext?.findRenderObject();
@@ -1862,6 +1510,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       _settings.theme,
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
+    final selectedBooks = _selectedBooks;
     final content = DefaultTextStyle.merge(
       style: TextStyle(fontFamily: _settings.effectiveFontFamily),
       child: Scaffold(
@@ -1875,9 +1524,6 @@ class _LibraryScreenState extends State<LibraryScreen>
             bottom: false,
             child: Column(
               children: [
-                // Header — gains a subtle drop shadow once the grid below has
-                // scrolled past a few pixels, so it reads as sitting above the
-                // content rather than just being the first item in a column.
                 AnimatedContainer(
                   duration: AppMotion.normal,
                   curve: AppMotion.standard,
@@ -1895,9 +1541,19 @@ class _LibraryScreenState extends State<LibraryScreen>
                   ),
                   child: _buildLibraryHeader(colors),
                 ),
-
-                // Content
                 Expanded(child: _buildShelfContent(colors)),
+                if (_selection.isSelecting)
+                  LibraryBatchBar(
+                    colors: colors,
+                    selectedCount: selectedBooks.length,
+                    privateMode: _privateMode,
+                    onAssignGroups: () => _assignGroups(selectedBooks),
+                    onTogglePrivate: () => _moveBooksToShelf(
+                      selectedBooks,
+                      private: !_privateMode,
+                    ),
+                    onDelete: () => _confirmDeleteBooks(selectedBooks),
+                  ),
               ],
             ),
           ),
@@ -1905,14 +1561,15 @@ class _LibraryScreenState extends State<LibraryScreen>
       ),
     );
     return PopScope<void>(
-      // Back leaves the private shelf before it leaves the app.
-      canPop: !_reorderMode && !_privateMode,
+      canPop: !_reorderMode && !_selection.isSelecting && !_privateMode,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
         if (_reorderMode) {
           _exitReorderMode();
+        } else if (_selection.isSelecting) {
+          _selection.exit();
         } else if (_privateMode) {
-          _setPrivateMode(false);
+          _privateShelf.setPrivateMode(false);
         }
       },
       child: AnnotatedRegion<SystemUiOverlayStyle>(
@@ -1923,10 +1580,14 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Widget _buildLibraryHeader(ReaderThemeColors colors) {
+    final selecting = _selection.isSelecting;
+    final visibleIds = <String>[for (final book in _visibleBooks) book.id];
+    final allSelected = _selection.isAllSelected(visibleIds);
+
     return Padding(
       padding: _reorderMode
           ? const EdgeInsets.fromLTRB(12, 2, 12, 2)
-          : const EdgeInsets.fromLTRB(16, AppSpacing.lg, 16, AppSpacing.md),
+          : const EdgeInsets.fromLTRB(16, AppSpacing.lg, 16, AppSpacing.sm),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1935,15 +1596,23 @@ class _LibraryScreenState extends State<LibraryScreen>
               IconButton(
                 onPressed: _reorderMode
                     ? _exitReorderMode
+                    : selecting
+                    ? _selection.exit
                     : _showGlobalSettings,
-                tooltip: _reorderMode ? '退出移动' : '设置',
+                tooltip: _reorderMode
+                    ? '退出移动'
+                    : selecting
+                    ? '退出多选'
+                    : '设置',
                 icon: AnimatedSwitcher(
                   duration: AppMotion.fast,
                   switchInCurve: AppMotion.standard,
                   switchOutCurve: AppMotion.exitOf(AppMotion.standard),
                   child: Icon(
-                    _reorderMode ? Icons.close_rounded : Icons.menu,
-                    key: ValueKey(_reorderMode),
+                    (_reorderMode || selecting)
+                        ? Icons.close_rounded
+                        : Icons.menu,
+                    key: ValueKey('$_reorderMode-$selecting'),
                     color: colors.secondary,
                   ),
                 ),
@@ -1968,14 +1637,18 @@ class _LibraryScreenState extends State<LibraryScreen>
                   child: Text(
                     _reorderMode
                         ? '调整顺序'
+                        : selecting
+                        ? '已选 ${_selection.count} 本'
                         : _privateMode
                         ? '隐私书架'
                         : '书架',
-                    key: ValueKey('$_reorderMode-$_privateMode'),
+                    key: ValueKey(
+                      '$_reorderMode-$selecting-${_selection.count}-$_privateMode',
+                    ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: _reorderMode ? 20 : 24,
+                      fontSize: (_reorderMode || selecting) ? 20 : 24,
                       fontWeight: FontWeight.w700,
                       color: colors.text,
                       letterSpacing: -0.3,
@@ -2007,60 +1680,81 @@ class _LibraryScreenState extends State<LibraryScreen>
                     color: colors.secondary,
                   ),
                 ),
+                if (!selecting && _shelfBooks.isNotEmpty)
+                  IconButton(
+                    tooltip: '多选管理',
+                    onPressed: _selection.enter,
+                    icon: Icon(
+                      Icons.checklist_rounded,
+                      color: colors.secondary,
+                    ),
+                  ),
                 LibraryFilterButton(
                   filter: _shelfFilter,
                   colors: colors,
                   onSelected: (value) => setState(() => _shelfFilter = value),
                 ),
               ],
-              AnimatedSwitcher(
-                duration: AppMotion.fast,
-                switchInCurve: AppMotion.standard,
-                switchOutCurve: AppMotion.exitOf(AppMotion.standard),
-                child: _reorderMode
-                    ? FilledButton.icon(
-                        key: const ValueKey('reorder-done'),
-                        onPressed: _draggingBookId == null
-                            ? _exitReorderMode
-                            : null,
-                        icon: const Icon(Icons.check_rounded, size: 18),
-                        label: const Text('完成'),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: colors.accent,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: AppSpacing.md,
-                            vertical: 6,
+              if (selecting) ...[
+                TextButton(
+                  onPressed: visibleIds.isEmpty
+                      ? null
+                      : () => _selection.selectAll(visibleIds),
+                  child: Text(allSelected ? '取消全选' : '全选'),
+                ),
+                TextButton(
+                  onPressed: _selection.exit,
+                  child: const Text('完成'),
+                ),
+              ] else
+                AnimatedSwitcher(
+                  duration: AppMotion.fast,
+                  switchInCurve: AppMotion.standard,
+                  switchOutCurve: AppMotion.exitOf(AppMotion.standard),
+                  child: _reorderMode
+                      ? FilledButton.icon(
+                          key: const ValueKey('reorder-done'),
+                          onPressed: _draggingBookId == null
+                              ? _exitReorderMode
+                              : null,
+                          icon: const Icon(Icons.check_rounded, size: 18),
+                          label: const Text('完成'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: colors.accent,
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: AppSpacing.md,
+                              vertical: 6,
+                            ),
+                          ),
+                        )
+                      : ElevatedButton.icon(
+                          key: const ValueKey('import-book'),
+                          onPressed: _importing || _exporting
+                              ? null
+                              : _importBook,
+                          icon: Icon(
+                            _importing ? Icons.hourglass_empty : Icons.add,
+                            size: 18,
+                          ),
+                          label: Text(
+                            _importing ? _importLabel(compact: true) : '导入',
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: colors.accent,
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(AppRadius.pill),
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: AppSpacing.lg,
+                              vertical: AppSpacing.sm,
+                            ),
                           ),
                         ),
-                      )
-                    : ElevatedButton.icon(
-                        key: const ValueKey('import-book'),
-                        onPressed: _importing || _exporting
-                            ? null
-                            : _importBook,
-                        icon: Icon(
-                          _importing ? Icons.hourglass_empty : Icons.add,
-                          size: 18,
-                        ),
-                        label: Text(
-                          _importing ? _importLabel(compact: true) : '导入',
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: colors.accent,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(AppRadius.pill),
-                          ),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: AppSpacing.lg,
-                            vertical: AppSpacing.sm,
-                          ),
-                        ),
-                      ),
-              ),
+                ),
             ],
           ),
           AnimatedSize(
@@ -2098,7 +1792,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           AnimatedSize(
             duration: AppMotion.normal,
             curve: AppMotion.standard,
-            child: _privateMode && !_reorderMode
+            child: _privateMode && !_reorderMode && !selecting
                 ? Padding(
                     padding: const EdgeInsets.only(left: AppSpacing.sm),
                     child: Row(
@@ -2122,7 +1816,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                           ),
                         ),
                         TextButton.icon(
-                          onPressed: () => _setPrivateMode(false),
+                          onPressed: () => _privateShelf.setPrivateMode(false),
                           icon: const Icon(Icons.lock_rounded, size: 16),
                           label: const Text('锁上'),
                           style: TextButton.styleFrom(
@@ -2160,6 +1854,17 @@ class _LibraryScreenState extends State<LibraryScreen>
                   )
                 : const SizedBox.shrink(),
           ),
+          if (!_reorderMode &&
+              (_shelfBooks.isNotEmpty || _shelfGroups.isNotEmpty)) ...[
+            const SizedBox(height: AppSpacing.sm),
+            LibraryGroupBar(
+              colors: colors,
+              groups: _shelfGroups,
+              selectedGroup: _selectedGroup,
+              onSelected: (group) => setState(() => _selectedGroup = group),
+              onManageGroups: _openGroupManager,
+            ),
+          ],
         ],
       ),
     );
@@ -2250,7 +1955,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             ),
             const SizedBox(height: AppSpacing.md),
             OutlinedButton(
-              onPressed: _hasShelfQueryOrFilter
+              onPressed: _hasAnyShelfConstraint
                   ? _clearShelfQueryAndFilter
                   : null,
               child: const Text('清除搜索和筛选'),
@@ -2261,17 +1966,6 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
-  /// The single shelf surface on screen for the current state.
-  ///
-  /// Exactly one grid is mounted at a time. An [AnimatedSwitcher] used to
-  /// cross-fade between shelves and kept the outgoing grid mounted for the
-  /// length of the fade. Two grids then held the same per-book
-  /// [GlobalObjectKey]s, attached two [ScrollPosition]s to the shared scroll
-  /// controller, and left private covers painted, tappable and announced by a
-  /// screen reader after the shelf locked. The grid is now replaced in place
-  /// instead: the key ignores the query, filter and shelf, so filtering
-  /// updates the same grid and keeps its position and attached keys, while a
-  /// shelf change rebuilds its children without an exit frame.
   Widget _buildShelfContent(ReaderThemeColors colors) {
     if (_loading) {
       return const Center(
@@ -2298,8 +1992,25 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Widget _buildBookGrid(ReaderThemeColors colors) {
-    if (_reorderMode) return _buildReorderBookGrid(colors);
+    if (_reorderMode) {
+      return LibraryReorderGrid(
+        books: _shelfBooks,
+        progressMap: _progressMap,
+        availabilityMap: _availabilityMap,
+        colors: colors,
+        scrollController: _reorderScrollController,
+        openingBook: _openingBook,
+        reorderFocusBookId: _reorderFocusBookId,
+        onBooksFitChanged: (fits) => _reorderShelfFits = fits,
+        onPinOffsetWhenFits: _pinShelfOffsetWhenItFits,
+        onMoveDraggedBook: _moveDraggedBook,
+        onDragStarted: _startBookDrag,
+        onDragUpdate: _updateBookDrag,
+        onDragEnd: _finishBookDrag,
+      );
+    }
     final books = _visibleBooks;
+    final selecting = _selection.isSelecting;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2310,7 +2021,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           bookCount: books.length,
           topPadding: AppSpacing.md,
           horizontalPadding: AppSpacing.md,
-          gestureInset: MediaQuery.paddingOf(context).bottom,
+          gestureInset: selecting ? 0 : MediaQuery.paddingOf(context).bottom,
           paintedHeight: (cellWidth) =>
               BookCard.paintedHeight(context, cellWidth),
         );
@@ -2318,11 +2029,6 @@ class _LibraryScreenState extends State<LibraryScreen>
         return RefreshIndicator(
           onRefresh: _loadData,
           color: colors.accent,
-          // A short shelf used to keep a few dozen pixels of trailing padding
-          // in the scroll range. Dragging then slid the cards and the platform
-          // stretch pulled them further, even though every book was already
-          // on screen. A shelf that fits now has no scroll range and shows no
-          // stretch, while the pull at the top still reaches the refresh.
           child: NotificationListener<OverscrollIndicatorNotification>(
             onNotification: (notification) {
               if (booksFit) notification.disallowIndicator();
@@ -2330,20 +2036,23 @@ class _LibraryScreenState extends State<LibraryScreen>
             },
             child: GridView.builder(
               controller: _gridScrollController,
-              physics: booksFit ? const _PinnedShelfScrollPhysics() : null,
+              physics: booksFit ? const PinnedShelfScrollPhysics() : null,
               padding: EdgeInsets.fromLTRB(
                 AppSpacing.md,
                 AppSpacing.md,
                 AppSpacing.md,
                 booksFit
                     ? 0
-                    : AppSpacing.md + MediaQuery.paddingOf(context).bottom,
+                    : AppSpacing.md +
+                          (selecting
+                              ? AppSpacing.md
+                              : MediaQuery.paddingOf(context).bottom),
               ),
               gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: _shelfMetrics(
+                crossAxisCount: computeShelfGridMetrics(
                   MediaQuery.sizeOf(context).width,
                 ).columns,
-                childAspectRatio: _shelfCardAspectRatio,
+                childAspectRatio: 0.52,
                 crossAxisSpacing: AppSpacing.xs,
                 mainAxisSpacing: AppSpacing.sm,
               ),
@@ -2368,14 +2077,17 @@ class _LibraryScreenState extends State<LibraryScreen>
                         _availabilityMap[book.id] ?? BookAvailability.available,
                     colors: colors,
                     coverKey: coverKey,
-                    onTap: () => _openBookFromCover(book, coverKey),
-                    onLongPress: () => _showBookActions(book),
+                    selectionMode: selecting,
+                    selected: selecting && _selection.isSelected(book.id),
+                    onTap: selecting
+                        ? () => _selection.toggle(book.id)
+                        : () => _openBookFromCover(book, coverKey),
+                    onLongPress: selecting
+                        ? () => _selection.toggle(book.id)
+                        : () => _showBookActions(book),
                   ),
                 );
 
-                // Staggered entrance: cap how many items participate in the
-                // stagger so a long shelf doesn't push later cards' start time
-                // past 1.0 (Interval asserts 0 <= begin <= end <= 1).
                 final staggerIndex = math.min(index, 11);
                 final start = (staggerIndex * 0.04).clamp(0.0, 0.6);
                 final interval = Interval(
@@ -2408,15 +2120,6 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
-  /// Whether every book card ends above the system gesture bar.
-  ///
-  /// The grid's bottom padding includes that inset, so a short shelf can still
-  /// report a few dozen pixels of scroll range. Dragging it slides cards that
-  /// are already visible, and the platform stretch pulls them further. The
-  /// last row counts up to the bottom of its progress bar, because each cell
-  /// keeps a blank strip below that and the strip may sit over the gesture
-  /// bar. Cards that actually run into the gesture bar stay scrollable, so the
-  /// last row can still be lifted clear of it.
   static bool _shelfBooksFitViewport({
     required double screenWidth,
     required double viewportWidth,
@@ -2429,12 +2132,12 @@ class _LibraryScreenState extends State<LibraryScreen>
   }) {
     if (bookCount <= 0) return true;
     if (!viewportWidth.isFinite || !viewportHeight.isFinite) return false;
-    final columns = _shelfMetrics(screenWidth).columns;
+    final columns = computeShelfGridMetrics(screenWidth).columns;
     final innerWidth = math.max(0.0, viewportWidth - horizontalPadding * 2);
     final cardWidth = columns <= 1
         ? innerWidth
         : math.max(0.0, (innerWidth - AppSpacing.xs * (columns - 1)) / columns);
-    final cardHeight = cardWidth / _shelfCardAspectRatio;
+    final cardHeight = cardWidth / 0.52;
     final rows = (bookCount / columns).ceil();
     final lastRowHeight = math.min(cardHeight, paintedHeight(cardWidth));
     final contentHeight =
@@ -2443,12 +2146,6 @@ class _LibraryScreenState extends State<LibraryScreen>
     return topPadding + contentHeight <= visibleHeight + 0.5;
   }
 
-  /// Rewinds every laid-out position of [controller] to the top.
-  ///
-  /// [ScrollController.offset] and [ScrollController.position] require exactly
-  /// one attached position. A shelf transition briefly attached two before the
-  /// grid swap was made atomic, so read and move the positions one by one
-  /// instead of assuming there is only one.
   void _rewindShelfScroll(ScrollController controller) {
     if (!controller.hasClients) return;
     for (final position in List<ScrollPosition>.of(controller.positions)) {
@@ -2461,11 +2158,6 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
-  /// Drops a leftover offset once every card already fits.
-  ///
-  /// Switching off user scrolling does not rewind the position. Without this,
-  /// deleting books until the shelf fits could leave the cards parked on the
-  /// old trailing padding, with no gesture able to bring them back.
   void _pinShelfOffsetWhenItFits(ScrollController controller, bool booksFit) {
     if (!booksFit || !controller.hasClients) return;
     var parked = false;
@@ -2481,271 +2173,4 @@ class _LibraryScreenState extends State<LibraryScreen>
       _rewindShelfScroll(controller);
     });
   }
-
-  /// Shelf geometry for a given width.
-  ///
-  /// A fixed three-column shelf turned a landscape phone or a tablet into three
-  /// enormous covers. Columns are derived from a target card width instead, so
-  /// a book card stays the same physical size and the shelf simply holds more
-  /// of them as the window grows.
-  static ({int columns, double cardWidth, double cardHeight}) _shelfMetrics(
-    double availableWidth,
-  ) {
-    const maxCardWidth = 148.0;
-    const gap = AppSpacing.xs;
-    final gridWidth = math.max(0.0, availableWidth - AppSpacing.md * 2);
-    final fitted = gridWidth <= 0
-        ? _minShelfColumns
-        : ((gridWidth + gap) / (maxCardWidth + gap)).ceil();
-    final columns = fitted.clamp(_minShelfColumns, _maxShelfColumns);
-    final cardWidth = math.max(
-      0.0,
-      (gridWidth - gap * (columns - 1)) / columns,
-    );
-    return (
-      columns: columns,
-      cardWidth: cardWidth,
-      cardHeight: cardWidth / _shelfCardAspectRatio,
-    );
-  }
-
-  Widget _buildReorderBookGrid(ReaderThemeColors colors) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        const horizontalPadding = AppSpacing.md;
-        const horizontalGap = AppSpacing.xs;
-        const verticalGap = AppSpacing.sm;
-        final metrics = _shelfMetrics(constraints.maxWidth);
-        final columnCount = metrics.columns;
-        final gridWidth = math.max(
-          0.0,
-          constraints.maxWidth - horizontalPadding * 2,
-        );
-        final cardWidth = metrics.cardWidth;
-        final cardHeight = metrics.cardHeight;
-        // Hidden shelf books keep their slots in the saved order, but only
-        // this shelf's books take part in the drag grid.
-        final books = _shelfBooks;
-        final rowCount = (books.length / columnCount).ceil();
-        final contentHeight = rowCount == 0
-            ? 0.0
-            : rowCount * cardHeight + (rowCount - 1) * verticalGap;
-        final gestureInset = MediaQuery.paddingOf(context).bottom;
-        final paintedHeight = rowCount == 0
-            ? 0.0
-            : (rowCount - 1) * (cardHeight + verticalGap) +
-                  math.min(
-                    cardHeight,
-                    BookCard.paintedHeight(context, cardWidth),
-                  );
-        final booksFit =
-            paintedHeight <= constraints.maxHeight - gestureInset + 0.5;
-        _reorderShelfFits = booksFit;
-        _pinShelfOffsetWhenItFits(_reorderScrollController, booksFit);
-
-        return SingleChildScrollView(
-          key: const ValueKey('reorder-grid'),
-          controller: _reorderScrollController,
-          physics: booksFit ? const NeverScrollableScrollPhysics() : null,
-          padding: EdgeInsets.fromLTRB(
-            horizontalPadding,
-            0,
-            horizontalPadding,
-            // Without trailing padding a shelf that fits has no scroll range,
-            // so the edge auto-scroll during a drag cannot move it either.
-            booksFit
-                ? 0
-                : horizontalPadding + MediaQuery.paddingOf(context).bottom,
-          ),
-          child: SizedBox(
-            width: gridWidth,
-            height: contentHeight,
-            child: Stack(
-              alignment: Alignment.topLeft,
-              clipBehavior: Clip.none,
-              children: [
-                for (var index = 0; index < books.length; index++)
-                  _buildReorderBookItem(
-                    book: books[index],
-                    index: index,
-                    columnCount: columnCount,
-                    cardWidth: cardWidth,
-                    cardHeight: cardHeight,
-                    horizontalGap: horizontalGap,
-                    verticalGap: verticalGap,
-                    colors: colors,
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildReorderBookItem({
-    required Book book,
-    required int index,
-    required int columnCount,
-    required double cardWidth,
-    required double cardHeight,
-    required double horizontalGap,
-    required double verticalGap,
-    required ReaderThemeColors colors,
-  }) {
-    final column = index % columnCount;
-    final row = index ~/ columnCount;
-    final left = column * (cardWidth + horizontalGap);
-    final top = row * (cardHeight + verticalGap);
-
-    return AnimatedPositioned(
-      key: ValueKey<String>(book.id),
-      duration: AppMotion.shelfReorder,
-      curve: AppMotion.shelfReorderCurve,
-      left: left,
-      top: top,
-      width: cardWidth,
-      height: cardHeight,
-      child: DragTarget<String>(
-        onWillAcceptWithDetails: (details) => details.data != book.id,
-        onMove: (_) => _moveDraggedBook(book.id),
-        builder: (context, candidateData, rejectedData) {
-          final isTarget = candidateData.any((id) => id != book.id);
-          final isFocused = _reorderFocusBookId == book.id;
-          final card = _buildReorderCard(book, colors);
-          return Semantics(
-            label: '拖动移动《${book.title}》',
-            hint: '按住并拖动到新的书架位置',
-            child: AnimatedScale(
-              scale: isTarget ? 0.965 : (isFocused ? 1.035 : 1.0),
-              duration: isTarget ? AppMotion.quick : AppMotion.shelfLift,
-              curve: AppMotion.shelfReorderCurve,
-              child: AnimatedContainer(
-                duration: AppMotion.shelfLift,
-                curve: AppMotion.shelfReorderCurve,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(AppRadius.lg),
-                  border: Border.all(
-                    color: isTarget || isFocused
-                        ? colors.accent.withValues(alpha: 0.42)
-                        : Colors.transparent,
-                    width: 1.2,
-                  ),
-                  boxShadow: isFocused
-                      ? [
-                          BoxShadow(
-                            color: colors.accent.withValues(alpha: 0.16),
-                            blurRadius: 18,
-                            offset: const Offset(0, 7),
-                          ),
-                        ]
-                      : const [],
-                ),
-                child: Draggable<String>(
-                  data: book.id,
-                  maxSimultaneousDrags: _openingBook ? 0 : 1,
-                  dragAnchorStrategy: _centerDragAnchorStrategy,
-                  onDragStarted: () => _startBookDrag(book),
-                  onDragUpdate: _updateBookDrag,
-                  onDragEnd: (_) => _finishBookDrag(book),
-                  feedback: _buildLiftedBookFeedback(
-                    book: book,
-                    width: cardWidth,
-                    height: cardHeight,
-                    colors: colors,
-                  ),
-                  childWhenDragging: _buildReorderPlaceholder(card, colors),
-                  child: card,
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildReorderCard(Book book, ReaderThemeColors colors) {
-    return BookCard(
-      book: book,
-      progress: _progressMap[book.id],
-      availability: _availabilityMap[book.id] ?? BookAvailability.available,
-      colors: colors,
-      onTap: () {},
-    );
-  }
-
-  Widget _buildReorderPlaceholder(Widget card, ReaderThemeColors colors) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: colors.accent.withValues(alpha: 0.035),
-        borderRadius: BorderRadius.circular(AppRadius.lg),
-        border: Border.all(
-          color: colors.accent.withValues(alpha: 0.18),
-          width: 1,
-        ),
-      ),
-      child: Opacity(opacity: 0.12, child: card),
-    );
-  }
-
-  Widget _buildLiftedBookFeedback({
-    required Book book,
-    required double width,
-    required double height,
-    required ReaderThemeColors colors,
-  }) {
-    return IgnorePointer(
-      child: Material(
-        color: Colors.transparent,
-        elevation: 18,
-        shadowColor: Colors.black.withValues(alpha: 0.34),
-        borderRadius: BorderRadius.circular(AppRadius.lg),
-        child: Transform.scale(
-          scale: 1.055,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: colors.headerBg.withValues(alpha: 0.98),
-              borderRadius: BorderRadius.circular(AppRadius.lg),
-              border: Border.all(
-                color: colors.accent.withValues(alpha: 0.42),
-                width: 1.2,
-              ),
-            ),
-            child: SizedBox(
-              width: width,
-              height: height,
-              child: _buildReorderCard(book, colors),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Scroll physics for a shelf whose cards all sit above the gesture bar.
-///
-/// Every drag and fling is reported as overscroll, so the cards stay still
-/// even when the last cell's blank strip leaves a sliver of scroll range. The
-/// overscroll at the top still reaches the pull-to-refresh above the grid.
-class _PinnedShelfScrollPhysics extends ScrollPhysics {
-  const _PinnedShelfScrollPhysics({super.parent});
-
-  @override
-  _PinnedShelfScrollPhysics applyTo(ScrollPhysics? ancestor) =>
-      _PinnedShelfScrollPhysics(parent: buildParent(ancestor));
-
-  @override
-  bool shouldAcceptUserOffset(ScrollMetrics position) => true;
-
-  @override
-  double applyBoundaryConditions(ScrollMetrics position, double value) =>
-      value - position.pixels;
-
-  @override
-  Simulation? createBallisticSimulation(
-    ScrollMetrics position,
-    double velocity,
-  ) => null;
 }

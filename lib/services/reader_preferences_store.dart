@@ -15,6 +15,8 @@ const _pdfNotesPrefix = 'readvibe_pdf_notes_';
 const _pdfDisplayThemePrefix = 'readvibe_pdf_display_theme_';
 const _tocCollapsedPrefix = 'readvibe_toc_collapsed_';
 const _bookmarksPrefix = 'readvibe_bookmarks_';
+const _shelfGroupsKey = 'readvibe_shelf_groups';
+const _privateShelfGroupsKey = 'readvibe_private_shelf_groups';
 
 /// Owns the small reader-state records stored in SharedPreferences.
 ///
@@ -348,6 +350,29 @@ class ReaderPreferencesStore {
         await _deleteManagedFont(previousImportedFontPath);
       }
     });
+  }
+
+  Future<List<String>> getShelfGroups({required bool private}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = private ? _privateShelfGroupsKey : _shelfGroupsKey;
+    final raw = prefs.getString(key);
+    if (raw == null || raw.isEmpty) return const <String>[];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Iterable) return const <String>[];
+      return normalizeBookGroups(decoded.cast<Object?>(), maxGroups: 64);
+    } on Object {
+      return const <String>[];
+    }
+  }
+
+  Future<void> saveShelfGroups(
+    Iterable<String> groups, {
+    required bool private,
+  }) async {
+    final key = private ? _privateShelfGroupsKey : _shelfGroupsKey;
+    final normalized = normalizeBookGroups(groups, maxGroups: 64);
+    await _setLatestString(key, jsonEncode(normalized));
   }
 
   Future<void> clearBookState(String bookId) async {

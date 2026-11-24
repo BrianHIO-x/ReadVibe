@@ -129,6 +129,10 @@ class PrivateShelfLock {
   static const _kDefaultBiometric = 'private_shelf_default_biometric';
   static const _kFailures = 'private_shelf_failures';
   static const _kLockedUntil = 'private_shelf_locked_until';
+  static const _kLockedElapsedUntil = 'private_shelf_locked_elapsed_until';
+  static const _kLockedElapsedStart = 'private_shelf_locked_elapsed_start';
+  static const _kLockedBootCount = 'private_shelf_locked_boot_count';
+  static const _kLockedDurationMs = 'private_shelf_locked_duration_ms';
 
   Future<PrivateShelfConfig> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -167,7 +171,7 @@ class PrivateShelfLock {
 
   Future<PinCheck> verifyPin(String pin) async {
     final prefs = await SharedPreferences.getInstance();
-    final lockedUntil = _lockedUntil(prefs);
+    final lockedUntil = await _lockedUntil(prefs);
     if (lockedUntil != null) return PinCheck.locked(lockedUntil);
     final salt = prefs.getString(_kSalt);
     final stored = prefs.getString(_kDigest);
@@ -196,6 +200,24 @@ class PrivateShelfLock {
     );
     final until = DateTime.now().add(lockout);
     await prefs.setInt(_kLockedUntil, until.millisecondsSinceEpoch);
+    await prefs.setInt(_kLockedDurationMs, lockout.inMilliseconds);
+    final clock = await _readClock();
+    if (clock != null) {
+      await prefs.setInt(_kLockedElapsedStart, clock.elapsedRealtimeMs);
+      await prefs.setInt(
+        _kLockedElapsedUntil,
+        clock.elapsedRealtimeMs + lockout.inMilliseconds,
+      );
+      if (clock.bootCount >= 0) {
+        await prefs.setInt(_kLockedBootCount, clock.bootCount);
+      } else {
+        await prefs.remove(_kLockedBootCount);
+      }
+    } else {
+      await prefs.remove(_kLockedElapsedStart);
+      await prefs.remove(_kLockedElapsedUntil);
+      await prefs.remove(_kLockedBootCount);
+    }
     return PinCheck.locked(until);
   }
 
@@ -233,6 +255,10 @@ class PrivateShelfLock {
       _kDefaultBiometric,
       _kFailures,
       _kLockedUntil,
+      _kLockedElapsedUntil,
+      _kLockedElapsedStart,
+      _kLockedBootCount,
+      _kLockedDurationMs,
     ]) {
       await prefs.remove(key);
     }
@@ -297,16 +323,87 @@ class PrivateShelfLock {
     }
   }
 
-  DateTime? _lockedUntil(SharedPreferences prefs) {
-    final millis = prefs.getInt(_kLockedUntil);
-    if (millis == null) return null;
-    final until = DateTime.fromMillisecondsSinceEpoch(millis);
-    return until.isAfter(DateTime.now()) ? until : null;
+  Future<DateTime?> _lockedUntil(SharedPreferences prefs) async {
+    final wallUntilMs = prefs.getInt(_kLockedUntil);
+    final elapsedUntilMs = prefs.getInt(_kLockedElapsedUntil);
+    final elapsedStartMs = prefs.getInt(_kLockedElapsedStart);
+    final savedBootCount = prefs.getInt(_kLockedBootCount);
+    final durationMs = prefs.getInt(_kLockedDurationMs);
+    if (wallUntilMs == null && elapsedUntilMs == null) return null;
+
+    final clock = await _readClock();
+    final sameBoot =
+        clock != null &&
+        elapsedUntilMs != null &&
+        elapsedStartMs != null &&
+        ((savedBootCount != null && savedBootCount >= 0)
+            ? clock.bootCount == savedBootCount &&
+                  clock.elapsedRealtimeMs >= elapsedStartMs
+            : clock.elapsedRealtimeMs >= elapsedStartMs);
+    if (sameBoot) {
+      final remainingMs = elapsedUntilMs - clock.elapsedRealtimeMs;
+      if (remainingMs <= 0) {
+        await _clearLockoutTimestamps(prefs);
+        return null;
+      }
+      final clampedMs = durationMs != null && durationMs > 0
+          ? math.min(remainingMs, durationMs)
+          : remainingMs;
+      return DateTime.now().add(Duration(milliseconds: clampedMs));
+    }
+
+    if (wallUntilMs == null) {
+      await _clearLockoutTimestamps(prefs);
+      return null;
+    }
+    final nowWallMs = clock?.wallTimeMs ?? DateTime.now().millisecondsSinceEpoch;
+    final remainingWallMs = wallUntilMs - nowWallMs;
+    if (remainingWallMs <= 0) {
+      await _clearLockoutTimestamps(prefs);
+      return null;
+    }
+    final clampedWallMs = durationMs != null && durationMs > 0
+        ? math.min(remainingWallMs, durationMs)
+        : remainingWallMs;
+    return DateTime.now().add(Duration(milliseconds: clampedWallMs));
+  }
+
+  Future<({int elapsedRealtimeMs, int bootCount, int wallTimeMs})?>
+  _readClock() async {
+    try {
+      final raw = await _channel.invokeMapMethod<String, Object?>('clock');
+      if (raw == null) return null;
+      final elapsed = raw['elapsedRealtimeMs'];
+      final bootCount = raw['bootCount'];
+      final wallTime = raw['wallTimeMs'];
+      if (elapsed is! num || wallTime is! num) return null;
+      return (
+        elapsedRealtimeMs: elapsed.toInt(),
+        bootCount: bootCount is num ? bootCount.toInt() : -1,
+        wallTimeMs: wallTime.toInt(),
+      );
+    } on MissingPluginException {
+      return null;
+    } on Object {
+      return null;
+    }
+  }
+
+  Future<void> _clearLockoutTimestamps(SharedPreferences prefs) async {
+    for (final key in const [
+      _kLockedUntil,
+      _kLockedElapsedUntil,
+      _kLockedElapsedStart,
+      _kLockedBootCount,
+      _kLockedDurationMs,
+    ]) {
+      await prefs.remove(key);
+    }
   }
 
   Future<void> _clearFailures(SharedPreferences prefs) async {
     await prefs.remove(_kFailures);
-    await prefs.remove(_kLockedUntil);
+    await _clearLockoutTimestamps(prefs);
   }
 
   static bool _sameBytes(List<int> first, List<int> second) {

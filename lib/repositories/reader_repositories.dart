@@ -129,7 +129,38 @@ abstract interface class LibraryRepository
     required bool private,
   });
 
+  Future<void> setBooksGroups(
+    Iterable<String> bookIds,
+    Iterable<String> groups,
+  );
+
+  Future<void> updateBooksGroups(
+    Iterable<String> bookIds, {
+    Iterable<String> add = const <String>[],
+    Iterable<String> remove = const <String>[],
+  });
+
+  Future<List<String>> getShelfGroups({required bool private});
+
+  Future<void> saveShelfGroups(
+    Iterable<String> groups, {
+    required bool private,
+  });
+
+  Future<void> renameShelfGroup({
+    required String oldName,
+    required String newName,
+    required bool private,
+  });
+
+  Future<void> deleteShelfGroup(
+    String name, {
+    required bool private,
+  });
+
   Future<void> deleteBook(String bookId);
+
+  Future<void> deleteBooks(Iterable<String> bookIds);
 
   Future<ReadingProgress?> getShelfProgress(Book book);
 
