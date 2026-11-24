@@ -319,6 +319,6 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 - **协议通道**：`com.readvibe.app/` 前缀下的 `incoming_file`、`book_picker`、`system_text_actions`、`document_parser`、`app_update`、`book_export`、`pdf_renderer`、`biometric`、`motion` 分别承载平台能力；`reader_window` 由阅读窗口协调器访问。
 - **文档级不变量**：正文与解析全部本地执行；章节编辑只改私有副本；导出位置由用户经系统界面选择；签名材料不入库。
 - **worker 闭包**：交给 `Isolate.run` 的闭包一律写在顶层或类级函数里，参数只收可传递的值。写在方法体内会与该方法的捕获上下文共用，凡是那里放着的回调、Future、Timer 或界面状态都会被一起发送，AOT 正式包因此抛 `Illegal argument in isolate message`，且只在真机或模拟器的 release 构建上暴露。
-- **版本约定**：当前公开版本系列为 `0.7.X`，Android 内部构建号同步递增，唯一来源为 `pubspec.yaml`；release 构建缺 `key.properties` 即失败。
+- **版本约定**：当前公开版本系列为 `0.8.X`，Android 内部构建号同步递增，唯一来源为 `pubspec.yaml`；release 构建缺 `key.properties` 即失败。
 - **发布包**：正式包必须放到 `D:\0_Study\0_Stdio\0_Codex_work\1.ReadVibe_Project\dist`，按 `ReadVibe-Android-v<公开版本>-arm64-v8a.apk` 命名。
 - **改动确认**：用 VS Code 连接的 Android 模拟器直接运行即可。

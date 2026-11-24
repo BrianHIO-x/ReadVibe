@@ -213,6 +213,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _handleSelectionChanged() {
+    if (_selection.isSelecting) {
+      _librarySearchFocus.unfocus();
+    }
     if (mounted) setState(() {});
   }
 
@@ -1617,7 +1620,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                   ),
                 ),
               ),
-              const SizedBox(width: AppSpacing.sm),
+              SizedBox(width: selecting ? AppSpacing.xs : AppSpacing.sm),
               Expanded(
                 child: AnimatedSwitcher(
                   duration: AppMotion.fast,
@@ -1648,15 +1651,15 @@ class _LibraryScreenState extends State<LibraryScreen>
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: (_reorderMode || selecting) ? 20 : 24,
-                      fontWeight: FontWeight.w700,
+                      fontSize: selecting ? 16 : (_reorderMode ? 20 : 24),
+                      fontWeight: selecting ? FontWeight.w600 : FontWeight.w700,
                       color: colors.text,
-                      letterSpacing: -0.3,
+                      letterSpacing: selecting ? 0 : -0.3,
                     ),
                   ),
                 ),
               ),
-              if (!_reorderMode) ...[
+              if (!_reorderMode && !selecting) ...[
                 IconButton(
                   tooltip: '搜索书架',
                   onPressed: () {
@@ -1680,7 +1683,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                     color: colors.secondary,
                   ),
                 ),
-                if (!selecting && _shelfBooks.isNotEmpty)
+                if (_shelfBooks.isNotEmpty)
                   IconButton(
                     tooltip: '多选管理',
                     onPressed: _selection.enter,
@@ -1700,10 +1703,35 @@ class _LibraryScreenState extends State<LibraryScreen>
                   onPressed: visibleIds.isEmpty
                       ? null
                       : () => _selection.selectAll(visibleIds),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.sm,
+                    ),
+                    minimumSize: const Size(0, 36),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    textStyle: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                   child: Text(allSelected ? '取消全选' : '全选'),
                 ),
+                const SizedBox(width: AppSpacing.xs),
                 TextButton(
                   onPressed: _selection.exit,
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.sm,
+                    ),
+                    minimumSize: const Size(0, 36),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    textStyle: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                   child: const Text('完成'),
                 ),
               ] else
@@ -1834,6 +1862,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             curve: AppMotion.standard,
             child:
                 !_reorderMode &&
+                    !selecting &&
                     (_librarySearchVisible || _hasShelfQueryOrFilter)
                 ? Padding(
                     padding: const EdgeInsets.fromLTRB(
@@ -1854,17 +1883,26 @@ class _LibraryScreenState extends State<LibraryScreen>
                   )
                 : const SizedBox.shrink(),
           ),
-          if (!_reorderMode &&
-              (_shelfBooks.isNotEmpty || _shelfGroups.isNotEmpty)) ...[
-            const SizedBox(height: AppSpacing.sm),
-            LibraryGroupBar(
-              colors: colors,
-              groups: _shelfGroups,
-              selectedGroup: _selectedGroup,
-              onSelected: (group) => setState(() => _selectedGroup = group),
-              onManageGroups: _openGroupManager,
-            ),
-          ],
+          AnimatedSize(
+            duration: AppMotion.normal,
+            curve: AppMotion.standard,
+            child:
+                !_reorderMode &&
+                    !selecting &&
+                    (_shelfBooks.isNotEmpty || _shelfGroups.isNotEmpty)
+                ? Padding(
+                    padding: const EdgeInsets.only(top: AppSpacing.sm),
+                    child: LibraryGroupBar(
+                      colors: colors,
+                      groups: _shelfGroups,
+                      selectedGroup: _selectedGroup,
+                      onSelected: (group) =>
+                          setState(() => _selectedGroup = group),
+                      onManageGroups: _openGroupManager,
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
         ],
       ),
     );
