@@ -3,11 +3,13 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../models/reader_note.dart';
+import '../theme/app_button_styles.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_sheet.dart';
+import 'pressable_scale.dart';
 
 class ReaderNoteDraft {
   const ReaderNoteDraft({
@@ -303,8 +305,11 @@ class _ReaderNoteComposerSheetState extends State<_ReaderNoteComposerSheet> {
                                 size: 18,
                               ),
                               label: const Text('补充页内摘录原文（可选）'),
-                              style: TextButton.styleFrom(
+                              style: AppButtonStyles.textOverride(
+                                colors,
+                                foregroundColor: colors.accent,
                                 padding: EdgeInsets.zero,
+                                minimumSize: const Size(0, 36),
                                 visualDensity: VisualDensity.compact,
                               ),
                             ),
@@ -380,9 +385,6 @@ class _ReaderNoteComposerSheetState extends State<_ReaderNoteComposerSheet> {
                           Expanded(
                             child: OutlinedButton(
                               onPressed: () => Navigator.of(context).pop(),
-                              style: OutlinedButton.styleFrom(
-                                side: BorderSide(color: colors.border),
-                              ),
                               child: const Text('取消'),
                             ),
                           ),
@@ -391,7 +393,8 @@ class _ReaderNoteComposerSheetState extends State<_ReaderNoteComposerSheet> {
                             flex: 2,
                             child: FilledButton.icon(
                               onPressed: hasAnyBody ? _submit : null,
-                              style: FilledButton.styleFrom(
+                              style: AppButtonStyles.filledOverride(
+                                colors,
                                 backgroundColor: accentColor,
                                 foregroundColor: Colors.white,
                               ),
@@ -497,30 +500,36 @@ class _ReaderNoteComposerSheetState extends State<_ReaderNoteComposerSheet> {
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             for (final tag in displayTags)
-              FilterChip(
-                label: Text('#$tag', style: const TextStyle(fontSize: 12)),
-                selected: _tags.contains(tag),
-                showCheckmark: false,
-                visualDensity: VisualDensity.compact,
-                selectedColor: accentColor.withValues(alpha: 0.16),
-                side: BorderSide(
-                  color: _tags.contains(tag) ? accentColor : colors.border,
+              PressableScale(
+                pressedScale: 0.95,
+                child: FilterChip(
+                  label: Text('#$tag', style: const TextStyle(fontSize: 12)),
+                  selected: _tags.contains(tag),
+                  showCheckmark: false,
+                  visualDensity: VisualDensity.compact,
+                  selectedColor: accentColor.withValues(alpha: 0.16),
+                  side: BorderSide(
+                    color: _tags.contains(tag) ? accentColor : colors.border,
+                  ),
+                  labelStyle: TextStyle(
+                    color: _tags.contains(tag) ? accentColor : colors.secondary,
+                    fontWeight: _tags.contains(tag)
+                        ? FontWeight.w600
+                        : FontWeight.w400,
+                  ),
+                  onSelected: (_) => _toggleTag(tag),
                 ),
-                labelStyle: TextStyle(
-                  color: _tags.contains(tag) ? accentColor : colors.secondary,
-                  fontWeight: _tags.contains(tag)
-                      ? FontWeight.w600
-                      : FontWeight.w400,
-                ),
-                onSelected: (_) => _toggleTag(tag),
               ),
             if (!_addingTag && _tags.length < maxReaderNoteTags)
-              ActionChip(
-                avatar: Icon(Icons.add_rounded, size: 15, color: accentColor),
-                label: const Text('自定义', style: TextStyle(fontSize: 12)),
-                visualDensity: VisualDensity.compact,
-                side: BorderSide(color: colors.border),
-                onPressed: () => setState(() => _addingTag = true),
+              PressableScale(
+                pressedScale: 0.95,
+                child: ActionChip(
+                  avatar: Icon(Icons.add_rounded, size: 15, color: accentColor),
+                  label: const Text('自定义', style: TextStyle(fontSize: 12)),
+                  visualDensity: VisualDensity.compact,
+                  side: BorderSide(color: colors.border),
+                  onPressed: () => setState(() => _addingTag = true),
+                ),
               ),
           ],
         ),
@@ -621,43 +630,50 @@ class _StyleChoiceChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(AppRadius.sm),
-      child: AnimatedContainer(
-        duration: AppMotion.quick,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: selected
-              ? accentColor.withValues(alpha: 0.14)
-              : colors.headerBg,
+    return PressableScale(
+      pressedScale: 0.94,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
           borderRadius: BorderRadius.circular(AppRadius.sm),
-          border: Border.all(color: selected ? accentColor : colors.border),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(
-              width: 26,
-              height: 12,
-              child: CustomPaint(
-                painter: _MiniStylePainter(
-                  style: style,
-                  accentColor: accentColor,
-                  highlightFill: highlightFill,
+          overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+          child: AnimatedContainer(
+            duration: AppMotion.quick,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: selected
+                  ? accentColor.withValues(alpha: 0.14)
+                  : colors.headerBg,
+              borderRadius: BorderRadius.circular(AppRadius.sm),
+              border: Border.all(color: selected ? accentColor : colors.border),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 26,
+                  height: 12,
+                  child: CustomPaint(
+                    painter: _MiniStylePainter(
+                      style: style,
+                      accentColor: accentColor,
+                      highlightFill: highlightFill,
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(height: 2),
+                Text(
+                  style.label,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                    color: selected ? accentColor : colors.secondary,
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 2),
-            Text(
-              style.label,
-              style: TextStyle(
-                fontSize: 10.5,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                color: selected ? accentColor : colors.secondary,
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -747,37 +763,44 @@ class _CategoryPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(AppRadius.pill),
-      child: AnimatedContainer(
-        duration: AppMotion.quick,
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-        decoration: BoxDecoration(
-          color: selected
-              ? accentColor.withValues(alpha: 0.14)
-              : colors.background.withValues(alpha: 0.55),
+    return PressableScale(
+      pressedScale: 0.95,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
           borderRadius: BorderRadius.circular(AppRadius.pill),
-          border: Border.all(color: selected ? accentColor : colors.border),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              category.icon,
-              size: 14,
-              color: selected ? accentColor : colors.secondary,
+          overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+          child: AnimatedContainer(
+            duration: AppMotion.quick,
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+            decoration: BoxDecoration(
+              color: selected
+                  ? accentColor.withValues(alpha: 0.14)
+                  : colors.background.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(AppRadius.pill),
+              border: Border.all(color: selected ? accentColor : colors.border),
             ),
-            const SizedBox(width: 4),
-            Text(
-              category.label,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                color: selected ? accentColor : colors.secondary,
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  category.icon,
+                  size: 14,
+                  color: selected ? accentColor : colors.secondary,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  category.label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                    color: selected ? accentColor : colors.secondary,
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );

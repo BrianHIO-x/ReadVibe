@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../theme/app_button_styles.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
@@ -83,15 +84,12 @@ class AppDestructiveButton extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return filled
         ? FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: scheme.error,
-              foregroundColor: scheme.onError,
-            ),
+            style: AppButtonStyles.destructiveFilled(scheme),
             onPressed: onPressed,
             child: child,
           )
         : TextButton(
-            style: TextButton.styleFrom(foregroundColor: scheme.error),
+            style: AppButtonStyles.destructiveText(scheme),
             onPressed: onPressed,
             child: child,
           );

@@ -29,6 +29,7 @@ import '../services/private_shelf_lock.dart';
 import '../services/reading_session_store.dart';
 import '../services/storage_service.dart';
 import '../services/update_service.dart';
+import '../theme/app_button_styles.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
@@ -1962,7 +1963,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                   onPressed: visibleIds.isEmpty
                       ? null
                       : () => _selection.selectAll(visibleIds),
-                  style: TextButton.styleFrom(
+                  style: AppButtonStyles.textOverride(
+                    colors,
+                    foregroundColor: colors.accent,
                     visualDensity: VisualDensity.compact,
                     padding: const EdgeInsets.symmetric(
                       horizontal: AppSpacing.sm,
@@ -1979,7 +1982,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                 const SizedBox(width: AppSpacing.xs),
                 TextButton(
                   onPressed: _selection.exit,
-                  style: TextButton.styleFrom(
+                  style: AppButtonStyles.textOverride(
+                    colors,
+                    foregroundColor: colors.accent,
                     visualDensity: VisualDensity.compact,
                     padding: const EdgeInsets.symmetric(
                       horizontal: AppSpacing.sm,
@@ -2006,10 +2011,10 @@ class _LibraryScreenState extends State<LibraryScreen>
                               : null,
                           icon: const Icon(Icons.check_rounded, size: 18),
                           label: const Text('完成'),
-                          style: FilledButton.styleFrom(
+                          style: AppButtonStyles.filledOverride(
+                            colors,
                             backgroundColor: colors.accent,
                             foregroundColor: Colors.white,
-                            elevation: 0,
                             padding: const EdgeInsets.symmetric(
                               horizontal: AppSpacing.md,
                               vertical: 6,
@@ -2028,13 +2033,10 @@ class _LibraryScreenState extends State<LibraryScreen>
                           label: Text(
                             _importing ? _importLabel(compact: true) : '导入',
                           ),
-                          style: ElevatedButton.styleFrom(
+                          style: AppButtonStyles.filledOverride(
+                            colors,
                             backgroundColor: colors.accent,
                             foregroundColor: Colors.white,
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(AppRadius.pill),
-                            ),
                             padding: const EdgeInsets.symmetric(
                               horizontal: AppSpacing.lg,
                               vertical: AppSpacing.sm,
@@ -2109,9 +2111,11 @@ class _LibraryScreenState extends State<LibraryScreen>
                           onPressed: () => _privateShelf.setPrivateMode(false),
                           icon: const Icon(Icons.lock_rounded, size: 16),
                           label: const Text('锁上'),
-                          style: TextButton.styleFrom(
+                          style: AppButtonStyles.textOverride(
+                            colors,
                             foregroundColor: colors.accent,
                             visualDensity: VisualDensity.compact,
+                            minimumSize: const Size(0, 36),
                           ),
                         ),
                       ],
@@ -2222,13 +2226,10 @@ class _LibraryScreenState extends State<LibraryScreen>
               size: 18,
             ),
             label: Text(_importing ? _importLabel(compact: false) : '导入书籍'),
-            style: ElevatedButton.styleFrom(
+            style: AppButtonStyles.filledOverride(
+              colors,
               backgroundColor: colors.accent,
               foregroundColor: Colors.white,
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(AppRadius.pill),
-              ),
               padding: const EdgeInsets.symmetric(
                 horizontal: AppSpacing.xl,
                 vertical: AppSpacing.md,

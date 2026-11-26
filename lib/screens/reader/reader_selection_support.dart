@@ -7,10 +7,12 @@ import 'package:flutter/rendering.dart' show SelectedContent;
 
 import '../../models/reader_note.dart';
 import '../../services/system_text_action_service.dart';
+import '../../theme/app_button_styles.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/app_sheet.dart';
+import '../../widgets/pressable_scale.dart';
 import '../../widgets/reader_selection_toolbar.dart';
 import '../../theme/app_overlay_theme.dart';
 import 'reader_selection_edge_scroller.dart';
@@ -568,11 +570,8 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
                               remember: remember,
                             ),
                           ),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: widget.colors.accent,
-                            foregroundColor: AppOverlayTheme.onAccent(
-                              widget.colors,
-                            ),
+                          style: AppButtonStyles.filledOverride(
+                            widget.colors,
                             padding: const EdgeInsets.symmetric(
                               vertical: AppSpacing.md,
                             ),
@@ -617,19 +616,23 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
       enabled: target.available,
       label: '${target.label}${target.available ? '' : '，未安装'}',
       onTap: onTap,
-      child: AnimatedScale(
-        scale: selected ? 1 : 0.965,
-        duration: const Duration(milliseconds: 160),
-        curve: Curves.easeOutCubic,
-        child: SizedBox(
-          width: cardWidth,
-          child: Material(
-            color: Colors.transparent,
-            borderRadius: BorderRadius.circular(AppRadius.lg),
-            child: InkWell(
-              onTap: onTap,
+      child: PressableScale(
+        enabled: target.available,
+        pressedScale: 0.95,
+        child: AnimatedScale(
+          scale: selected ? 1 : 0.965,
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+          child: SizedBox(
+            width: cardWidth,
+            child: Material(
+              color: Colors.transparent,
               borderRadius: BorderRadius.circular(AppRadius.lg),
-              child: AnimatedContainer(
+              child: InkWell(
+                onTap: onTap,
+                borderRadius: BorderRadius.circular(AppRadius.lg),
+                overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+                child: AnimatedContainer(
                 duration: const Duration(milliseconds: 160),
                 curve: Curves.easeOutCubic,
                 padding: const EdgeInsets.symmetric(
@@ -674,6 +677,7 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
             ),
           ),
         ),
+      ),
       ),
     );
   }

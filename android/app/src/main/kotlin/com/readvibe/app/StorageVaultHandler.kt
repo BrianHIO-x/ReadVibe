@@ -3,12 +3,15 @@ package com.readvibe.app
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
+import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
+import android.provider.Settings
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
@@ -19,8 +22,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Manages the uninstall-proof SAF persisted ReadVibe_Vault directory using
- * bounded 64 KB streaming I/O, atomic writes, and strict quota/space guards.
+ * Manages the uninstall-proof ReadVibe_Vault directory across both SAF
+ * (`content://`) and optional direct-storage (`file://`) backends with bounded
+ * 64 KB streaming I/O, atomic writes, and strict quota/space guards.
  */
 class StorageVaultHandler(
     private val activity: Activity,
@@ -28,6 +32,8 @@ class StorageVaultHandler(
 ) {
     companion object {
         private const val REQUEST_PICK_TREE = 0x5256
+        private const val REQUEST_MANAGE_ALL_FILES = 0x5257
+        private const val ABANDONED_PICK_GRACE_MS = 1_500L
         private const val VAULT_ROOT_DIR = "ReadVibe_Vault"
         private const val STAGING_CACHE_DIR = "readvibe_vault_staging"
         private const val BUFFER_BYTES = 64 * 1024
@@ -54,11 +60,28 @@ class StorageVaultHandler(
     private val cancelled = AtomicBoolean(false)
     @Volatile private var disposed = false
     private var pendingPickResult: MethodChannel.Result? = null
+    private var pendingAllFilesResult: MethodChannel.Result? = null
+    private var pickerTookForeground = false
+    private var abandonedRunnable: Runnable? = null
 
     init {
         channel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "pickTree" -> launchTreePicker(result)
+                "allFilesAccessStatus" -> runAsync(result) { allFilesAccessStatusMap() }
+                "requestAllFilesAccess" -> launchAllFilesSettings(result)
+                "listLocalDirectories" -> runAsync(result) {
+                    listLocalDirectoriesMap(call.argument("path"))
+                }
+                "createLocalDirectory" -> runAsync(result) {
+                    createLocalDirectoryPath(
+                        parentPath = call.argument("parentPath"),
+                        name = call.argument("name"),
+                    )
+                }
+                "bindLocalDirectory" -> runAsync(result) {
+                    bindLocalDirectoryMap(call.argument("path"))
+                }
                 "checkTree" -> runAsync(result) {
                     val uri = requireTreeUri(call.argument("treeUri"))
                     checkTreeAccess(uri)
@@ -66,13 +89,15 @@ class StorageVaultHandler(
                 "releaseTree" -> runAsync(result) {
                     val raw = call.argument<String>("treeUri")
                     if (!raw.isNullOrBlank()) {
-                        runCatching {
-                            val uri = Uri.parse(raw)
-                            activity.contentResolver.releasePersistableUriPermission(
-                                uri,
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-                            )
+                        val uri = Uri.parse(raw)
+                        if (uri.scheme != "file") {
+                            runCatching {
+                                activity.contentResolver.releasePersistableUriPermission(
+                                    uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                                )
+                            }
                         }
                     }
                     true
@@ -81,32 +106,32 @@ class StorageVaultHandler(
                     mapOf("freeBytes" to availableStorageBytes())
                 }
                 "listVaultFiles" -> runAsync(result) {
-                    val treeUri = requireTreeUri(call.argument("treeUri"))
-                    listVaultEntries(treeUri)
+                    val uri = requireTreeUri(call.argument("treeUri"))
+                    listVaultEntries(uri)
                 }
                 "readVaultFileToCache" -> runAsync(result) {
-                    val treeUri = requireTreeUri(call.argument("treeUri"))
+                    val uri = requireTreeUri(call.argument("treeUri"))
                     val relPath = requireValidRelPath(call.argument("relativePath"))
                     val maxBytes = (call.argument<Number>("maxBytes")?.toLong()
                         ?: MAX_STREAM_READ_BYTES).coerceIn(1L, MAX_STREAM_READ_BYTES)
-                    streamVaultFileToCache(treeUri, relPath, maxBytes)
+                    streamVaultFileToCache(uri, relPath, maxBytes)
                 }
                 "writeCacheFileToVault" -> runAsync(result) {
-                    val treeUri = requireTreeUri(call.argument("treeUri"))
+                    val uri = requireTreeUri(call.argument("treeUri"))
                     val relPath = requireValidRelPath(call.argument("relativePath"))
                     val sourcePath = call.argument<String>("sourcePath")
                         ?: throw IllegalArgumentException("缺失源文件")
                     val quotaBytes = call.argument<Number>("maxVaultBytes")?.toLong() ?: 0L
-                    streamCacheFileToVault(treeUri, sourcePath, relPath, quotaBytes)
+                    streamCacheFileToVault(uri, sourcePath, relPath, quotaBytes)
                 }
                 "deleteVaultFile" -> runAsync(result) {
-                    val treeUri = requireTreeUri(call.argument("treeUri"))
+                    val uri = requireTreeUri(call.argument("treeUri"))
                     val relPath = requireValidRelPath(call.argument("relativePath"))
-                    deleteVaultEntry(treeUri, relPath)
+                    deleteVaultEntry(uri, relPath)
                 }
                 "purgeVault" -> runAsync(result) {
-                    val treeUri = requireTreeUri(call.argument("treeUri"))
-                    purgeVaultRoot(treeUri)
+                    val uri = requireTreeUri(call.argument("treeUri"))
+                    purgeVaultRoot(uri)
                 }
                 "cancelOperations" -> {
                     cancelled.set(true)
@@ -150,33 +175,178 @@ class StorageVaultHandler(
         else mainHandler.post(action)
     }
 
+    private fun cancelAbandonedCheck() {
+        abandonedRunnable?.let(mainHandler::removeCallbacks)
+        abandonedRunnable = null
+    }
+
+    fun onPause() {
+        if (pendingPickResult != null || pendingAllFilesResult != null) {
+            pickerTookForeground = true
+        }
+    }
+
+    fun onResume() {
+        if (!pickerTookForeground) return
+        pickerTookForeground = false
+        cancelAbandonedCheck()
+        val runnable = Runnable {
+            abandonedRunnable = null
+            pendingPickResult?.let { abandoned ->
+                pendingPickResult = null
+                abandoned.success(null)
+            }
+            pendingAllFilesResult?.let { settingsResult ->
+                pendingAllFilesResult = null
+                settingsResult.success(isAllFilesGranted())
+            }
+        }
+        abandonedRunnable = runnable
+        mainHandler.postDelayed(runnable, ABANDONED_PICK_GRACE_MS)
+    }
+
+    private fun buildOpenTreeIntent(): Intent {
+        val documentsUri = resolveDocumentsInitialUri()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val baseIntent = runCatching {
+                activity.getSystemService(StorageManager::class.java)
+                    ?.primaryStorageVolume
+                    ?.createOpenDocumentTreeIntent()
+            }.getOrNull()
+            return (baseIntent ?: Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)).apply {
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, documentsUri)
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+                )
+            }
+        }
+        return Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, documentsUri)
+            }
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+            )
+        }
+    }
+
+    private fun resolveDocumentsInitialUri(): Uri {
+        val fallback = Uri.parse(
+            "content://com.android.externalstorage.documents/document/primary%3ADocuments",
+        )
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return fallback
+        return runCatching {
+            val baseIntent = activity.getSystemService(StorageManager::class.java)
+                ?.primaryStorageVolume
+                ?.createOpenDocumentTreeIntent()
+            val rawUri = if (Build.VERSION.SDK_INT >= 33) {
+                baseIntent?.getParcelableExtra(
+                    DocumentsContract.EXTRA_INITIAL_URI,
+                    Uri::class.java,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                baseIntent?.getParcelableExtra<Uri>(DocumentsContract.EXTRA_INITIAL_URI)
+            } ?: return@runCatching fallback
+            val docBase = rawUri.toString().replace("/root/", "/document/")
+            val target = if (docBase.endsWith("/")) {
+                "${docBase}primary%3ADocuments"
+            } else {
+                "$docBase%3ADocuments"
+            }
+            Uri.parse(target)
+        }.getOrDefault(fallback)
+    }
+
     private fun launchTreePicker(result: MethodChannel.Result) {
-        if (pendingPickResult != null) {
+        if (pendingPickResult != null || pendingAllFilesResult != null) {
             result.error("BUSY", "目录选择器已打开", null)
             return
         }
+        cancelAbandonedCheck()
         pendingPickResult = result
+        pickerTookForeground = false
+        try {
+            @Suppress("DEPRECATION")
+            activity.startActivityForResult(buildOpenTreeIntent(), REQUEST_PICK_TREE)
+        } catch (_: Exception) {
+            try {
+                @Suppress("DEPRECATION")
+                activity.startActivityForResult(
+                    Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                        addFlags(
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                                Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+                        )
+                    },
+                    REQUEST_PICK_TREE,
+                )
+            } catch (_: Exception) {
+                pendingPickResult = null
+                result.error("PICKER_FAILED", "无法打开系统目录选择器", null)
+            }
+        }
+    }
+
+    private fun launchAllFilesSettings(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT < 30) {
+            result.success(false)
+            return
+        }
+        if (isAllFilesGranted()) {
+            result.success(true)
+            return
+        }
+        if (pendingPickResult != null || pendingAllFilesResult != null) {
+            result.error("BUSY", "授权界面已打开", null)
+            return
+        }
+        cancelAbandonedCheck()
+        pendingAllFilesResult = result
+        pickerTookForeground = false
         try {
             @Suppress("DEPRECATION")
             activity.startActivityForResult(
-                Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                    addFlags(
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
-                            Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
-                    )
-                },
-                REQUEST_PICK_TREE,
+                Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:${activity.packageName}"),
+                ),
+                REQUEST_MANAGE_ALL_FILES,
             )
         } catch (_: Exception) {
-            pendingPickResult = null
-            result.error("PICKER_FAILED", "无法打开系统目录选择器", null)
+            try {
+                @Suppress("DEPRECATION")
+                activity.startActivityForResult(
+                    Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+                    REQUEST_MANAGE_ALL_FILES,
+                )
+            } catch (_: Exception) {
+                pendingAllFilesResult = null
+                result.error("PICKER_FAILED", "无法打开系统所有文件访问授权页面", null)
+            }
         }
     }
 
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode == REQUEST_MANAGE_ALL_FILES) {
+            cancelAbandonedCheck()
+            pickerTookForeground = false
+            val pending = pendingAllFilesResult ?: return true
+            pendingAllFilesResult = null
+            pending.success(isAllFilesGranted())
+            return true
+        }
         if (requestCode != REQUEST_PICK_TREE) return false
+        cancelAbandonedCheck()
+        pickerTookForeground = false
         val pending = pendingPickResult ?: return true
         pendingPickResult = null
         if (resultCode != Activity.RESULT_OK || data?.data == null) {
@@ -211,6 +381,158 @@ class StorageVaultHandler(
         return true
     }
 
+    private fun isAllFilesGranted(): Boolean =
+        Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()
+
+    private fun externalStorageRoot(): File =
+        Environment.getExternalStorageDirectory().canonicalFile
+
+    private fun allFilesAccessStatusMap(): Map<String, Any> {
+        val extRoot = externalStorageRoot()
+        val docs = File(extRoot, "Documents").canonicalFile
+        val defaultDir = if (docs.isDirectory) docs else extRoot
+        return mapOf(
+            "supported" to (Build.VERSION.SDK_INT >= 30),
+            "granted" to isAllFilesGranted(),
+            "rootPath" to extRoot.path,
+            "defaultPath" to defaultDir.path,
+        )
+    }
+
+    private fun relativeStoragePath(extRoot: File, dir: File): String {
+        val canonical = dir.canonicalFile
+        if (canonical == extRoot) return ""
+        val prefix = extRoot.path + File.separator
+        if (!canonical.path.startsWith(prefix)) {
+            throw SecurityException("禁止访问外部存储范围之外的目录")
+        }
+        return canonical.path.substring(prefix.length).replace(File.separatorChar, '/')
+    }
+
+    private fun isRestrictedLocalRelativePath(relPath: String): Boolean {
+        val lower = relPath.lowercase()
+        return lower == "android/data" ||
+            lower.startsWith("android/data/") ||
+            lower == "android/obb" ||
+            lower.startsWith("android/obb/") ||
+            lower.startsWith("android/.")
+    }
+
+    private fun requireLocalDir(rawPath: String?, defaultToDocs: Boolean = false): Pair<File, String> {
+        if (!isAllFilesGranted()) {
+            throw SecurityException("尚未授予所有文件访问权限")
+        }
+        val extRoot = externalStorageRoot()
+        val candidate = if (rawPath.isNullOrBlank() && defaultToDocs) {
+            val docs = File(extRoot, "Documents")
+            if (docs.isDirectory) docs else extRoot
+        } else if (rawPath.isNullOrBlank()) {
+            extRoot
+        } else {
+            File(rawPath.trim())
+        }
+        val canonical = candidate.canonicalFile
+        val rel = relativeStoragePath(extRoot, canonical)
+        if (isRestrictedLocalRelativePath(rel)) {
+            throw SecurityException("系统受保护目录不可选择或访问")
+        }
+        if (!canonical.isDirectory) {
+            throw IOException("所选目录不存在")
+        }
+        return canonical to rel
+    }
+
+    private fun listLocalDirectoriesMap(rawPath: String?): Map<String, Any?> {
+        val extRoot = externalStorageRoot()
+        val (dir, rel) = requireLocalDir(rawPath, defaultToDocs = rawPath.isNullOrBlank())
+        val parentPath = if (dir == extRoot) null else dir.parentFile?.canonicalPath
+        val hasVault = File(dir, "$VAULT_ROOT_DIR/vault_manifest.json").isFile
+
+        val priorityNames = mapOf("documents" to 0, "download" to 1)
+        val rawChildren = dir.listFiles { child ->
+            if (!child.isDirectory) return@listFiles false
+            val name = child.name
+            if (name.startsWith(".") || name == VAULT_ROOT_DIR) return@listFiles false
+            val childRel = if (rel.isEmpty()) name else "$rel/$name"
+            !isRestrictedLocalRelativePath(childRel)
+        }?.toList().orEmpty()
+
+        val items = rawChildren.map { child ->
+            val canonical = child.canonicalFile
+            val childHasVault = File(canonical, "$VAULT_ROOT_DIR/vault_manifest.json").isFile
+            mapOf(
+                "path" to canonical.path,
+                "name" to canonical.name,
+                "hasVault" to childHasVault,
+            )
+        }.sortedWith(
+            compareBy<Map<String, Any>>(
+                { if (it["hasVault"] == true) 0 else 1 },
+                {
+                    if (rel.isEmpty()) {
+                        priorityNames[(it["name"] as String).lowercase()] ?: 2
+                    } else {
+                        0
+                    }
+                },
+                { (it["name"] as String).lowercase() },
+            ),
+        )
+
+        return mapOf(
+            "currentPath" to dir.path,
+            "parentPath" to parentPath,
+            "relativePath" to rel,
+            "displayName" to rel.ifEmpty { "内部存储" },
+            "hasVault" to hasVault,
+            "directories" to items,
+        )
+    }
+
+    private fun createLocalDirectoryPath(parentPath: String?, name: String?): String {
+        val (parentDir, _) = requireLocalDir(parentPath)
+        val trimmed = name?.trim().orEmpty()
+        require(trimmed.isNotEmpty() && trimmed.length <= 60) {
+            "文件夹名称长度需在 1 到 60 个字符之间"
+        }
+        require(
+            !trimmed.startsWith(".") &&
+                trimmed != "." &&
+                trimmed != ".." &&
+                !trimmed.contains('/') &&
+                !trimmed.contains('\\') &&
+                !trimmed.equals(VAULT_ROOT_DIR, ignoreCase = true) &&
+                trimmed.none { it.code < 32 },
+        ) { "文件夹名称包含不支持的字符" }
+
+        val target = File(parentDir, trimmed).canonicalFile
+        val extRoot = externalStorageRoot()
+        val rel = relativeStoragePath(extRoot, target)
+        if (isRestrictedLocalRelativePath(rel)) {
+            throw SecurityException("不可在受保护目录下新建文件夹")
+        }
+        if (target.exists() && !target.isDirectory) {
+            throw IOException("同名文件已存在")
+        }
+        if (!target.exists() && !target.mkdirs()) {
+            throw IOException("无法创建文件夹 $trimmed")
+        }
+        return target.path
+    }
+
+    private fun bindLocalDirectoryMap(rawPath: String?): Map<String, Any?> {
+        val (dir, rel) = requireLocalDir(rawPath)
+        if (!dir.canRead() || !dir.canWrite()) {
+            throw SecurityException("所选目录不可读写，请更换其他目录或检查权限")
+        }
+        return mapOf(
+            "treeUri" to Uri.fromFile(dir).toString(),
+            "displayName" to rel.ifEmpty { "内部存储" },
+            "valid" to true,
+            "freeBytes" to availableStorageBytes(),
+        )
+    }
+
     private fun requireTreeUri(raw: String?): Uri {
         val trimmed = raw?.trim().orEmpty()
         require(trimmed.isNotEmpty()) { "守护目录地址为空" }
@@ -223,12 +545,73 @@ class StorageVaultHandler(
         return value
     }
 
+    private fun resolveDirectRoot(treeUri: Uri): File? {
+        if (treeUri.scheme != "file") return null
+        val path = treeUri.path?.trim().orEmpty()
+        require(path.isNotEmpty()) { "守护目录路径为空" }
+        val extRoot = externalStorageRoot()
+        val dir = File(path).canonicalFile
+        val rel = relativeStoragePath(extRoot, dir)
+        if (isRestrictedLocalRelativePath(rel)) {
+            throw SecurityException("系统受保护目录不可访问")
+        }
+        return dir
+    }
+
+    private fun resolveDirectVaultDir(directRoot: File, createIfMissing: Boolean): File? {
+        val vaultDir = File(directRoot, VAULT_ROOT_DIR).canonicalFile
+        val expectedPrefix = directRoot.canonicalPath + File.separator
+        require(vaultDir.path.startsWith(expectedPrefix)) { "非法的守护根目录" }
+        if (vaultDir.isDirectory) return vaultDir
+        if (vaultDir.exists()) throw IOException("路径冲突：$VAULT_ROOT_DIR 不是文件夹")
+        if (!createIfMissing) return null
+        if (!vaultDir.mkdirs() && !vaultDir.isDirectory) {
+            throw IOException("无法创建目录 $VAULT_ROOT_DIR")
+        }
+        return vaultDir
+    }
+
+    private fun resolveDirectTarget(
+        vaultDir: File,
+        relPath: String,
+        createSubdir: Boolean,
+    ): Pair<File, File> {
+        val target = File(vaultDir, relPath).canonicalFile
+        val expectedPrefix = vaultDir.canonicalPath + File.separator
+        require(target.path.startsWith(expectedPrefix)) { "守护路径越界：$relPath" }
+        val parent = target.parentFile!!
+        if (createSubdir && !parent.isDirectory) {
+            if (parent.exists()) throw IOException("路径冲突：${parent.name} 不是文件夹")
+            if (!parent.mkdirs() && !parent.isDirectory) {
+                throw IOException("无法创建目录 ${parent.name}")
+            }
+        }
+        return parent to target
+    }
+
     private fun treeRootDocUri(treeUri: Uri): Uri {
         val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
         return DocumentsContract.buildDocumentUriUsingTree(treeUri, rootDocId)
     }
 
     private fun checkTreeAccess(treeUri: Uri): Map<String, Any?> {
+        val directRoot = runCatching { resolveDirectRoot(treeUri) }.getOrNull()
+        if (directRoot != null) {
+            val rel = runCatching {
+                relativeStoragePath(externalStorageRoot(), directRoot)
+            }.getOrDefault("")
+            val valid = isAllFilesGranted() &&
+                directRoot.isDirectory &&
+                directRoot.canRead() &&
+                directRoot.canWrite()
+            return mapOf(
+                "treeUri" to treeUri.toString(),
+                "displayName" to rel.ifEmpty { "内部存储" },
+                "valid" to valid,
+                "freeBytes" to availableStorageBytes(),
+            )
+        }
+
         val rootDoc = treeRootDocUri(treeUri)
         var displayName = "守护目录"
         var valid = false
@@ -362,6 +745,57 @@ class StorageVaultHandler(
     }
 
     private fun listVaultEntries(treeUri: Uri): Map<String, Any> {
+        val directRoot = resolveDirectRoot(treeUri)
+        if (directRoot != null) {
+            if (!isAllFilesGranted()) {
+                throw SecurityException("所有文件访问权限已失效")
+            }
+            val vaultDir = resolveDirectVaultDir(directRoot, createIfMissing = false)
+                ?: return mapOf(
+                    "exists" to false,
+                    "totalBytes" to 0L,
+                    "files" to emptyList<Map<String, Any>>(),
+                    "staleTmpCount" to 0,
+                )
+            val files = ArrayList<Map<String, Any>>()
+            var totalBytes = 0L
+            var staleTmpCount = 0
+
+            fun scanDirectDir(prefix: String, dir: File) {
+                for (child in dir.listFiles().orEmpty()) {
+                    if (child.isDirectory) {
+                        if (prefix.isEmpty() && (child.name == "books" || child.name == "fonts")) {
+                            scanDirectDir("${child.name}/", child)
+                        }
+                        continue
+                    }
+                    if (!child.isFile) continue
+                    if (child.name.endsWith(".tmp")) {
+                        staleTmpCount++
+                        child.delete()
+                        continue
+                    }
+                    val size = child.length()
+                    totalBytes += size
+                    files.add(
+                        mapOf(
+                            "relativePath" to "$prefix${child.name}",
+                            "sizeBytes" to size,
+                            "lastModifiedMs" to child.lastModified(),
+                        ),
+                    )
+                }
+            }
+
+            scanDirectDir("", vaultDir)
+            return mapOf(
+                "exists" to true,
+                "totalBytes" to totalBytes,
+                "files" to files,
+                "staleTmpCount" to staleTmpCount,
+            )
+        }
+
         val vaultDir = findVaultSubdir(treeUri, createIfMissing = false)
             ?: return mapOf(
                 "exists" to false,
@@ -408,6 +842,28 @@ class StorageVaultHandler(
     }
 
     private fun measureVaultBytes(treeUri: Uri, excludeRelPath: String? = null): Long {
+        val directRoot = resolveDirectRoot(treeUri)
+        if (directRoot != null) {
+            val vaultDir = resolveDirectVaultDir(directRoot, createIfMissing = false) ?: return 0L
+            var total = 0L
+            fun sumDirect(prefix: String, dir: File) {
+                for (child in dir.listFiles().orEmpty()) {
+                    if (child.isDirectory) {
+                        if (prefix.isEmpty() && (child.name == "books" || child.name == "fonts")) {
+                            sumDirect("${child.name}/", child)
+                        }
+                        continue
+                    }
+                    val rel = "$prefix${child.name}"
+                    if (rel != excludeRelPath && !child.name.endsWith(".tmp")) {
+                        total += child.length()
+                    }
+                }
+            }
+            sumDirect("", vaultDir)
+            return total
+        }
+
         val vaultDir = findVaultSubdir(treeUri, createIfMissing = false) ?: return 0L
         var total = 0L
         fun sumDir(prefix: String, docId: String) {
@@ -449,6 +905,48 @@ class StorageVaultHandler(
         relPath: String,
         maxBytes: Long,
     ): String? {
+        val directRoot = resolveDirectRoot(treeUri)
+        if (directRoot != null) {
+            if (!isAllFilesGranted()) {
+                throw SecurityException("所有文件访问权限已失效")
+            }
+            val vaultDir = resolveDirectVaultDir(directRoot, createIfMissing = false) ?: return null
+            val (_, targetFile) = resolveDirectTarget(vaultDir, relPath, createSubdir = false)
+            if (!targetFile.isFile) return null
+            if (targetFile.length() > maxBytes) {
+                throw IOException("守护文件体积超出安全读取上限")
+            }
+            val stagingDir = File(activity.cacheDir, STAGING_CACHE_DIR)
+            if (!stagingDir.exists()) stagingDir.mkdirs()
+            val safeBase = targetFile.name.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+            val outFile = File(stagingDir, "${System.currentTimeMillis()}_$safeBase")
+            var total = 0L
+            try {
+                FileInputStream(targetFile).use { source ->
+                    FileOutputStream(outFile).use { dest ->
+                        val buf = ByteArray(BUFFER_BYTES)
+                        while (true) {
+                            if (cancelled.get() || disposed) {
+                                throw IOException("读取已取消")
+                            }
+                            val read = source.read(buf)
+                            if (read < 0) break
+                            total += read
+                            if (total > maxBytes) {
+                                throw IOException("守护文件体积超出安全读取上限")
+                            }
+                            dest.write(buf, 0, read)
+                        }
+                        dest.flush()
+                    }
+                }
+                return outFile.absolutePath
+            } catch (error: Throwable) {
+                outFile.delete()
+                throw error
+            }
+        }
+
         val (parent, fileName) = resolveTargetParent(treeUri, relPath, createIfMissing = false)
             ?: return null
         val doc = findChild(treeUri, parent.documentId, fileName) ?: return null
@@ -514,6 +1012,62 @@ class StorageVaultHandler(
             val currentOtherBytes = measureVaultBytes(treeUri, excludeRelPath = relPath)
             if (currentOtherBytes + fileSize > maxVaultBytes) {
                 throw QuotaExceededException("已达到守护目录空间配额上限，未继续写入")
+            }
+        }
+
+        val directRoot = resolveDirectRoot(treeUri)
+        if (directRoot != null) {
+            if (!isAllFilesGranted()) {
+                throw SecurityException("所有文件访问权限已失效")
+            }
+            val vaultDir = resolveDirectVaultDir(directRoot, createIfMissing = true)!!
+            val (parentDir, targetFile) = resolveDirectTarget(
+                vaultDir,
+                relPath,
+                createSubdir = true,
+            )
+            val tmpFile = File(parentDir, "${targetFile.name}.tmp")
+            if (tmpFile.exists()) tmpFile.delete()
+            var wroteTmp = false
+            try {
+                FileOutputStream(tmpFile).use { dest ->
+                    FileInputStream(sourceFile).use { src ->
+                        val buf = ByteArray(BUFFER_BYTES)
+                        while (true) {
+                            if (cancelled.get() || disposed) {
+                                throw IOException("同步已取消")
+                            }
+                            val read = src.read(buf)
+                            if (read < 0) break
+                            dest.write(buf, 0, read)
+                        }
+                        dest.flush()
+                    }
+                }
+                wroteTmp = true
+                if (targetFile.exists() && !targetFile.delete()) {
+                    throw IOException("无法替换旧的守护文件 ${targetFile.name}")
+                }
+                if (!tmpFile.renameTo(targetFile)) {
+                    FileOutputStream(targetFile).use { dest ->
+                        FileInputStream(tmpFile).use { src ->
+                            val buf = ByteArray(BUFFER_BYTES)
+                            while (true) {
+                                val read = src.read(buf)
+                                if (read < 0) break
+                                dest.write(buf, 0, read)
+                            }
+                            dest.flush()
+                        }
+                    }
+                    tmpFile.delete()
+                }
+                wroteTmp = false
+                return fileSize
+            } finally {
+                if (wroteTmp || tmpFile.exists()) {
+                    tmpFile.delete()
+                }
             }
         }
 
@@ -586,6 +1140,16 @@ class StorageVaultHandler(
     }
 
     private fun deleteVaultEntry(treeUri: Uri, relPath: String): Boolean {
+        val directRoot = resolveDirectRoot(treeUri)
+        if (directRoot != null) {
+            if (!isAllFilesGranted()) {
+                throw SecurityException("所有文件访问权限已失效")
+            }
+            val vaultDir = resolveDirectVaultDir(directRoot, createIfMissing = false) ?: return false
+            val (_, targetFile) = resolveDirectTarget(vaultDir, relPath, createSubdir = false)
+            return if (targetFile.isFile) targetFile.delete() else false
+        }
+
         val (parent, fileName) = resolveTargetParent(treeUri, relPath, createIfMissing = false)
             ?: return false
         val target = findChild(treeUri, parent.documentId, fileName) ?: return false
@@ -595,6 +1159,29 @@ class StorageVaultHandler(
     }
 
     private fun purgeVaultRoot(treeUri: Uri): Map<String, Any> {
+        val directRoot = resolveDirectRoot(treeUri)
+        if (directRoot != null) {
+            if (!isAllFilesGranted()) {
+                throw SecurityException("所有文件访问权限已失效")
+            }
+            val vaultDir = resolveDirectVaultDir(directRoot, createIfMissing = false)
+                ?: return mapOf("deletedCount" to 0, "freedBytes" to 0L)
+            val freed = measureVaultBytes(treeUri)
+            var deletedCount = 0
+            fun countFiles(dir: File): Int {
+                var count = 0
+                for (child in dir.listFiles().orEmpty()) {
+                    count += if (child.isDirectory) countFiles(child) else 1
+                }
+                return count
+            }
+            deletedCount = countFiles(vaultDir)
+            if (!vaultDir.deleteRecursively() && vaultDir.exists()) {
+                throw IOException("无法清空守护目录")
+            }
+            return mapOf("deletedCount" to deletedCount, "freedBytes" to freed)
+        }
+
         val vaultDir = findVaultSubdir(treeUri, createIfMissing = false)
             ?: return mapOf("deletedCount" to 0, "freedBytes" to 0L)
         val freed = measureVaultBytes(treeUri)
@@ -614,11 +1201,14 @@ class StorageVaultHandler(
     fun dispose() {
         disposed = true
         cancelled.set(true)
+        cancelAbandonedCheck()
         channel.setMethodCallHandler(null)
         mainHandler.removeCallbacksAndMessages(null)
         worker.shutdownNow()
         pendingPickResult?.error("DISPOSED", "应用已关闭", null)
         pendingPickResult = null
+        pendingAllFilesResult?.error("DISPOSED", "应用已关闭", null)
+        pendingAllFilesResult = null
     }
 
     private class QuotaExceededException(message: String) : IOException(message)

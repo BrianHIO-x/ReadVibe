@@ -6,13 +6,17 @@ import 'package:flutter/services.dart';
 import '../controllers/private_shelf_controller.dart';
 import '../services/data_safety_vault_service.dart';
 import '../services/library_backup_service.dart';
+import '../theme/app_button_styles.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_dialog.dart';
+import 'app_segmented_control.dart';
 import 'app_sheet.dart';
 import 'app_toast.dart';
 import 'library_backup_sheet.dart';
+import 'pressable_scale.dart';
+import 'vault_directory_picker_sheet.dart';
 
 Future<void> showDataSafetySheet(
   BuildContext context, {
@@ -82,7 +86,7 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
     }
   }
 
-  Future<void> _pickFolder() async {
+  Future<void> _pickSafFolder() async {
     if (_busy) return;
     setState(() {
       _busy = true;
@@ -117,6 +121,79 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
           _busyMessage = null;
         });
       }
+    }
+  }
+
+  Future<void> _pickDirectFolder() async {
+    if (_busy) return;
+    final selectedPath = await showVaultDirectoryPickerSheet(
+      context,
+      privateShelf: widget.privateShelf,
+      colors: widget.colors,
+    );
+    if (selectedPath == null || !mounted) return;
+    setState(() {
+      _busy = true;
+      _busyMessage = '正在绑定守护目录...';
+    });
+    try {
+      final status = await widget.vaultService.bindDirectFolder(selectedPath);
+      if (!mounted || status == null) return;
+      setState(() => _status = status);
+      AppToast.success(
+        context,
+        '已绑定「${status.config.displayName ?? '守护目录'}」',
+        colors: widget.colors,
+      );
+      unawaited(_syncNow(silentIfEmpty: true));
+    } on PlatformException catch (error) {
+      if (mounted) {
+        AppToast.error(
+          context,
+          error.message ?? '绑定目录失败',
+          colors: widget.colors,
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _busyMessage = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _chooseFolderMode() async {
+    if (_busy) return;
+    final mode = await showAppSheet<String>(
+      context: context,
+      colors: widget.colors,
+      builder: (sheetContext) => AppActionSheet(
+        colors: widget.colors,
+        title: '更换守护目录方式',
+        subtitle: '可按需选用系统目录授权或高级目录模式',
+        children: [
+          ListTile(
+            leading: Icon(Icons.security_rounded, color: widget.colors.accent),
+            title: const Text('系统目录选择器（SAF）'),
+            subtitle: const Text('零敏感存储权限，默认定位 Documents'),
+            onTap: () => Navigator.pop(sheetContext, 'saf'),
+          ),
+          ListTile(
+            leading: Icon(Icons.folder_copy_outlined, color: widget.colors.accent),
+            title: const Text('应用内自选目录（高级）'),
+            subtitle: const Text('支持应用内浏览目录与自由建夹，需管理所有文件权限'),
+            onTap: () => Navigator.pop(sheetContext, 'direct'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || mode == null) return;
+    if (mode == 'direct') {
+      await _pickDirectFolder();
+    } else {
+      await _pickSafFolder();
     }
   }
 
@@ -425,26 +502,23 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
                   AppSpacing.lg,
                   AppSpacing.sm,
                 ),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: SegmentedButton<int>(
-                    segments: const [
-                      ButtonSegment<int>(
-                        value: 0,
-                        icon: Icon(Icons.shield_outlined, size: 17),
-                        label: Text('防卸载守护目录'),
-                      ),
-                      ButtonSegment<int>(
-                        value: 1,
-                        icon: Icon(Icons.inventory_2_outlined, size: 17),
-                        label: Text('便携压缩包 (.zip)'),
-                      ),
-                    ],
-                    selected: {_tab},
-                    onSelectionChanged: _busy
-                        ? null
-                        : (values) => setState(() => _tab = values.first),
-                  ),
+                child: AppSegmentedControl<int>(
+                  options: const [
+                    AppSegmentOption(
+                      value: 0,
+                      icon: Icons.shield_outlined,
+                      label: '防卸载守护目录',
+                    ),
+                    AppSegmentOption(
+                      value: 1,
+                      icon: Icons.inventory_2_outlined,
+                      label: '便携压缩包 (.zip)',
+                    ),
+                  ],
+                  value: _tab,
+                  colors: colors,
+                  enabled: !_busy,
+                  onChanged: (next) => setState(() => _tab = next),
                 ),
               ),
               if (_busy && _busyMessage != null)
@@ -554,6 +628,28 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
                       ),
                     ),
                   ),
+                  if (isBound) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: colors.headerBg,
+                        borderRadius: BorderRadius.circular(AppRadius.sm),
+                        border: Border.all(color: colors.border),
+                      ),
+                      child: Text(
+                        config.isDirectMode ? '应用内直连' : '系统 SAF',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w500,
+                          color: colors.secondary,
+                        ),
+                      ),
+                    ),
+                  ],
                   const Spacer(),
                   if (status != null && status.freeDeviceBytes > 0)
                     Text(
@@ -640,13 +736,19 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
           ),
         ),
         const SizedBox(height: AppSpacing.md),
-        if (!isBound || !valid)
+        if (!isBound || !valid) ...[
           FilledButton.icon(
-            onPressed: _busy ? null : _pickFolder,
+            onPressed: _busy ? null : _pickSafFolder,
             icon: const Icon(Icons.create_new_folder_outlined, size: 18),
             label: Text(!isBound ? '选择外部守护目录' : '重新授权守护目录'),
-          )
-        else ...[
+          ),
+          const SizedBox(height: AppSpacing.xs),
+          OutlinedButton.icon(
+            onPressed: _busy ? null : _pickDirectFolder,
+            icon: const Icon(Icons.folder_copy_outlined, size: 18),
+            label: const Text('应用内自选目录（高级）'),
+          ),
+        ] else ...[
           Row(
             children: [
               Expanded(
@@ -658,7 +760,7 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
               ),
               const SizedBox(width: AppSpacing.sm),
               OutlinedButton.icon(
-                onPressed: _busy ? null : _pickFolder,
+                onPressed: _busy ? null : _chooseFolderMode,
                 icon: const Icon(Icons.folder_open_rounded, size: 18),
                 label: const Text('更换'),
               ),
@@ -700,24 +802,31 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
           runSpacing: 6,
           children: [
             for (final preset in kVaultQuotaPresets)
-              ChoiceChip(
-                label: Text(preset.label),
-                selected: config.quotaBytes == preset.bytes,
-                onSelected: _busy
-                    ? null
-                    : (_) async {
-                        await widget.vaultService.setQuotaBytes(preset.bytes);
-                        await _refreshStatus();
-                      },
+              PressableScale(
+                enabled: !_busy,
+                pressedScale: 0.95,
+                child: ChoiceChip(
+                  label: Text(preset.label),
+                  selected: config.quotaBytes == preset.bytes,
+                  onSelected: _busy
+                      ? null
+                      : (_) async {
+                          await widget.vaultService.setQuotaBytes(preset.bytes);
+                          await _refreshStatus();
+                        },
+                ),
               ),
           ],
         ),
         const SizedBox(height: AppSpacing.md),
-        Container(
-          decoration: BoxDecoration(
+        Material(
+          color: colors.headerBg,
+          surfaceTintColor: Colors.transparent,
+          shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(AppRadius.md),
-            border: Border.all(color: colors.border),
+            side: BorderSide(color: colors.border),
           ),
+          clipBehavior: Clip.antiAlias,
           child: Column(
             children: [
               SwitchListTile.adaptive(
@@ -782,7 +891,10 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
               Expanded(
                 child: TextButton.icon(
                   onPressed: _busy ? null : _purgeAndUnbind,
-                  style: TextButton.styleFrom(foregroundColor: danger),
+                  style: AppButtonStyles.textOverride(
+                    colors,
+                    foregroundColor: danger,
+                  ),
                   icon: const Icon(Icons.delete_sweep_outlined, size: 17),
                   label: const Text('清空守护目录并解绑'),
                 ),

@@ -6,6 +6,7 @@ import '../models/reader_note.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'pressable_scale.dart';
 
 /// Custom floating selection toolbar featuring instant multi-color highlights,
 /// stroke style toggles, rich note entry, quote card creation, and utilities.
@@ -226,25 +227,33 @@ class _ToolbarAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(AppRadius.sm),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 17, color: color),
-            const SizedBox(height: 2),
-            Text(
-              label,
-              style: TextStyle(
-                color: textColor,
-                fontSize: 10.5,
-                fontWeight: FontWeight.w500,
-              ),
+    return PressableScale(
+      pressedScale: 0.93,
+      pressedOpacity: 0.8,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(AppRadius.sm),
+          overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 17, color: color),
+                const SizedBox(height: 2),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: textColor,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );

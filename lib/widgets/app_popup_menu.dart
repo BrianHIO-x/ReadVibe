@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import '../theme/app_button_styles.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
@@ -146,7 +147,10 @@ class _AppPopupMenuButtonState<T> extends State<AppPopupMenuButton<T>> {
       tooltip: widget.tooltip,
       onPressed: widget.enabled && widget.entries.isNotEmpty ? _openMenu : null,
       icon: widget.icon,
-      style: IconButton.styleFrom(minimumSize: const Size(44, 44)),
+      style: AppButtonStyles.iconOverride(
+        widget.colors,
+        minimumSize: const Size(44, 44),
+      ),
     ),
   );
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/reader_note.dart';
+import '../theme/app_button_styles.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
@@ -271,9 +272,6 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
                       },
                       icon: const Icon(Icons.copy_rounded, size: 16),
                       label: const Text('复制'),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: colors.border),
-                      ),
                     ),
                   ),
                   const SizedBox(width: AppSpacing.sm),
@@ -283,9 +281,6 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
                           Navigator.of(context).pop(QuickNoteAction.quoteCard),
                       icon: const Icon(Icons.style_outlined, size: 16),
                       label: const Text('金句卡'),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: colors.border),
-                      ),
                     ),
                   ),
                   const SizedBox(width: AppSpacing.sm),
@@ -295,7 +290,8 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
                           Navigator.of(context).pop(QuickNoteAction.edit),
                       icon: const Icon(Icons.edit_note_rounded, size: 18),
                       label: Text(_note.hasContent ? '编辑' : '写笔记'),
-                      style: FilledButton.styleFrom(
+                      style: AppButtonStyles.filledOverride(
+                        colors,
                         backgroundColor: accentColor,
                         foregroundColor: Colors.white,
                       ),

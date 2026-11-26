@@ -8,6 +8,7 @@ import '../services/android_book_picker.dart';
 import '../services/library_backup_service.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_segmented_control.dart';
 import 'app_sheet.dart';
 import 'app_toast.dart';
 
@@ -295,27 +296,23 @@ class _LibraryBackupSheetState extends State<_LibraryBackupSheet> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    SizedBox(
-                      width: double.infinity,
-                      child: SegmentedButton<_BackupSheetMode>(
-                        segments: const [
-                          ButtonSegment(
-                            value: _BackupSheetMode.exportBackup,
-                            icon: Icon(Icons.upload_file_rounded, size: 18),
-                            label: Text('导出备份'),
-                          ),
-                          ButtonSegment(
-                            value: _BackupSheetMode.restoreBackup,
-                            icon: Icon(Icons.download_rounded, size: 18),
-                            label: Text('从备份恢复'),
-                          ),
-                        ],
-                        selected: {_mode},
-                        onSelectionChanged: (_exporting || _restoring)
-                            ? null
-                            : (selected) =>
-                                  setState(() => _mode = selected.first),
-                      ),
+                    AppSegmentedControl<_BackupSheetMode>(
+                      options: const [
+                        AppSegmentOption(
+                          value: _BackupSheetMode.exportBackup,
+                          icon: Icons.upload_file_rounded,
+                          label: '导出备份',
+                        ),
+                        AppSegmentOption(
+                          value: _BackupSheetMode.restoreBackup,
+                          icon: Icons.download_rounded,
+                          label: '从备份恢复',
+                        ),
+                      ],
+                      value: _mode,
+                      colors: widget.colors,
+                      enabled: !(_exporting || _restoring),
+                      onChanged: (selected) => setState(() => _mode = selected),
                     ),
                     const SizedBox(height: AppSpacing.lg),
                     if (_mode == _BackupSheetMode.exportBackup)

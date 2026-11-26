@@ -11,8 +11,10 @@ import '../services/chinese_text.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_popup_menu.dart';
+import 'app_segmented_control.dart';
 import 'app_sheet.dart';
 import 'app_toast.dart';
+import 'pressable_scale.dart';
 import 'reader_note_card.dart';
 import 'reader_quote_card_sheet.dart';
 
@@ -227,27 +229,24 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
                 AppSpacing.lg,
                 AppSpacing.sm,
               ),
-              child: SizedBox(
-                width: double.infinity,
-                child: SegmentedButton<_HubTab>(
-                  showSelectedIcon: false,
-                  segments: [
-                    ButtonSegment(
-                      value: _HubTab.allNotes,
-                      label: Text('全部 (${widget.notes.length})'),
-                    ),
-                    ButtonSegment(
-                      value: _HubTab.writtenNotes,
-                      label: Text('批注 ($writtenCount)'),
-                    ),
-                    ButtonSegment(
-                      value: _HubTab.bookmarks,
-                      label: Text('书签 (${widget.bookmarks.length})'),
-                    ),
-                  ],
-                  selected: {_tab},
-                  onSelectionChanged: (sel) => setState(() => _tab = sel.first),
-                ),
+              child: AppSegmentedControl<_HubTab>(
+                options: [
+                  AppSegmentOption(
+                    value: _HubTab.allNotes,
+                    label: '全部 (${widget.notes.length})',
+                  ),
+                  AppSegmentOption(
+                    value: _HubTab.writtenNotes,
+                    label: '批注 ($writtenCount)',
+                  ),
+                  AppSegmentOption(
+                    value: _HubTab.bookmarks,
+                    label: '书签 (${widget.bookmarks.length})',
+                  ),
+                ],
+                value: _tab,
+                colors: colors,
+                onChanged: (sel) => setState(() => _tab = sel),
               ),
             ),
             if (_tab != _HubTab.bookmarks && (_searchVisible || _searchController.text.isNotEmpty))
@@ -304,19 +303,24 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
       ),
       child: Row(
         children: [
-          ActionChip(
-            avatar: Icon(
-              _sortByTime ? Icons.schedule_rounded : Icons.format_list_numbered_rounded,
-              size: 15,
-              color: colors.accent,
+          PressableScale(
+            pressedScale: 0.95,
+            child: ActionChip(
+              avatar: Icon(
+                _sortByTime
+                    ? Icons.schedule_rounded
+                    : Icons.format_list_numbered_rounded,
+                size: 15,
+                color: colors.accent,
+              ),
+              label: Text(
+                _sortByTime ? '最新修改' : (widget.isPdf ? '页码顺序' : '章节顺序'),
+                style: const TextStyle(fontSize: 12),
+              ),
+              visualDensity: VisualDensity.compact,
+              side: BorderSide(color: colors.border),
+              onPressed: () => setState(() => _sortByTime = !_sortByTime),
             ),
-            label: Text(
-              _sortByTime ? '最新修改' : (widget.isPdf ? '页码顺序' : '章节顺序'),
-              style: const TextStyle(fontSize: 12),
-            ),
-            visualDensity: VisualDensity.compact,
-            side: BorderSide(color: colors.border),
-            onPressed: () => setState(() => _sortByTime = !_sortByTime),
           ),
           const SizedBox(width: AppSpacing.sm),
           for (final color in NoteColor.values) ...[
@@ -343,28 +347,34 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
           for (final cat in NoteCategory.values) ...[
             Padding(
               padding: const EdgeInsets.only(right: 6),
-              child: FilterChip(
-                label: Text(cat.label, style: const TextStyle(fontSize: 11.5)),
-                selected: _categoryFilter == cat,
-                showCheckmark: false,
-                visualDensity: VisualDensity.compact,
-                onSelected: (_) => setState(() {
-                  _categoryFilter = _categoryFilter == cat ? null : cat;
-                }),
+              child: PressableScale(
+                pressedScale: 0.95,
+                child: FilterChip(
+                  label: Text(cat.label, style: const TextStyle(fontSize: 11.5)),
+                  selected: _categoryFilter == cat,
+                  showCheckmark: false,
+                  visualDensity: VisualDensity.compact,
+                  onSelected: (_) => setState(() {
+                    _categoryFilter = _categoryFilter == cat ? null : cat;
+                  }),
+                ),
               ),
             ),
           ],
           for (final tag in tags)
             Padding(
               padding: const EdgeInsets.only(right: 6),
-              child: FilterChip(
-                label: Text('#$tag', style: const TextStyle(fontSize: 11.5)),
-                selected: _tagFilter == tag,
-                showCheckmark: false,
-                visualDensity: VisualDensity.compact,
-                onSelected: (_) => setState(() {
-                  _tagFilter = _tagFilter == tag ? null : tag;
-                }),
+              child: PressableScale(
+                pressedScale: 0.95,
+                child: FilterChip(
+                  label: Text('#$tag', style: const TextStyle(fontSize: 11.5)),
+                  selected: _tagFilter == tag,
+                  showCheckmark: false,
+                  visualDensity: VisualDensity.compact,
+                  onSelected: (_) => setState(() {
+                    _tagFilter = _tagFilter == tag ? null : tag;
+                  }),
+                ),
               ),
             ),
         ],
@@ -510,13 +520,16 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
       itemBuilder: (context, index) {
         final bookmark = bookmarks[index];
         final percent = (bookmark.chapterProgress * 100).clamp(0, 100).round();
-        return Material(
-          color: colors.background.withValues(alpha: 0.8),
-          borderRadius: BorderRadius.circular(AppRadius.md),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: () => widget.onSelectBookmark(bookmark),
-            child: Container(
+        return PressableScale(
+          pressedScale: 0.985,
+          child: Material(
+            color: colors.background.withValues(alpha: 0.8),
+            borderRadius: BorderRadius.circular(AppRadius.md),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: () => widget.onSelectBookmark(bookmark),
+              overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+              child: Container(
               padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(AppRadius.md),
@@ -593,6 +606,7 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
               ),
             ),
           ),
+        ),
         );
       },
     );

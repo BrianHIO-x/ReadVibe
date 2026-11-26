@@ -141,10 +141,6 @@ class GlobalSettingsSheet extends StatelessWidget {
                                 ? '锁上隐私书架'
                                 : '进入隐私书架',
                           ),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: colors.accent,
-                            side: BorderSide(color: colors.border),
-                          ),
                         ),
                         if (privateShelfConfigured)
                           TextButton(
@@ -234,10 +230,6 @@ class GlobalSettingsSheet extends StatelessWidget {
                       },
                       icon: const Icon(Icons.restart_alt_rounded, size: 18),
                       label: const Text('重新选择默认应用'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: colors.accent,
-                        side: BorderSide(color: colors.border),
-                      ),
                     ),
                     const SizedBox(height: AppSpacing.xl),
                     Text(
@@ -281,10 +273,6 @@ class GlobalSettingsSheet extends StatelessWidget {
                         size: 18,
                       ),
                       label: const Text('检查更新'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: colors.accent,
-                        side: BorderSide(color: colors.border),
-                      ),
                     ),
                     if (onOpenNotes != null) ...[
                       const SizedBox(height: AppSpacing.xl),
@@ -312,10 +300,6 @@ class GlobalSettingsSheet extends StatelessWidget {
                         onPressed: onOpenNotes,
                         icon: const Icon(Icons.sticky_note_2_outlined, size: 18),
                         label: Text(privateShelfOpen ? '打开隐私笔记本' : '打开读书笔记'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: colors.accent,
-                          side: BorderSide(color: colors.border),
-                        ),
                       ),
                     ],
                     if (onOpenBackup != null) ...[
@@ -342,10 +326,6 @@ class GlobalSettingsSheet extends StatelessWidget {
                         onPressed: onOpenBackup,
                         icon: const Icon(Icons.verified_user_outlined, size: 18),
                         label: const Text('数据安全与备份'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: colors.accent,
-                          side: BorderSide(color: colors.border),
-                        ),
                       ),
                     ],
                     const SizedBox(height: AppSpacing.xl),
@@ -373,10 +353,6 @@ class GlobalSettingsSheet extends StatelessWidget {
                       ),
                       icon: const Icon(Icons.balance_outlined, size: 18),
                       label: const Text('开源许可'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: colors.accent,
-                        side: BorderSide(color: colors.border),
-                      ),
                     ),
                   ],
                 ),
@@ -523,10 +499,6 @@ class _StorageUsageSectionState extends State<StorageUsageSection> {
                     )
                   : const Icon(Icons.cleaning_services_outlined, size: 18),
               label: Text(_clearing ? '清理中…' : '清理缓存'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: colors.accent,
-                side: BorderSide(color: colors.border),
-              ),
             ),
             const SizedBox(width: AppSpacing.sm),
             TextButton(

@@ -14,6 +14,7 @@ import '../repositories/reader_repositories.dart';
 import '../services/pdf_renderer_service.dart';
 import '../models/search_match.dart';
 import '../services/storage_service.dart';
+import '../theme/app_button_styles.dart';
 import '../theme/app_theme.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_spacing.dart';
@@ -1384,9 +1385,10 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
                 onPressed: _deleting ? null : _deleteUnavailablePdf,
                 icon: const Icon(Icons.delete_outline_rounded),
                 label: Text(_deleting ? '正在删除…' : '从书架删除'),
-                style: OutlinedButton.styleFrom(
+                style: AppButtonStyles.outlinedOverride(
+                  _overlayColors,
                   foregroundColor: Colors.white,
-                  side: const BorderSide(color: Colors.white30),
+                  borderColor: Colors.white30,
                 ),
               ),
             ],

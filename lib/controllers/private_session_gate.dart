@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../models/reader_settings.dart';
 import '../services/private_shelf_lock.dart';
+import '../theme/app_button_styles.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
@@ -398,9 +399,9 @@ class PrivateLockOverlay extends StatelessWidget {
               : () => unawaited(gate.returnToNormalShelf()),
           icon: const Icon(Icons.home_outlined, size: 18),
           label: const Text('返回普通书架'),
-          style: OutlinedButton.styleFrom(
+          style: AppButtonStyles.outlinedOverride(
+            colors,
             foregroundColor: colors.secondary,
-            side: BorderSide(color: colors.border),
           ),
         ),
       ],
@@ -482,7 +483,8 @@ class PrivateLockOverlay extends StatelessWidget {
                   onPressed: gate._busy
                       ? null
                       : () => unawaited(gate.confirmClearShelf()),
-                  style: FilledButton.styleFrom(
+                  style: AppButtonStyles.filledOverride(
+                    colors,
                     backgroundColor: danger,
                     foregroundColor: Colors.white,
                   ),

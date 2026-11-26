@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../models/reader_settings.dart';
+import '../theme/app_button_styles.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'pressable_scale.dart';
 
 class FontSettingsSection extends StatelessWidget {
   final ReaderSettings settings;
@@ -95,10 +97,9 @@ class FontSettingsSection extends StatelessWidget {
             label: Text(
               importedFontName == null ? '导入 .ttf / .otf 字体' : '重新导入字体',
             ),
-            style: OutlinedButton.styleFrom(
+            style: AppButtonStyles.outlinedOverride(
+              colors,
               foregroundColor: colors.secondary,
-              overlayColor: Colors.transparent,
-              side: BorderSide(color: colors.border),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(AppRadius.md),
               ),
@@ -155,54 +156,58 @@ class _FontChoice extends StatelessWidget {
       scale: selected ? 1.02 : 1.0,
       duration: AppMotion.control,
       curve: AppMotion.controlCurve,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(AppRadius.sm),
-          overlayColor: WidgetStateProperty.all(Colors.transparent),
-          onTap: enabled ? onTap : null,
-          child: AnimatedContainer(
-            duration: AppMotion.control,
-            curve: AppMotion.controlCurve,
-            constraints: const BoxConstraints(minHeight: 42),
-            padding: const EdgeInsets.symmetric(
-              vertical: AppSpacing.sm,
-              horizontal: AppSpacing.sm,
-            ),
-            decoration: BoxDecoration(
-              color: selected ? colors.accent : Colors.transparent,
-              borderRadius: BorderRadius.circular(AppRadius.sm),
-              border: Border.all(
-                color: selected ? colors.accent : colors.border,
-                width: selected ? 2 : 1,
+      child: PressableScale(
+        enabled: enabled,
+        pressedScale: 0.96,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(AppRadius.sm),
+            overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+            onTap: enabled ? onTap : null,
+            child: AnimatedContainer(
+              duration: AppMotion.control,
+              curve: AppMotion.controlCurve,
+              constraints: const BoxConstraints(minHeight: 42),
+              padding: const EdgeInsets.symmetric(
+                vertical: AppSpacing.sm,
+                horizontal: AppSpacing.sm,
               ),
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  label,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: foreground,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                    fontSize: 13,
-                  ),
+              decoration: BoxDecoration(
+                color: selected ? colors.accent : Colors.transparent,
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+                border: Border.all(
+                  color: selected ? colors.accent : colors.border,
+                  width: selected ? 2 : 1,
                 ),
-                if (subtitle != null) ...[
-                  const SizedBox(height: 2),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
                   Text(
-                    subtitle!,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    label,
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: foreground.withValues(alpha: 0.78),
-                      fontSize: 10,
+                      color: foreground,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                      fontSize: 13,
                     ),
                   ),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: foreground.withValues(alpha: 0.78),
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),

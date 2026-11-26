@@ -13,6 +13,8 @@ class VaultTreeAccess {
   final bool valid;
   final int freeBytes;
 
+  bool get isDirectMode => treeUri.startsWith('file://');
+
   static VaultTreeAccess? fromMap(Map<Object?, Object?>? raw) {
     if (raw == null) return null;
     final uri = raw['treeUri'];
@@ -56,12 +58,125 @@ class VaultListing {
   final int staleTmpCount;
 }
 
+class VaultAllFilesStatus {
+  const VaultAllFilesStatus({
+    required this.supported,
+    required this.granted,
+    required this.rootPath,
+    required this.defaultPath,
+  });
+
+  final bool supported;
+  final bool granted;
+  final String rootPath;
+  final String defaultPath;
+}
+
+class LocalDirectoryItem {
+  const LocalDirectoryItem({
+    required this.path,
+    required this.name,
+    required this.hasVault,
+  });
+
+  final String path;
+  final String name;
+  final bool hasVault;
+}
+
+class LocalDirectoryListing {
+  const LocalDirectoryListing({
+    required this.currentPath,
+    required this.parentPath,
+    required this.relativePath,
+    required this.displayName,
+    required this.hasVault,
+    required this.directories,
+  });
+
+  final String currentPath;
+  final String? parentPath;
+  final String relativePath;
+  final String displayName;
+  final bool hasVault;
+  final List<LocalDirectoryItem> directories;
+}
+
 /// Typed Dart bridge over `com.readvibe.app/storage_vault`.
 class StorageVaultChannel {
   static const _channel = MethodChannel('com.readvibe.app/storage_vault');
 
   static Future<VaultTreeAccess?> pickTree() async {
     final raw = await _channel.invokeMapMethod<Object?, Object?>('pickTree');
+    return VaultTreeAccess.fromMap(raw);
+  }
+
+  static Future<VaultAllFilesStatus> allFilesAccessStatus() async {
+    final raw = await _channel.invokeMapMethod<Object?, Object?>(
+      'allFilesAccessStatus',
+    );
+    return VaultAllFilesStatus(
+      supported: raw?['supported'] == true,
+      granted: raw?['granted'] == true,
+      rootPath: raw?['rootPath'] as String? ?? '',
+      defaultPath: raw?['defaultPath'] as String? ?? '',
+    );
+  }
+
+  static Future<bool> requestAllFilesAccess() async {
+    return await _channel.invokeMethod<bool>('requestAllFilesAccess') ?? false;
+  }
+
+  static Future<LocalDirectoryListing> listLocalDirectories({
+    String? path,
+  }) async {
+    final raw = await _channel.invokeMapMethod<Object?, Object?>(
+      'listLocalDirectories',
+      {'path': ?path},
+    );
+    final rawDirs = raw?['directories'];
+    final directories = <LocalDirectoryItem>[];
+    if (rawDirs is List) {
+      for (final item in rawDirs) {
+        if (item is! Map) continue;
+        final itemPath = item['path'];
+        final itemName = item['name'];
+        if (itemPath is! String || itemName is! String) continue;
+        directories.add(
+          LocalDirectoryItem(
+            path: itemPath,
+            name: itemName,
+            hasVault: item['hasVault'] == true,
+          ),
+        );
+      }
+    }
+    return LocalDirectoryListing(
+      currentPath: raw?['currentPath'] as String? ?? '',
+      parentPath: raw?['parentPath'] as String?,
+      relativePath: raw?['relativePath'] as String? ?? '',
+      displayName: raw?['displayName'] as String? ?? '内部存储',
+      hasVault: raw?['hasVault'] == true,
+      directories: directories,
+    );
+  }
+
+  static Future<String> createLocalDirectory({
+    required String parentPath,
+    required String name,
+  }) async {
+    final created = await _channel.invokeMethod<String>(
+      'createLocalDirectory',
+      {'parentPath': parentPath, 'name': name},
+    );
+    return created ?? '';
+  }
+
+  static Future<VaultTreeAccess?> bindLocalDirectory(String path) async {
+    final raw = await _channel.invokeMapMethod<Object?, Object?>(
+      'bindLocalDirectory',
+      {'path': path},
+    );
     return VaultTreeAccess.fromMap(raw);
   }
 

@@ -11,6 +11,7 @@ import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_sheet.dart';
 import 'app_toast.dart';
+import 'pressable_scale.dart';
 
 enum PrivateShelfUnlock { unlocked, cancelled, cleared }
 
@@ -551,13 +552,28 @@ class _PrivateShelfPinPadState extends State<PrivateShelfPinPad>
       return Semantics(
         button: true,
         label: label,
-        child: SizedBox(
-          width: 76,
-          height: 60,
-          child: InkWell(
-            customBorder: const CircleBorder(),
-            onTap: onTap,
-            child: Center(child: child),
+        child: PressableScale(
+          enabled: onTap != null,
+          pressedScale: 0.90,
+          pressedOpacity: 0.78,
+          child: SizedBox(
+            width: 76,
+            height: 60,
+            child: Material(
+              color: Colors.transparent,
+              shape: const CircleBorder(),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                overlayColor: WidgetStateProperty.resolveWith(
+                  (states) => states.contains(WidgetState.pressed)
+                      ? colors.accent.withValues(alpha: 0.12)
+                      : Colors.transparent,
+                ),
+                onTap: onTap,
+                child: Center(child: child),
+              ),
+            ),
           ),
         ),
       );
@@ -817,14 +833,18 @@ class _PrivateShelfSettingsSheetState
                                 children: [
                                   for (final kind
                                       in PrivateShelfBiometric.values)
-                                    ChoiceChip(
-                                      avatar: Icon(
-                                        biometricIcon(kind),
-                                        size: 18,
+                                    PressableScale(
+                                      pressedScale: 0.95,
+                                      child: ChoiceChip(
+                                        avatar: Icon(
+                                          biometricIcon(kind),
+                                          size: 18,
+                                        ),
+                                        label: Text(kind.label),
+                                        selected:
+                                            _config.unlockBiometric == kind,
+                                        onSelected: (_) => _chooseDefault(kind),
                                       ),
-                                      label: Text(kind.label),
-                                      selected: _config.unlockBiometric == kind,
-                                      onSelected: (_) => _chooseDefault(kind),
                                     ),
                                 ],
                               ),
@@ -860,12 +880,16 @@ class _PrivateShelfSettingsSheetState
                               children: [
                                 for (final delay
                                     in PrivateShelfLockDelay.values)
-                                  ChoiceChip(
-                                    label: Text(delay.label),
-                                    selected: _config.lockDelay == delay,
-                                    onSelected: _busy
-                                        ? null
-                                        : (_) => _chooseLockDelay(delay),
+                                  PressableScale(
+                                    enabled: !_busy,
+                                    pressedScale: 0.95,
+                                    child: ChoiceChip(
+                                      label: Text(delay.label),
+                                      selected: _config.lockDelay == delay,
+                                      onSelected: _busy
+                                          ? null
+                                          : (_) => _chooseLockDelay(delay),
+                                    ),
                                   ),
                               ],
                             ),

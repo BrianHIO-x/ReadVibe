@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/reader_note.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'pressable_scale.dart';
 
 /// Shared visual card presenting a quote highlight, thought note, category pill,
 /// inline marker style badge, tags, and quick actions.
@@ -39,13 +40,16 @@ class ReaderNoteCard extends StatelessWidget {
         ? '第 ${note.chapterIndex + 1} 页'
         : '章内 ${(note.chapterProgress * 100).clamp(0, 100).round()}%';
 
-    return Material(
-      color: colors.background.withValues(alpha: isDark ? 0.55 : 0.88),
-      borderRadius: BorderRadius.circular(AppRadius.md),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Container(
+    return PressableScale(
+      pressedScale: 0.985,
+      child: Material(
+        color: colors.background.withValues(alpha: isDark ? 0.55 : 0.88),
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+          child: Container(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(AppRadius.md),
             border: Border.all(color: colors.border),
@@ -256,6 +260,7 @@ class ReaderNoteCard extends StatelessWidget {
             ),
           ),
         ),
+      ),
       ),
     );
   }

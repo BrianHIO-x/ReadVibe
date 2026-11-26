@@ -74,7 +74,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `AndroidManifest.xml` | 主清单。声明 `INTERNET`、`REQUEST_INSTALL_PACKAGES` 与 `USE_BIOMETRIC` 三项权限，分别用于联网检查更新、应用内安装更新包和隐私书架的生物验证；注册不导出的 FileProvider（授权 `${applicationId}.updates`，范围见 `xml/update_paths.xml`）把下载好的安装包临时授权给系统安装程序；MainActivity 以 `singleTop` 启动，注册两组 ACTION_VIEW intent-filter 实现外部“用其他应用打开”；`<queries>` 中显式列出允许的六个 AI 翻译应用、两个浏览器包名以及系统 `OPEN_DOCUMENT_TREE` 守护目录授权查询。 |
+| `AndroidManifest.xml` | 主清单。声明 `INTERNET`、`REQUEST_INSTALL_PACKAGES`、`USE_BIOMETRIC` 与按需申请的 `MANAGE_EXTERNAL_STORAGE`（仅在用户主动切换“应用内自选目录（高级）”时跳转系统设置授权）四项权限，分别用于联网检查更新、应用内安装更新包、隐私书架生物验证与高级模式本地目录守护；注册不导出的 FileProvider（授权 `${applicationId}.updates`，范围见 `xml/update_paths.xml`）把下载好的安装包临时授权给系统安装程序；MainActivity 以 `singleTop` 启动，注册两组 ACTION_VIEW intent-filter 实现外部“用其他应用打开”；`<queries>` 中显式列出允许的六个 AI 翻译应用、两个浏览器包名以及系统 `OPEN_DOCUMENT_TREE` 守护目录授权查询。 |
 | `java/.../GeneratedPluginRegistrant.java` | Flutter 自动生成的插件注册类，勿手工编辑。 |
 
 ## android/app/src/main/kotlin/com/readvibe/app/（原生代码）
@@ -84,7 +84,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `MainActivity.kt` | 精简原生宿主 Activity。负责注册并释放各独立 Handler（`ReaderWindowHandler`、`BiometricHandler`、`MotionHandler`、`AppUpdateHandler`、`BookExportHandler`、`PdfChannelHandler`、`IncomingFileHandler`、`BookPickerHandler`、`DocExtractorHandler`、`SystemTextActionHandler`、`StorageVaultHandler`），以及转发生命周期回调（`onPause`、`onResume`、`onNewIntent`、`onActivityResult`、`onDestroy`）。 |
 | `IncomingFileHandler.kt` | 外部文件接收通道 `incoming_file`。串行消费外部 ACTION_VIEW 文件、解析显示名并复制到应用私有缓存，提供 `hasPending` 供冷启动恢复决策避让。 |
 | `BookPickerHandler.kt` | 系统文件选择通道 `book_picker`。封装 SAF 选择（`pickBooks` 启用 `ACTION_OPEN_DOCUMENT` 与 `Intent.EXTRA_ALLOW_MULTIPLE` 多选导入，另有单选 `pickFont` 与 `pickBackup`）；复制走独立线程池，切回前台若请求悬着按取消作答，连续卡顿超时结束并清理未完成调度。 |
-| `StorageVaultHandler.kt` | 防卸载 SAF 本地守护通道 `storage_vault`。封装 `ACTION_OPEN_DOCUMENT_TREE` 持久化权限授权，以严格路径白名单、64 KB 有界流式读写、`.tmp` 原子替换防 `(1)` 重名副本、空间配额与 256 MB 设备最小余量校验实现 `ReadVibe_Vault/` 安全读写与彻底清空。 |
+| `StorageVaultHandler.kt` | 防卸载双模式本地守护通道 `storage_vault`。既封装默认零权限 SAF（`ACTION_OPEN_DOCUMENT_TREE`，初始 `EXTRA_INITIAL_URI` 直达 `Documents` 避开根目录限制，并在 `onPause`/`onResume` 1500 ms 宽限后清理取消/弃选挂起态），也提供可选“应用内自选目录（高级）”后端（`allFilesAccessStatus`、`requestAllFilesAccess`、`listLocalDirectories`、`createLocalDirectory`、`bindLocalDirectory`）。`content://` 与 `file://` 双后端统一执行严格路径白名单、64 KB 有界流式读写、`.tmp` 原子替换防 `(1)` 重名副本、空间配额、128 MB 写入缓冲余量及 256 MB 设备最小余量校验。 |
 | `DocExtractorHandler.kt` | 旧版 Word 提取通道 `document_parser`。经单线程执行器在后台调用 Apache POI 提取 `.doc` 正文纯文本。 |
 | `SystemTextActionHandler.kt` | 系统划词动作通道 `system_text_actions`。查询已安装并符合 AI 翻译与浏览器白名单的应用，使用显式组件启动防劫持。 |
 | `ReaderWindowHandler.kt` | 阅读窗口通道 `reader_window`。通过 AndroidX Insets API 维持 edge-to-edge 并单独控制状态栏显隐、回报挖孔与系统栏安全区、以 `FLAG_KEEP_SCREEN_ON` 取代 `wakelock_plus` 维持屏幕常亮，并动态开关 `WindowManager.LayoutParams.FLAG_SECURE` 屏蔽截屏、录屏及多任务缩略图。 |
@@ -195,8 +195,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `storage_service.dart` | 持久化实现门面与书架状态核心。组合 `ChapterDiskStore`（章节分块落盘、按需解码与过期载荷清理）与 `StorageUsageService`（存储占用统计与临时缓存清理）；书架元数据存于应用数据目录的 `library.json`（tmp/bak/rename 原子提交，静态按根目录缓存解码结果，首次读取时从旧的 `readvibe_books` 偏好键一次性迁移并删除该键），避免高频进度写入连带重写整个书架；实现普通书架与隐私书架互不互通的自定义分组读/写/重命名/删除、单本与批量删除（`deleteBooks`）、恢复书籍元数据校验写入（`getAllBookMetadataRecords`/`upsertRestoredBookRecord`/`clearDeletedBookMarker`）与删除关联资源回收。写路径用全局队列串行化书架级操作与逐书章节写入，实现书架、阅读、PDF 三个仓库接口。`setBooksPrivate` 只改写书架元数据里的隐私标记，不会触碰章节载荷。 |
 | `private_shelf_lock.dart` | 隐私书架的密码与验证设置。6 位数字密码只以加盐的 PBKDF2-HMAC-SHA256 摘要保存在偏好里，并在 `Isolate.run` 中完成派生计算。连续输错 5 次以后，密码键盘锁定 30 秒并在后续错输时倍增（最长 15 分钟），同时写入墙钟截止时间与经 `biometric` 通道 `clock` 读取的单调运行时间及开机计数，防止调改系统时间提前解除锁定。`PrivateShelfConfig` 记录已开启的指纹、人脸与默认验证方式，生物验证经 `biometric` 通道交给原生层。 |
 | `library_backup_service.dart` | 本地 `.zip` 备份（schema v2，含富文本笔记迁移与合并）与非破坏性合并恢复服务。结合 `archive_safety.dart` 执行路径穿越与解压预算保护，绝不导出或覆盖隐私锁密码配置。 |
-| `data_safety_vault_service.dart` | 防卸载 SAF 本地守护目录服务。经 `StorageVaultChannel` 绑定外部目录（`ReadVibe_Vault/`），带去抖后台自动增量同步、指纹比对按需上传 `.rvbook`/字体、空间配额与 256 MB 设备可用余量拦截、孤立与隐私关闭即时清理、校验修复及一键解绑/清空/合并恢复。 |
-| `storage_vault_channel.dart` | 原生 `com.readvibe.app/storage_vault` 通道的强类型 Dart 封装（目录授权、检查、释放、磁盘空间、文件枚举、分块流式读写、删除与彻底清空）。 |
+| `data_safety_vault_service.dart` | 防卸载双模式本地守护目录服务。经 `StorageVaultChannel` 以 SAF（`bindFolder`）或高级直选目录（`bindDirectFolder`）绑定外部目录（`ReadVibe_Vault/`），带去抖后台自动增量同步、指纹比对按需上传 `.rvbook`/字体、空间配额与 256 MB 设备可用余量拦截、孤立与隐私关闭即时清理、校验修复及一键解绑/清空/合并恢复。 |
+| `storage_vault_channel.dart` | 原生 `com.readvibe.app/storage_vault` 通道的强类型 Dart 封装（SAF 与直连目录授权/绑定、所有文件权限检查与跳转、本地目录浏览与新建、`ReadVibe_Vault` 已有备份探测、磁盘空间、文件枚举、分块流式读写、删除与彻底清空；含 `VaultAllFilesStatus`、`LocalDirectoryItem`、`LocalDirectoryListing` 等模型）。 |
 | `archive_safety.dart` | 归档解包安全助手。统一校验条目路径穿越、符号链接与解压条目/大小总预算，供 `.zip` 备份与守护 `.rvbook` 共同使用。 |
 | `reading_session_store.dart` | 阅读会话状态持久化。记录最近活跃表面（`library` / `reader` / `privateShelf` / `privateReader`）及书籍 ID，供冷启动直达原阅读界面或拉起隐私锁门控恢复。 |
 | `motion_service.dart` | 动效的显示与电源提示。任何运动的部件在运动期间持有一个理由，至少有一个理由时请求最高刷新率，最后一个理由释放 0.6 秒后撤回请求；理由 1.5 秒内未续期即自动过期，到期时间按单调时钟计算，系统改时间也不会让请求滞留。`handleScroll` 处理全应用的滚动通知，`powerSaveMode` 对外提供系统省电模式状态。原生对应 `MotionHandler.kt`。 |
@@ -237,9 +237,10 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `app_theme.dart` | 全局设计系统。定义暖米色调色板常量、阅读主题色 `ReaderThemeColors`（背景/正文/次级/头部/边框/强调；浅色、暖色、深色与 OLED 纯黑四套，跟随系统时在暖色与深色之间选择）、`getReaderTheme`（系统主题解析）、`systemUiOverlayStyle`（透明状态栏与导航栏，按背景亮度选择图标亮度），以及完整亮/暗两套 `ThemeData`（无水波纹、自绘 SnackBar 透明）。 |
-| `app_motion.dart` | 动效令牌与开书过渡。集中全部时长与曲线令牌，例如按压 96ms、翻页 300ms、开书 680ms 与合书 540ms；`sheetCurve` 是贴边面板与抽屉共用的 iOS 面板曲线 `Cubic(0.32, 0.72, 0, 1)`，`exitOf` 给倒放关闭的路由换上翻转曲线，让退场也从快到慢；抽屉关闭 `drawerClose` 比打开更短；`buildFadeScaleRoute` 实现三阶段书香开页路由：封面快照提起放大、单页绕左缘翻开、阅读面接管，关闭按同一时间线倒放，时长为开书的 0.8 倍。路由本身不透明：开合动画进行时书架照常露出，停稳后书架退出画面、其动画暂停，过渡层也不再绘制暗化层、外阴影、底色与圆角裁剪；内部 `_BookRouteTransition`、`_BookRouteFrame`、`_OpeningPage` 管理阴影、圆角、折页阴影与封面 RawImage。 |
-| `app_overlay_theme.dart` | 阅读主题下的界面覆盖层。`AppOverlayTheme` 依据 `ReaderThemeColors` 现场派生整套主题（按钮、输入框、对话框、抽屉、菜单、Tooltip、滑条、ListTile），并提供 `isDark`、`danger`、`barrier`、`shape` 静态助手，保证任何页面上浮出的控件与当前阅读纸色一致。 |
+| `app_theme.dart` | 全局设计系统。定义暖米色调色板常量、阅读主题色 `ReaderThemeColors`（背景/正文/次级/头部/边框/强调；浅色、暖色、深色与 OLED 纯黑四套，跟随系统时在暖色与深色之间选择）、`getReaderTheme`（系统主题解析）、`systemUiOverlayStyle`（透明状态栏与导航栏，按背景亮度选择图标亮度），以及接入 `AppButtonStyles`、禁用 Material 水波纹的完整亮/暗两套 `ThemeData`。 |
+| `app_button_styles.dart` | 全应用按钮样式与微动效中心。统一输出 `FilledButton`、`ElevatedButton`、`OutlinedButton`、`TextButton`、`IconButton`、`SegmentedButton`、`Chip`、`Switch` 与 `Checkbox` 主题及覆盖样式（`filledOverride`、`outlinedOverride`、`textOverride`、`iconOverride`、`destructiveFilled`、`destructiveText`），全局禁用灰色/黑色 `InkRipple` 闪烁、采用暖调混合态禁用底色、并在 `foregroundBuilder` 中叠加柔和的 0.96 倍按压缩放与 0.86 不透明度触感反馈。 |
+| `app_motion.dart` | 动效令牌与开书过渡。集中全部时长与曲线令牌，包括非对称按压触感时长 `pressDown` (90ms) / `pressUp` (170ms)、翻页 300ms、开书 680ms 与合书 540ms；`sheetCurve` 是贴边面板与抽屉共用的 iOS 面板曲线 `Cubic(0.32, 0.72, 0, 1)`，`exitOf` 给倒放关闭的路由换上翻转曲线，让退场也从快到慢；抽屉关闭 `drawerClose` 比打开更短；`buildFadeScaleRoute` 实现三阶段书香开页路由：封面快照提起放大、单页绕左缘翻开、阅读面接管，关闭按同一时间线倒放，时长为开书的 0.8 倍。路由本身不透明：开合动画进行时书架照常露出，停稳后书架退出画面、其动画暂停，过渡层也不再绘制暗化层、外阴影、底色与圆角裁剪；内部 `_BookRouteTransition`、`_BookRouteFrame`、`_OpeningPage` 管理阴影、圆角、折页阴影与封面 RawImage。 |
+| `app_overlay_theme.dart` | 阅读主题下的界面覆盖层。`AppOverlayTheme` 依据 `ReaderThemeColors` 现场派生整套主题（通过 `AppButtonStyles` 统管全套按钮、分段控件、Chip、Switch、Checkbox，及输入框、对话框、抽屉、菜单、Tooltip、滑条、ListTile），全局置为 `NoSplash` 与全透明覆盖层，保证任何页面上浮出的控件与当前阅读纸色一致且点击不黑闪。 |
 | `app_spacing.dart` | 间距与圆角令牌。`AppSpacing`（4/8/12/16/24/32）与 `AppRadius`（8/12/16/24 胶囊）。 |
 
 ### lib/widgets/
@@ -250,7 +251,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `app_dialog.dart` | 应用统一对话框。`showAppDialog` 捕获主题上下文并控制入场/退场时长与遮罩透明度，`_AppDialogRoute` 在淡入的同时从 96% 尺寸居中放大，退场使用翻转曲线；`AppDialog` 规范内边距与最大宽度；`AppDestructiveButton` 以错误色呈现破坏性操作（填充或描边两态）。 |
 | `app_sheet.dart` | 应用统一底部面板。`showAppSheet` 以 `ModalBottomSheetRoute` 承载可滚动面板并保留禁用动画降级，调用方未指定曲线时补上 `sheetCurve` 入场与其翻转曲线退场；`AppSheetSurface` 定制 24dp 圆角纸面；`AppSheetHeader` 提供标题与关闭钮；`AppActionSheet` 为多子项动作列表；面板不再裁掉底部安全区，改由滚动内容自行留白，纸面一直铺到屏幕底缘。 |
 | `app_popup_menu.dart` | 主题化弹出菜单。`AppPopupMenuButton` 自行计算锚点矩形后调用 `showMenu`，限定宽度并绘制选中态（勾选图标与强调底色）；可选的 `menuRightInset` 把菜单右缘钉在距屏幕右边固定距离处，用于与下方内容列对齐；`AppMenuEntry` 携带值、标签、图标与选中标记。 |
-| `pressable_scale.dart` | 纯视觉按压缩放反馈。用 Listener 监听原始指针事件，不注册手势识别器，可包裹 InkWell/按钮而不劫持点击；禁用态自动复位。 |
+| `app_segmented_control.dart` | 应用统一平滑滑动分段选择器（`AppSegmentOption`、`AppSegmentedControl`），以 `TweenAnimationBuilder` 平移白色/深色选中胶囊配合 `PressableScale` 触感反馈，全面替代原生 `SegmentedButton` 消除灰色水波纹闪屏。 |
+| `pressable_scale.dart` | 纯视觉按压缩放与不透明度微动效。用 Listener 监听原始指针事件，不注册手势识别器，可包裹 InkWell/按钮/Chip 而不劫持点击；采用非对称按下（90ms）与回弹（170ms `controlCurve`）并尊重系统 `disableAnimations`。 |
 | `side_drawer.dart` | 左侧滑出抽屉。`showSideDrawer` 推入自绘遮罩的弹出路由：拖动时面板与手指 1:1 同步，遮罩透明度由同一拖动量换算；松手时速度超过 200 像素/秒按方向决定，否则拖过四成宽度才关闭；关闭从松手位置接着滑出，未关闭则以临界阻尼弹簧带着松手速度回位，回位途中可以再次抓住。书架全局设置使用它。 |
 | `book_card.dart` | 书架书卡。封面区域复现背景书脊与渐变遮罩（三明治分层供开书动画采样），显示封面图或首字占位；以章节进度与章内进度折算整体百分比，PDF 显示页数口径；可用性受损时角标提示丢失原因；支持 `selectionMode` 多选状态，在封面叠层边缘描边并在右下角绘制圆点勾选徽标（不改变 `paintedHeight` 高度计算）；语义化拼接无障碍标签。 |
 | `chapter_list.dart` | 全屏目录面板。列表底部按系统手势条高度补白，章节行可滚动至手势条之下。`_TocDirectory` 把章节组织为两级卷目录（卷标题聚合、导语类与卷间散章分区），无卷则退化为平铺列表；卷头为 pinned 固定头可折叠并回传展开状态；行尾显示逐章字数（监听 `chapterWordCounts`）；章节行与卷头都使用固定行高，并随系统字号同步增大。目录行采用较小的字号和收窄的边距，从而给标题留出更多宽度。打开目录或点“回到当前章”时，当前章节会按行高算出精确位置并置顶显示。当前章位于展开的卷内时，置顶位置会让出固定卷头的高度。 |
@@ -267,7 +269,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `font_settings_section.dart` | 字体选择区。系统/宋体/楷体/导入四选一卡片加导入按钮，导入卡副标题显示字体名并在无导入字体时禁用，选中卡片微放大并描边强调。 |
 | `global_settings_sheet.dart` | 全局设置侧栏（书架左上角打开），根部使用带圆角与底色的 `Material` 以消除内部 `SwitchListTile.adaptive` 在 Debug 下的水波纹断言与遮挡。集中隐私书架入口、“阅读恢复”冷启动开关、“读书笔记/隐私笔记本”入口（`onOpenNotes`）、“数据安全与备份”入口（`onOpenBackup`）、字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口、存储空间区与开源许可页入口；版本号由书架层传入。同文件的 `StorageUsageSection` 自行异步统计并展示分类占用，提供清理缓存与重新统计；`formatStorageBytes` 负责字节展示。 |
 | `library_backup_sheet.dart` | 便携压缩包 (`.zip`) 导出与非破坏性合并恢复交互面板。 |
-| `data_safety_sheet.dart` | 数据安全与备份统一面板。以双页签整合“防卸载守护目录”（绑定/状态看板/配额选择/增量同步/核验清理/解绑清空/一键恢复）与“便携压缩包 (.zip)”。 |
+| `data_safety_sheet.dart` | 数据安全与备份统一面板。以平滑分段页签整合“防卸载守护目录”（支持系统 SAF 直达 `Documents` 与“应用内自选目录（高级）”双绑定模式、状态看板、配额选择、增量同步、核验清理、解绑清空与一键恢复）与“便携压缩包 (.zip)”。 |
+| `vault_directory_picker_sheet.dart` | 主题化应用内守护目录浏览器（高级模式）。按需引导开启“管理所有文件”权限，提供 `Documents` / `Download` / 内部存储快捷跳转、面包含已有 `ReadVibe_Vault` 备份徽标、安全新建子文件夹及一键选中绑定。 |
 | `library_batch_bar.dart` | 书架多选底栏。多选模式下提供批量设组（“分组”）、“移入隐私”/“移出隐私”与批量“删除”操作。 |
 | `library_group_bar.dart` | 书架分组筛选与管理控件。包含水平分组胶囊栏 `LibraryGroupBar`（支持尾部 `onClose` 收起按钮）、自定义分组管理面板 `showShelfGroupManagerSheet`（新建/重命名/删除）及单本与三态批量分配面板 `showAssignBookGroupsSheet`。 |
 | `library_reorder_grid.dart` | 书架网格展示、拖动排序视图与固定视口物理边界 `PinnedShelfScrollPhysics`。 |

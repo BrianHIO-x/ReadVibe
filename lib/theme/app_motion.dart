@@ -11,6 +11,12 @@ import 'app_theme.dart';
 /// there is no third-party animation dependency, everything here is driven
 /// by Flutter's built-in animation APIs.
 class AppMotion {
+  /// Tactile press-down micro-feedback duration.
+  static const pressDown = Duration(milliseconds: 90);
+
+  /// Soft spring-like release duration for pressable controls.
+  static const pressUp = Duration(milliseconds: 170);
+
   /// Micro press feedback (see [PressableScale]).
   static const quick = Duration(milliseconds: 96);
 

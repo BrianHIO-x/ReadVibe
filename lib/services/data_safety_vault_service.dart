@@ -50,6 +50,7 @@ class VaultConfig {
   final String? lastError;
 
   bool get isBound => treeUri != null && treeUri!.isNotEmpty;
+  bool get isDirectMode => (treeUri ?? '').startsWith('file://');
 }
 
 class VaultStatus {
@@ -318,6 +319,16 @@ class DataSafetyVaultService {
 
   Future<VaultStatus?> bindFolder() async {
     final access = await StorageVaultChannel.pickTree();
+    if (access == null || !access.valid) return null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyTreeUri, access.treeUri);
+    await prefs.setString(_keyDisplayName, access.displayName);
+    await prefs.remove(_keyLastError);
+    return loadStatus();
+  }
+
+  Future<VaultStatus?> bindDirectFolder(String path) async {
+    final access = await StorageVaultChannel.bindLocalDirectory(path);
     if (access == null || !access.valid) return null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyTreeUri, access.treeUri);

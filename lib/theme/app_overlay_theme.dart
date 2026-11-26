@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'app_button_styles.dart';
 import 'app_spacing.dart';
 import 'app_theme.dart';
 
@@ -48,17 +49,18 @@ class AppOverlayTheme extends StatelessWidget {
       borderRadius: BorderRadius.circular(AppRadius.md),
       borderSide: BorderSide(color: color),
     );
-    final buttonShape = RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(AppRadius.pill),
-    );
     final buttonText = body.copyWith(fontSize: 14, fontWeight: FontWeight.w600);
-    const buttonPadding = EdgeInsets.symmetric(horizontal: 18, vertical: 12);
     final accentTint = Color.alphaBlend(
       colors.accent.withValues(alpha: dark ? 0.24 : 0.14),
       colors.headerBg,
     );
     return base.copyWith(
       brightness: dark ? Brightness.dark : Brightness.light,
+      splashFactory: NoSplash.splashFactory,
+      splashColor: Colors.transparent,
+      highlightColor: Colors.transparent,
+      hoverColor: Colors.transparent,
+      focusColor: Colors.transparent,
       colorScheme: (dark ? const ColorScheme.dark() : const ColorScheme.light())
           .copyWith(
             primary: colors.accent,
@@ -115,44 +117,11 @@ class AppOverlayTheme extends StatelessWidget {
           ),
         ),
       ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          backgroundColor: colors.accent,
-          foregroundColor: onAccent(colors),
-          disabledBackgroundColor: colors.text.withValues(alpha: 0.08),
-          disabledForegroundColor: colors.secondary,
-          minimumSize: const Size(64, 48),
-          padding: buttonPadding,
-          textStyle: buttonText,
-          shape: buttonShape,
-        ),
-      ),
-      textButtonTheme: TextButtonThemeData(
-        style: TextButton.styleFrom(
-          foregroundColor: colors.secondary,
-          minimumSize: const Size(64, 48),
-          padding: buttonPadding,
-          textStyle: buttonText,
-          shape: buttonShape,
-        ),
-      ),
-      outlinedButtonTheme: OutlinedButtonThemeData(
-        style: OutlinedButton.styleFrom(
-          foregroundColor: colors.accent,
-          side: BorderSide(color: colors.border),
-          minimumSize: const Size(64, 48),
-          padding: buttonPadding,
-          textStyle: buttonText,
-          shape: buttonShape,
-        ),
-      ),
-      iconButtonTheme: IconButtonThemeData(
-        style: IconButton.styleFrom(
-          foregroundColor: colors.secondary,
-          minimumSize: const Size(48, 48),
-          shape: buttonShape,
-        ),
-      ),
+      filledButtonTheme: AppButtonStyles.filledTheme(colors),
+      textButtonTheme: AppButtonStyles.textTheme(colors),
+      outlinedButtonTheme: AppButtonStyles.outlinedTheme(colors),
+      elevatedButtonTheme: AppButtonStyles.elevatedTheme(colors),
+      iconButtonTheme: AppButtonStyles.iconTheme(colors),
       inputDecorationTheme: InputDecorationThemeData(
         filled: true,
         fillColor: Color.alphaBlend(
@@ -213,31 +182,10 @@ class AppOverlayTheme extends StatelessWidget {
         textStyle: body.copyWith(fontSize: 12),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       ),
-      segmentedButtonTheme: SegmentedButtonThemeData(
-        style: SegmentedButton.styleFrom(
-          backgroundColor: colors.headerBg,
-          foregroundColor: colors.text,
-          selectedBackgroundColor: accentTint,
-          selectedForegroundColor: colors.accent,
-          side: BorderSide(color: colors.border),
-        ),
-      ),
-      chipTheme: ChipThemeData(
-        backgroundColor: colors.headerBg,
-        selectedColor: accentTint,
-        disabledColor: colors.headerBg.withValues(alpha: 0.5),
-        checkmarkColor: colors.accent,
-        side: BorderSide(color: colors.border),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.md),
-        ),
-        labelStyle: body.copyWith(fontSize: 13, color: colors.text),
-        secondaryLabelStyle: body.copyWith(
-          fontSize: 13,
-          fontWeight: FontWeight.w600,
-          color: colors.accent,
-        ),
-      ),
+      segmentedButtonTheme: AppButtonStyles.segmentedTheme(colors),
+      chipTheme: AppButtonStyles.chipTheme(colors),
+      switchTheme: AppButtonStyles.switchTheme(colors),
+      checkboxTheme: AppButtonStyles.checkboxTheme(colors),
       progressIndicatorTheme: ProgressIndicatorThemeData(color: colors.accent),
     );
   }

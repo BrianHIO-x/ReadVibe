@@ -10,6 +10,7 @@ import '../services/chinese_text.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import '../widgets/app_toast.dart';
+import '../widgets/pressable_scale.dart';
 import '../widgets/reader_note_card.dart';
 import '../widgets/reader_note_composer_sheet.dart';
 import '../widgets/reader_quote_card_sheet.dart';
@@ -279,53 +280,74 @@ class _LibraryNotesScreenState extends State<LibraryNotesScreen> {
                                   if (_booksById[bookId] != null)
                                     Padding(
                                       padding: const EdgeInsets.only(right: 6),
-                                      child: FilterChip(
-                                        label: Text(
-                                          _booksById[bookId]!.title,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(fontSize: 11.5),
+                                      child: PressableScale(
+                                        pressedScale: 0.95,
+                                        child: FilterChip(
+                                          label: Text(
+                                            _booksById[bookId]!.title,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 11.5,
+                                            ),
+                                          ),
+                                          selected: _selectedBookId == bookId,
+                                          showCheckmark: false,
+                                          visualDensity: VisualDensity.compact,
+                                          onSelected: (_) => setState(() {
+                                            _selectedBookId =
+                                                _selectedBookId == bookId
+                                                ? null
+                                                : bookId;
+                                          }),
                                         ),
-                                        selected: _selectedBookId == bookId,
-                                        showCheckmark: false,
-                                        visualDensity: VisualDensity.compact,
-                                        onSelected: (_) => setState(() {
-                                          _selectedBookId =
-                                              _selectedBookId == bookId ? null : bookId;
-                                        }),
                                       ),
                                     ),
                                 for (final cat in NoteCategory.values)
                                   Padding(
                                     padding: const EdgeInsets.only(right: 6),
-                                    child: FilterChip(
-                                      label: Text(
-                                        cat.label,
-                                        style: const TextStyle(fontSize: 11.5),
+                                    child: PressableScale(
+                                      pressedScale: 0.95,
+                                      child: FilterChip(
+                                        label: Text(
+                                          cat.label,
+                                          style: const TextStyle(
+                                            fontSize: 11.5,
+                                          ),
+                                        ),
+                                        selected: _selectedCategory == cat,
+                                        showCheckmark: false,
+                                        visualDensity: VisualDensity.compact,
+                                        onSelected: (_) => setState(() {
+                                          _selectedCategory =
+                                              _selectedCategory == cat
+                                              ? null
+                                              : cat;
+                                        }),
                                       ),
-                                      selected: _selectedCategory == cat,
-                                      showCheckmark: false,
-                                      visualDensity: VisualDensity.compact,
-                                      onSelected: (_) => setState(() {
-                                        _selectedCategory =
-                                            _selectedCategory == cat ? null : cat;
-                                      }),
                                     ),
                                   ),
                                 for (final tag in tags)
                                   Padding(
                                     padding: const EdgeInsets.only(right: 6),
-                                    child: FilterChip(
-                                      label: Text(
-                                        '#$tag',
-                                        style: const TextStyle(fontSize: 11.5),
+                                    child: PressableScale(
+                                      pressedScale: 0.95,
+                                      child: FilterChip(
+                                        label: Text(
+                                          '#$tag',
+                                          style: const TextStyle(
+                                            fontSize: 11.5,
+                                          ),
+                                        ),
+                                        selected: _selectedTag == tag,
+                                        showCheckmark: false,
+                                        visualDensity: VisualDensity.compact,
+                                        onSelected: (_) => setState(() {
+                                          _selectedTag = _selectedTag == tag
+                                              ? null
+                                              : tag;
+                                        }),
                                       ),
-                                      selected: _selectedTag == tag,
-                                      showCheckmark: false,
-                                      visualDensity: VisualDensity.compact,
-                                      onSelected: (_) => setState(() {
-                                        _selectedTag = _selectedTag == tag ? null : tag;
-                                      }),
                                     ),
                                   ),
                               ],

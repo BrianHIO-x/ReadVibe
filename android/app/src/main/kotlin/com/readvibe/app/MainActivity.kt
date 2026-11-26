@@ -35,12 +35,14 @@ class MainActivity : FlutterActivity() {
 
     override fun onPause() {
         bookPickerHandler?.onPause()
+        storageVaultHandler?.onPause()
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
         bookPickerHandler?.onResume()
+        storageVaultHandler?.onResume()
     }
 
     override fun onNewIntent(intent: Intent) {

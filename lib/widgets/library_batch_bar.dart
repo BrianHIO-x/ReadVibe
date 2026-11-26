@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'pressable_scale.dart';
 
 /// Compact bottom bar shown during multi-select shelf management.
 class LibraryBatchBar extends StatelessWidget {
@@ -105,27 +106,36 @@ class _BatchActionButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final effectiveColor = enabled ? color : color.withValues(alpha: 0.35);
-    return InkWell(
-      onTap: enabled ? onTap : null,
-      borderRadius: BorderRadius.circular(AppRadius.md),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 22, color: effectiveColor),
-            const SizedBox(height: 2),
-            Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: effectiveColor,
-              ),
+    return PressableScale(
+      enabled: enabled,
+      pressedScale: 0.94,
+      pressedOpacity: 0.82,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: enabled ? onTap : null,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 22, color: effectiveColor),
+                const SizedBox(height: 2),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: effectiveColor,
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );

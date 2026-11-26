@@ -7,11 +7,13 @@ import 'package:flutter/services.dart';
 
 import '../models/reader_note.dart';
 import '../services/book_export_service.dart';
+import '../theme/app_button_styles.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_sheet.dart';
 import 'app_toast.dart';
+import 'pressable_scale.dart';
 
 enum QuoteCardTemplate {
   xuanPaper('宣纸书笺'),
@@ -209,11 +211,14 @@ class _ReaderQuoteCardSheetState extends State<_ReaderQuoteCardSheet> {
                         runSpacing: AppSpacing.xs,
                         children: [
                           for (final tmpl in QuoteCardTemplate.values)
-                            ChoiceChip(
-                              label: Text(tmpl.label),
-                              selected: _template == tmpl,
-                              onSelected: (_) =>
-                                  setState(() => _template = tmpl),
+                            PressableScale(
+                              pressedScale: 0.95,
+                              child: ChoiceChip(
+                                label: Text(tmpl.label),
+                                selected: _template == tmpl,
+                                onSelected: (_) =>
+                                    setState(() => _template = tmpl),
+                              ),
                             ),
                         ],
                       ),
@@ -222,17 +227,23 @@ class _ReaderQuoteCardSheetState extends State<_ReaderQuoteCardSheet> {
                         spacing: AppSpacing.sm,
                         children: [
                           if (widget.note.hasContent)
-                            FilterChip(
-                              label: const Text('包含想法批注'),
-                              selected: _includeNote,
-                              onSelected: (v) =>
-                                  setState(() => _includeNote = v),
+                            PressableScale(
+                              pressedScale: 0.95,
+                              child: FilterChip(
+                                label: const Text('包含想法批注'),
+                                selected: _includeNote,
+                                onSelected: (v) =>
+                                    setState(() => _includeNote = v),
+                              ),
                             ),
-                          FilterChip(
-                            label: Text(widget.note.isPdf ? '显示页码' : '显示章节'),
-                            selected: _includeChapter,
-                            onSelected: (v) =>
-                                setState(() => _includeChapter = v),
+                          PressableScale(
+                            pressedScale: 0.95,
+                            child: FilterChip(
+                              label: Text(widget.note.isPdf ? '显示页码' : '显示章节'),
+                              selected: _includeChapter,
+                              onSelected: (v) =>
+                                  setState(() => _includeChapter = v),
+                            ),
                           ),
                         ],
                       ),
@@ -243,9 +254,13 @@ class _ReaderQuoteCardSheetState extends State<_ReaderQuoteCardSheet> {
                             child: OutlinedButton.icon(
                               onPressed: _saving ? null : _copyText,
                               icon: const Icon(Icons.copy_rounded, size: 18),
-                              label: const Text('复制文本'),
-                              style: OutlinedButton.styleFrom(
-                                side: BorderSide(color: colors.border),
+                              label: const Text('复制文本', maxLines: 1),
+                              style: AppButtonStyles.outlinedOverride(
+                                colors,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 12,
+                                ),
                               ),
                             ),
                           ),

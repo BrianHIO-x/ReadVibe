@@ -103,6 +103,7 @@ class AppToast {
               clipBehavior: Clip.antiAlias,
               child: InkWell(
                 onTap: loading ? null : messenger.hideCurrentSnackBar,
+                overlayColor: const WidgetStatePropertyAll(Colors.transparent),
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(minHeight: 52),
                   child: Padding(

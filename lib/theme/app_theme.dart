@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/reader_settings.dart';
+import 'app_button_styles.dart';
 import 'app_spacing.dart';
 
 /// Warm minimalist design system
@@ -153,24 +154,30 @@ class AppTheme {
         side: const BorderSide(color: borderLight, width: 1),
       ),
     ),
-    elevatedButtonTheme: ElevatedButtonThemeData(
-      style: ElevatedButton.styleFrom(
-        backgroundColor: accent,
-        foregroundColor: Colors.white,
-        elevation: 0,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.pill),
-        ),
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.xl,
-          vertical: AppSpacing.md,
-        ),
-      ),
+    filledButtonTheme: AppButtonStyles.filledTheme(
+      readerThemes[ReaderThemeMode.warm]!,
     ),
-    iconButtonTheme: IconButtonThemeData(
-      style: ButtonStyle(
-        overlayColor: WidgetStateProperty.all(Colors.transparent),
-      ),
+    outlinedButtonTheme: AppButtonStyles.outlinedTheme(
+      readerThemes[ReaderThemeMode.warm]!,
+    ),
+    textButtonTheme: AppButtonStyles.textTheme(
+      readerThemes[ReaderThemeMode.warm]!,
+    ),
+    elevatedButtonTheme: AppButtonStyles.elevatedTheme(
+      readerThemes[ReaderThemeMode.warm]!,
+    ),
+    iconButtonTheme: AppButtonStyles.iconTheme(
+      readerThemes[ReaderThemeMode.warm]!,
+    ),
+    segmentedButtonTheme: AppButtonStyles.segmentedTheme(
+      readerThemes[ReaderThemeMode.warm]!,
+    ),
+    chipTheme: AppButtonStyles.chipTheme(readerThemes[ReaderThemeMode.warm]!),
+    switchTheme: AppButtonStyles.switchTheme(
+      readerThemes[ReaderThemeMode.warm]!,
+    ),
+    checkboxTheme: AppButtonStyles.checkboxTheme(
+      readerThemes[ReaderThemeMode.warm]!,
     ),
     splashFactory: NoSplash.splashFactory,
     splashColor: Colors.transparent,
@@ -233,24 +240,30 @@ class AppTheme {
         side: const BorderSide(color: Color(0xFF3A3530), width: 1),
       ),
     ),
-    elevatedButtonTheme: ElevatedButtonThemeData(
-      style: ElevatedButton.styleFrom(
-        backgroundColor: const Color(0xFFE3936F),
-        foregroundColor: Colors.black,
-        elevation: 0,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppRadius.pill),
-        ),
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.xl,
-          vertical: AppSpacing.md,
-        ),
-      ),
+    filledButtonTheme: AppButtonStyles.filledTheme(
+      readerThemes[ReaderThemeMode.dark]!,
     ),
-    iconButtonTheme: IconButtonThemeData(
-      style: ButtonStyle(
-        overlayColor: WidgetStateProperty.all(Colors.transparent),
-      ),
+    outlinedButtonTheme: AppButtonStyles.outlinedTheme(
+      readerThemes[ReaderThemeMode.dark]!,
+    ),
+    textButtonTheme: AppButtonStyles.textTheme(
+      readerThemes[ReaderThemeMode.dark]!,
+    ),
+    elevatedButtonTheme: AppButtonStyles.elevatedTheme(
+      readerThemes[ReaderThemeMode.dark]!,
+    ),
+    iconButtonTheme: AppButtonStyles.iconTheme(
+      readerThemes[ReaderThemeMode.dark]!,
+    ),
+    segmentedButtonTheme: AppButtonStyles.segmentedTheme(
+      readerThemes[ReaderThemeMode.dark]!,
+    ),
+    chipTheme: AppButtonStyles.chipTheme(readerThemes[ReaderThemeMode.dark]!),
+    switchTheme: AppButtonStyles.switchTheme(
+      readerThemes[ReaderThemeMode.dark]!,
+    ),
+    checkboxTheme: AppButtonStyles.checkboxTheme(
+      readerThemes[ReaderThemeMode.dark]!,
     ),
     splashFactory: NoSplash.splashFactory,
     splashColor: Colors.transparent,
