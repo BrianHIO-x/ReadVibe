@@ -162,6 +162,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | `library_filter.dart` | 书架筛选枚举 `ShelfFilter`（全部/最近/未读/四种格式）及中文标签扩展。 |
 | `reader_launch_args.dart` | 书架开书时的路由参数。携带 `Book`、封面截图 `ui.Image` 与书卡在屏幕上的 `Rect`，供开页过渡做共享元素动画。 |
+| `release_notes_markdown.dart` | 纯 Dart 更新说明 Markdown 解析器与文本模型。将 GitHub Releases 说明解析为标题、段落、多级/任务列表、引用与 GitHub Alert、围栏代码块、表格、分隔线及 SHA-256 校验和等块级与行内片段结构，屏蔽未解析标记裸露并保护下划线标识符与 `<占位符>`。 |
 
 ### lib/repositories/（接口契约层）
 
@@ -224,7 +225,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `font_service.dart` | 字体导入与加载。直接复用原生 `AndroidBookPicker.pickFont()` 选入 `.ttf`/`.otf`（已移除 `file_picker`），经 `ImportedFontStore` 保存并以时间戳命名家族注册到 Flutter 引擎，加载失败自动回退系统字体且不丢其他设置；静态去重防止重复注册与并发重复加载。 |
 | `incoming_file_service.dart` | 外部 ACTION_VIEW 文件接收。原生复制到缓存后经通道通知，静态处理器串行消费避免两个文件管理器启动竞态；单个文件解析失败只跳过该文件，队列中其余文件继续导入，通道本身不可用才停止本轮；结构化错误经回调上报。 |
 | `system_text_action_service.dart` | 系统文字动作服务。经 PackageManager 查询可接收翻译/搜索的应用，产品白名单圈定六个 AI 应用与 Edge/Chrome/系统浏览器；支持记住默认目标、清除默认与显式启动校验。 |
-| `update_service.dart` | 更新检查。通过原生 `app_update` 通道 `appVersion` 查询本机版本（已移除 `package_info_plus`），同时请求国内镜像线路（`feedMirrorHosts`）与 GitHub Releases 接口，第一条取到正式版 JSON 后再给其余线路 800 毫秒，在全部答复里取最新版本，避免镜像缓存的旧版本盖过新版本；三轮段比较版本号，解析 arm64 APK 资产并校验下载地址确实指向本仓库的发布路径，安装包摘要优先取资产自带的 `digest`，缺失时回退发布说明里的 `SHA-256：` 行；给出“有新版/已最新/检查失败”三态结果，同一时刻只保留一次在途检查。 |
+| `update_service.dart` | 更新检查。通过原生 `app_update` 通道 `appVersion` 查询本机版本（已移除 `package_info_plus`），同时请求国内镜像线路（`feedMirrorHosts`）与 GitHub Releases 接口，第一条取到正式版 JSON 后再给其余线路 800 毫秒，在全部答复里取最新版本，避免镜像缓存的旧版本盖过新版本；三轮段比较版本号，解析 arm64 APK 资产并校验下载地址确实指向本仓库的发布路径，安装包摘要优先取资产自带的 `digest`，缺失时回退发布说明里的 `SHA-256：` 行（兼容反引号与加粗包裹）；给出“有新版/已最新/检查失败”三态结果，同一时刻只保留一次在途检查。 |
 | `update_download_service.dart` | 安装包下载与安装。线路依次为国内镜像（`mirrorHosts`）与 GitHub 直连，默认优先沿用 `SharedPreferences` 中记住的上一次成功下载线路（首次下载或旧线路失效时选用主国内镜像），不提前测速直接开始取包。仅当当前线路不可用，或连续 `slowWindow`（6 秒）低于 `lowSpeedThreshold`（512 KB/s）时，才在当前续传偏移处并发向其余备用线路各取至多 1 MB 样本测速（3 秒超时，首条完成后再等 800 毫秒，GitHub 直连速度先除以 1.5 再比对），并切换到最快路线，测速样本与已落盘字节直接通过 `Range` 续传接续；已测速阶段持续落后于下一条备选一半速度达六秒也会继续切换，接近完成时不再换线。字节先写入会话目录内的 `.part` 文件，长度、ZIP 魔数与 SHA-256 全部通过后改名为正式 APK 并记住本次完成下载的线路；跨线路续传只在存在摘要时启用，失败即删除本次会话目录，两天前的旧会话在开始时清理；支持取消与进度回调，安装经 `app_update` 通道转交原生层。 |
 | `storage/chapter_disk_store.dart` | 章节分块存储引擎。实现 `LazyChapterStore`/`LazyChapter` 按需解码、分批在 worker isolate 同步编码/校验/落盘、30 秒 IO 超时、LRU 章节缓存及损坏/写半截载荷识别，随书创建/替换原子目录。 |
 | `storage/storage_usage_service.dart` | 存储占用测算、临时缓存目录枚举清理（PDF 渲染与 OCR 缓存、下载更新、选中字体临时文件、`readvibe_backup_import` 临时目录等）与孤儿资源回收。 |
@@ -272,7 +273,8 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `library_reorder_grid.dart` | 书架网格展示、拖动排序视图与固定视口物理边界 `PinnedShelfScrollPhysics`。 |
 | `private_shelf_sheets.dart` | 隐私书架的交互面板。`_PinSheet` 自绘 6 位数字键盘，同时承担创建密码和验证密码两种用途。由于键盘是自绘的，系统输入法接触不到密码。`unlockPrivateShelf` 先调起默认的生物验证，失败或取消后再显示密码键盘。忘记密码的时候，已开启的生物验证可以用来重设密码。两种验证都没开启时，只能交由调用方清空隐私书架。`showPrivateShelfSettings` 负责开关指纹和人脸、选择默认方式、修改密码与关闭隐私书架，开启某一种之前会先验证一次。 |
 | `library_search_controls.dart` | 书架搜索与筛选用控件。`LibraryFilterButton` 弹出筛选菜单（支持格式与状态筛选、`显示/隐藏分组栏`切换与直选自定义分组，当前项打勾，菜单右缘与书架网格右边线对齐）；`LibrarySearchControls` 组合圆角搜索框（可清除）与激活筛选 `InputChip`。 |
-| `app_update_dialog.dart` | 新版本对话框。展示安装包体积与发布说明（限高滚动），一个按钮串起下载、校验与调起安装三步；测速阶段显示不定进度条，下载中显示线路、百分比与实时速率且可随时取消；下载成功后失败重试不再重复下载，安装权限缺失时提示去系统设置开启后直接重试。 |
+| `release_notes_view.dart` | 更新说明结构化渲染组件。基于 `release_notes_markdown.dart` 的解析节点与 `AppOverlayTheme` 浅/暖/深/纯黑主题配色渲染标题竖条、行内代码微底色、悬挂缩进列表、引用/Alert、水平可滚代码块与表格及底部 SHA-256 校验框。 |
+| `app_update_dialog.dart` | 新版本对话框。缓存解析后的更新说明节点并用随主题着色的 `RawScrollbar` 与可滚动视口通过 `ReleaseNotesView` 渲染，展示安装包体积，一个按钮串起下载、校验与调起安装三步；测速阶段显示不定进度条，下载中显示线路、百分比与实时速率且可随时取消；下载成功后失败重试不再重复下载，安装权限缺失时提示去系统设置开启后直接重试。 |
 
 ### lib/screens/
 

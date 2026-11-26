@@ -233,9 +233,12 @@ class UpdateService implements UpdateChecker {
   }
 
   /// Extracts the SHA-256 line recorded in release notes
-  /// (`SHA-256：…` or `SHA-256: …`).
+  /// (`SHA-256：…` or `SHA-256: …`, optionally wrapped in backticks or bold).
   static String? sha256FromNotes(String notes) {
-    final match = RegExp('SHA-256[：:]\\s*([0-9a-fA-F]{64})').firstMatch(notes);
+    final match = RegExp(
+      'SHA-256[*`]*\\s*[：:]\\s*[`*]*([0-9a-fA-F]{64})[`*]*',
+      caseSensitive: false,
+    ).firstMatch(notes);
     return match?.group(1);
   }
 
