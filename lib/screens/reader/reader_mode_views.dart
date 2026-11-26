@@ -100,6 +100,7 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
     required double horizontalPadding,
   }) {
     _scheduleContinuousMetricsUpdate();
+    final isDarkTheme = themeColors.background.computeLuminance() < 0.35;
     final slivers = <Widget>[];
     for (
       var chapterIndex = 0;
@@ -107,6 +108,10 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
       chapterIndex++
     ) {
       final chapter = _book.chapters[chapterIndex];
+      final hasNotes = _notesByChapterParagraph[chapterIndex]?.isNotEmpty == true;
+      final epubParagraphs = chapter.hasRichEpubContent && hasNotes
+          ? _epubParagraphIndexByBlock(chapter)
+          : null;
       final hasEmbeddedHeading = _epubLayout.hasEmbeddedHeading(
         chapter,
         avoidLazyLoad: true,
@@ -161,26 +166,52 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
                           _readerViewportWidth - horizontalPadding * 2,
                         );
                         if (!chapter.hasKnownEpubBlockCount) {
+                          final blocks = chapter.epubBlocks;
+                          final resolvedMap = hasNotes
+                              ? _epubParagraphIndexByBlock(chapter)
+                              : null;
                           return Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              for (final block in chapter.epubBlocks)
+                              for (var b = 0; b < blocks.length; b++)
                                 _epubLayout.buildBlock(
                                   settings: _settings,
-                                  block: block,
+                                  block: blocks[b],
                                   themeColors: themeColors,
                                   width: contentWidth,
                                   simulationPage: false,
+                                  noteSpans:
+                                      resolvedMap != null &&
+                                          b < resolvedMap.length &&
+                                          resolvedMap[b] != null
+                                      ? _noteSpansForParagraph(
+                                          chapterIndex,
+                                          resolvedMap[b]!,
+                                        )
+                                      : const <ReaderNoteHighlightSpan>[],
+                                  noteHighlightRegistry: _noteHighlightRegistry,
                                 ),
                             ],
                           );
                         }
+                        final mappedParagraph =
+                            epubParagraphs != null &&
+                                itemIndex < epubParagraphs.length
+                            ? epubParagraphs[itemIndex]
+                            : null;
                         return _epubLayout.buildBlock(
                           settings: _settings,
                           block: chapter.epubBlocks[itemIndex],
                           themeColors: themeColors,
                           width: contentWidth,
                           simulationPage: false,
+                          noteSpans: mappedParagraph != null
+                              ? _noteSpansForParagraph(
+                                  chapterIndex,
+                                  mappedParagraph,
+                                )
+                              : const <ReaderNoteHighlightSpan>[],
+                          noteHighlightRegistry: _noteHighlightRegistry,
                         );
                       }
                       final separator =
@@ -188,8 +219,9 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
                               ReaderParagraphSpacing.blankLine
                           ? '\n\n'
                           : '\n';
-                      return ReaderJustifiedText(
-                        TextSpan(text: _paragraphsFor(chapter).join(separator)),
+                      final paragraphs = _paragraphsFor(chapter);
+                      final justified = ReaderJustifiedText(
+                        TextSpan(text: paragraphs.join(separator)),
                         style: TextStyle(
                           fontFamily: fontFamily,
                           fontSize: _settings.fontSize,
@@ -202,6 +234,19 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
                           letterSpacing: 0.2,
                         ),
                         nearby: (chapterIndex - _chapterIndex).abs() <= 1,
+                      );
+                      if (!hasNotes) return justified;
+                      final spans = _continuousChapterNoteSpans(
+                        chapterIndex,
+                        paragraphs,
+                        separator,
+                      );
+                      if (spans.isEmpty) return justified;
+                      return ReaderAnnotatedParagraph(
+                        spans: spans,
+                        isDarkTheme: isDarkTheme,
+                        registry: _noteHighlightRegistry,
+                        child: justified,
                       );
                     },
                   ),
@@ -230,7 +275,9 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
           selectionDragging: _selectionController.dragging,
           onReaderModalOpened: _beginReaderModal,
           onReaderModalClosed: _endReaderModal,
+          onQuickHighlight: _quickHighlightSelection,
           onAddNote: _addNoteForSelection,
+          onShareQuoteCard: _shareQuoteCardForSelection,
           edgeScrollController: _scrollController,
           edgeScrollEnabled: !_readerModalOpen,
           child: CustomScrollView(
@@ -556,6 +603,12 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
         simulationExtents != null && simulationExtents.items.length == itemCount
         ? simulationExtents.items
         : null;
+    final isDarkTheme = themeColors.background.computeLuminance() < 0.35;
+    final chapterHasNotes =
+        _notesByChapterParagraph[chapter.index]?.isNotEmpty == true;
+    final epubBlockParagraphs = chapter.hasRichEpubContent && chapterHasNotes
+        ? _epubParagraphIndexByBlock(chapter)
+        : null;
     Widget buildItem(BuildContext context, int index) {
       if (hasStandaloneTitle && index == 0) {
         final titleStyle = TextStyle(
@@ -606,6 +659,11 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
 
       final paragraphIndex = index - titleItemCount;
       if (chapter.hasRichEpubContent) {
+        final mappedParagraph =
+            epubBlockParagraphs != null &&
+                paragraphIndex < epubBlockParagraphs.length
+            ? epubBlockParagraphs[paragraphIndex]
+            : null;
         return _epubLayout.buildBlock(
           settings: _settings,
           block: richBlocks[paragraphIndex],
@@ -613,6 +671,10 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
           width: contentWidth,
           simulationPage: simulationPage,
           itemExtent: itemExtents?[index],
+          noteSpans: mappedParagraph != null
+              ? _noteSpansForParagraph(chapter.index, mappedParagraph)
+              : const <ReaderNoteHighlightSpan>[],
+          noteHighlightRegistry: _noteHighlightRegistry,
         );
       }
       final bodyStyle = TextStyle(
@@ -638,17 +700,28 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
             : null,
         settledStyle: simulationPage ? null : bodyStyle,
       );
+      final noteSpans = chapterHasNotes
+          ? _noteSpansForParagraph(chapter.index, paragraphIndex)
+          : const <ReaderNoteHighlightSpan>[];
+      final Widget decoratedBody = noteSpans.isEmpty
+          ? bodyText
+          : ReaderAnnotatedParagraph(
+              spans: noteSpans,
+              isDarkTheme: isDarkTheme,
+              registry: _noteHighlightRegistry,
+              child: bodyText,
+            );
       return Padding(
         padding: EdgeInsets.only(
           bottom: paragraphIndex == paragraphs.length - 1 ? 0 : paragraphGap,
         ),
         child: simulationPage
-            ? bodyText
+            ? decoratedBody
             : AnimatedDefaultTextStyle(
                 duration: AppMotion.normal,
                 curve: AppMotion.standard,
                 style: bodyStyle,
-                child: bodyText,
+                child: decoratedBody,
               ),
       );
     }
@@ -700,7 +773,9 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
       selectionDragging: _selectionController.dragging,
       onReaderModalOpened: _beginReaderModal,
       onReaderModalClosed: _endReaderModal,
+      onQuickHighlight: _quickHighlightSelection,
       onAddNote: _addNoteForSelection,
+      onShareQuoteCard: _shareQuoteCardForSelection,
       edgeScrollController:
           !simulationPage && identical(controller, _scrollController)
           ? controller

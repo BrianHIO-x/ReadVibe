@@ -57,7 +57,7 @@ Future<PrivateShelfUnlock> unlockPrivateShelf(
       if (outcome == BiometricOutcome.success) {
         return PrivateShelfUnlock.unlocked;
       }
-      notice = _biometricNotice(kind, outcome);
+      notice = biometricNotice(kind, outcome);
     } else {
       notice = '${kind.label}验证暂时不可用，请输入密码';
     }
@@ -94,7 +94,7 @@ Future<PrivateShelfUnlock> unlockPrivateShelf(
         fallbackLabel: '取消',
       );
       if (outcome != BiometricOutcome.success) {
-        final message = _biometricNotice(usable, outcome);
+        final message = biometricNotice(usable, outcome);
         if (message != null && context.mounted) {
           AppToast.error(context, message, colors: colors);
         }
@@ -130,7 +130,7 @@ Future<void> showPrivateShelfSettings(
   ),
 );
 
-String? _biometricNotice(
+String? biometricNotice(
   PrivateShelfBiometric kind,
   BiometricOutcome outcome,
 ) => switch (outcome) {
@@ -143,17 +143,13 @@ String? _biometricNotice(
   BiometricOutcome.error => '${kind.label}验证没有完成，请输入密码',
 };
 
-IconData _biometricIcon(PrivateShelfBiometric kind) => switch (kind) {
+IconData biometricIcon(PrivateShelfBiometric kind) => switch (kind) {
   PrivateShelfBiometric.fingerprint => Icons.fingerprint,
   PrivateShelfBiometric.face => Icons.face_outlined,
 };
 
-/// Six-digit pad used both to create and to verify a PIN.
-///
-/// Creating pops a bool once the PIN is saved. Verifying pops a
-/// [_PinOutcome]. The pad draws its own keys so the system keyboard, and any
-/// input method that learns from typing, never sees the PIN.
-class _PinSheet extends StatefulWidget {
+/// Modal wrapper around [PrivateShelfPinPad].
+class _PinSheet extends StatelessWidget {
   const _PinSheet({
     required this.lock,
     required this.colors,
@@ -173,10 +169,89 @@ class _PinSheet extends StatefulWidget {
   final String? notice;
 
   @override
-  State<_PinSheet> createState() => _PinSheetState();
+  Widget build(BuildContext context) {
+    return AppSheetSurface(
+      colors: colors,
+      // A landscape phone is shorter than the pad, so it scrolls there.
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          AppSpacing.xl,
+          AppSpacing.sm,
+          AppSpacing.sm,
+          AppSpacing.lg + MediaQuery.paddingOf(context).bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Align(
+              alignment: Alignment.centerRight,
+              child: IconButton(
+                tooltip: '关闭',
+                onPressed: () => Navigator.of(context).pop(),
+                icon: Icon(Icons.close_rounded, color: colors.secondary),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: AppSpacing.lg),
+              child: PrivateShelfPinPad(
+                lock: lock,
+                colors: colors,
+                title: title,
+                verifying: verifying,
+                purpose: purpose,
+                biometric: biometric,
+                notice: notice,
+                onUnlocked: () => Navigator.of(context).pop(_PinOutcome.unlocked),
+                onCreated: () => Navigator.of(context).pop(true),
+                onForgot: () => Navigator.of(context).pop(_PinOutcome.forgot),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
-class _PinSheetState extends State<_PinSheet>
+/// Six-digit pad used both to create and to verify a PIN.
+///
+/// The pad draws its own keys so the system keyboard, and any input method
+/// that learns from typing, never sees the PIN.
+class PrivateShelfPinPad extends StatefulWidget {
+  const PrivateShelfPinPad({
+    super.key,
+    required this.lock,
+    required this.colors,
+    required this.title,
+    this.verifying = false,
+    this.purpose,
+    this.biometric,
+    this.notice,
+    this.busy = false,
+    this.onUnlocked,
+    this.onCreated,
+    this.onForgot,
+    this.onBiometricPressed,
+  });
+
+  final PrivateShelfLock lock;
+  final ReaderThemeColors colors;
+  final String title;
+  final bool verifying;
+  final String? purpose;
+  final PrivateShelfBiometric? biometric;
+  final String? notice;
+  final bool busy;
+  final VoidCallback? onUnlocked;
+  final VoidCallback? onCreated;
+  final VoidCallback? onForgot;
+  final Future<void> Function()? onBiometricPressed;
+
+  @override
+  State<PrivateShelfPinPad> createState() => _PrivateShelfPinPadState();
+}
+
+class _PrivateShelfPinPadState extends State<PrivateShelfPinPad>
     with SingleTickerProviderStateMixin {
   late final AnimationController _shake = AnimationController(
     vsync: this,
@@ -196,6 +271,22 @@ class _PinSheetState extends State<_PinSheet>
     _message = widget.notice;
     _error = widget.notice != null;
     if (widget.verifying) unawaited(_restoreLockout());
+  }
+
+  @override
+  void didUpdateWidget(covariant PrivateShelfPinPad oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.notice != oldWidget.notice && widget.notice != null) {
+      _message = widget.notice;
+      _error = true;
+    }
+    if (widget.verifying != oldWidget.verifying) {
+      _digits = '';
+      _firstEntry = null;
+      _message = widget.notice;
+      _error = widget.notice != null;
+      if (widget.verifying) unawaited(_restoreLockout());
+    }
   }
 
   @override
@@ -229,9 +320,10 @@ class _PinSheetState extends State<_PinSheet>
   }
 
   bool get _locked => _lockedUntil != null;
+  bool get _effectiveBusy => _busy || widget.busy;
 
   void _press(int digit) {
-    if (_busy || _locked || _digits.length >= PrivateShelfLock.pinLength) {
+    if (_effectiveBusy || _locked || _digits.length >= PrivateShelfLock.pinLength) {
       return;
     }
     unawaited(HapticFeedback.selectionClick());
@@ -248,7 +340,7 @@ class _PinSheetState extends State<_PinSheet>
   }
 
   void _backspace() {
-    if (_busy || _locked || _digits.isEmpty) return;
+    if (_effectiveBusy || _locked || _digits.isEmpty) return;
     setState(() => _digits = _digits.substring(0, _digits.length - 1));
   }
 
@@ -264,7 +356,9 @@ class _PinSheetState extends State<_PinSheet>
     final check = await widget.lock.verifyPin(pin);
     if (!mounted) return;
     if (check.accepted) {
-      Navigator.of(context).pop(_PinOutcome.unlocked);
+      _digits = '';
+      _busy = false;
+      widget.onUnlocked?.call();
       return;
     }
     final until = check.lockedUntil;
@@ -293,7 +387,12 @@ class _PinSheetState extends State<_PinSheet>
     }
     try {
       await widget.lock.setPin(pin);
-      if (mounted) Navigator.of(context).pop(true);
+      if (mounted) {
+        _digits = '';
+        _firstEntry = null;
+        _busy = false;
+        widget.onCreated?.call();
+      }
     } on Object catch (error) {
       debugPrint('Failed to save private shelf PIN: $error');
       _firstEntry = null;
@@ -314,8 +413,14 @@ class _PinSheetState extends State<_PinSheet>
   }
 
   Future<void> _useBiometric() async {
+    if (_effectiveBusy) return;
+    final custom = widget.onBiometricPressed;
+    if (custom != null) {
+      await custom();
+      return;
+    }
     final kind = widget.biometric;
-    if (kind == null || _busy) return;
+    if (kind == null) return;
     setState(() => _busy = true);
     final outcome = await widget.lock.authenticate(
       kind,
@@ -323,10 +428,11 @@ class _PinSheetState extends State<_PinSheet>
     );
     if (!mounted) return;
     if (outcome == BiometricOutcome.success) {
-      Navigator.of(context).pop(_PinOutcome.unlocked);
+      _busy = false;
+      widget.onUnlocked?.call();
       return;
     }
-    final notice = _biometricNotice(kind, outcome);
+    final notice = biometricNotice(kind, outcome);
     setState(() {
       _busy = false;
       if (notice != null) {
@@ -353,89 +459,60 @@ class _PinSheetState extends State<_PinSheet>
   Widget build(BuildContext context) {
     final colors = widget.colors;
     final danger = AppOverlayTheme.danger(colors);
-    return AppSheetSurface(
-      colors: colors,
-      // A landscape phone is shorter than the pad, so it scrolls there.
-      child: SingleChildScrollView(
-        padding: EdgeInsets.fromLTRB(
-          AppSpacing.xl,
-          AppSpacing.sm,
-          AppSpacing.sm,
-          AppSpacing.lg + MediaQuery.paddingOf(context).bottom,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          Icons.lock_outline_rounded,
+          size: 34,
+          color: colors.accent,
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Align(
-              alignment: Alignment.centerRight,
-              child: IconButton(
-                tooltip: '关闭',
-                onPressed: () => Navigator.of(context).pop(),
-                icon: Icon(Icons.close_rounded, color: colors.secondary),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.only(right: AppSpacing.lg),
-              child: Column(
-                children: [
-                  Icon(
-                    Icons.lock_outline_rounded,
-                    size: 34,
-                    color: colors.accent,
-                  ),
-                  const SizedBox(height: AppSpacing.md),
-                  Text(
-                    widget.title,
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: colors.text,
-                    ),
-                  ),
-                  const SizedBox(height: AppSpacing.sm),
-                  SizedBox(
-                    height: 40,
-                    child: Text(
-                      _statusText,
-                      textAlign: TextAlign.center,
-                      maxLines: 2,
-                      style: TextStyle(
-                        fontSize: 13,
-                        height: 1.4,
-                        color: _error || _locked ? danger : colors.secondary,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: AppSpacing.md),
-                  AnimatedBuilder(
-                    animation: _shake,
-                    builder: (context, child) {
-                      final t = _shake.value;
-                      return Transform.translate(
-                        offset: Offset(
-                          math.sin(t * math.pi * 6) * 10 * (1 - t),
-                          0,
-                        ),
-                        child: child,
-                      );
-                    },
-                    child: _buildDots(colors),
-                  ),
-                  const SizedBox(height: AppSpacing.xl),
-                  _buildKeypad(colors),
-                  if (widget.verifying)
-                    TextButton(
-                      onPressed: _busy
-                          ? null
-                          : () => Navigator.of(context).pop(_PinOutcome.forgot),
-                      child: const Text('忘记密码'),
-                    ),
-                ],
-              ),
-            ),
-          ],
+        const SizedBox(height: AppSpacing.md),
+        Text(
+          widget.title,
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+            color: colors.text,
+          ),
         ),
-      ),
+        const SizedBox(height: AppSpacing.sm),
+        SizedBox(
+          height: 40,
+          child: Text(
+            _statusText,
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.4,
+              color: _error || _locked ? danger : colors.secondary,
+            ),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.md),
+        AnimatedBuilder(
+          animation: _shake,
+          builder: (context, child) {
+            final t = _shake.value;
+            return Transform.translate(
+              offset: Offset(
+                math.sin(t * math.pi * 6) * 10 * (1 - t),
+                0,
+              ),
+              child: child,
+            );
+          },
+          child: _buildDots(colors),
+        ),
+        const SizedBox(height: AppSpacing.xl),
+        _buildKeypad(colors),
+        if (widget.verifying && widget.onForgot != null)
+          TextButton(
+            onPressed: _effectiveBusy ? null : widget.onForgot,
+            child: const Text('忘记密码'),
+          ),
+      ],
     );
   }
 
@@ -468,7 +545,7 @@ class _PinSheetState extends State<_PinSheet>
   }
 
   Widget _buildKeypad(ReaderThemeColors colors) {
-    final enabled = !_busy && !_locked;
+    final enabled = !_effectiveBusy && !_locked;
     final biometric = widget.biometric;
     Widget key({required Widget child, String? label, VoidCallback? onTap}) {
       return Semantics(
@@ -524,9 +601,9 @@ class _PinSheetState extends State<_PinSheet>
               ? const SizedBox(width: 76, height: 60)
               : key(
                   label: '使用${biometric.label}验证',
-                  onTap: _busy ? null : _useBiometric,
+                  onTap: _effectiveBusy ? null : _useBiometric,
                   child: Icon(
-                    _biometricIcon(biometric),
+                    biometricIcon(biometric),
                     size: 28,
                     color: colors.accent,
                   ),
@@ -635,6 +712,11 @@ class _PrivateShelfSettingsSheetState
     await _reload();
   }
 
+  Future<void> _chooseLockDelay(PrivateShelfLockDelay delay) async {
+    await widget.lock.saveLockDelay(delay);
+    await _reload();
+  }
+
   Future<void> _changePin() async {
     final saved = await showPrivateShelfPinSetup(
       context,
@@ -704,7 +786,7 @@ class _PrivateShelfSettingsSheetState
                     children: [
                       for (final kind in PrivateShelfBiometric.values)
                         SwitchListTile.adaptive(
-                          secondary: Icon(_biometricIcon(kind)),
+                          secondary: Icon(biometricIcon(kind)),
                           title: Text('${kind.label}验证'),
                           subtitle: Text(_hint(kind)),
                           value: enabled.contains(kind),
@@ -737,7 +819,7 @@ class _PrivateShelfSettingsSheetState
                                       in PrivateShelfBiometric.values)
                                     ChoiceChip(
                                       avatar: Icon(
-                                        _biometricIcon(kind),
+                                        biometricIcon(kind),
                                         size: 18,
                                       ),
                                       label: Text(kind.label),
@@ -749,6 +831,47 @@ class _PrivateShelfSettingsSheetState
                             ],
                           ),
                         ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '后台自动锁定',
+                              style: TextStyle(
+                                color: colors.text,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: AppSpacing.xs),
+                            Text(
+                              '离开应用再返回时停留在原隐私页面，重新验证即可继续阅读。',
+                              style: TextStyle(
+                                color: colors.secondary,
+                                fontSize: 12,
+                                height: 1.4,
+                              ),
+                            ),
+                            const SizedBox(height: AppSpacing.sm),
+                            Wrap(
+                              spacing: AppSpacing.sm,
+                              runSpacing: AppSpacing.xs,
+                              children: [
+                                for (final delay
+                                    in PrivateShelfLockDelay.values)
+                                  ChoiceChip(
+                                    label: Text(delay.label),
+                                    selected: _config.lockDelay == delay,
+                                    onSelected: _busy
+                                        ? null
+                                        : (_) => _chooseLockDelay(delay),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
                       ListTile(
                         leading: const Icon(Icons.password_rounded),
                         title: const Text('修改密码'),

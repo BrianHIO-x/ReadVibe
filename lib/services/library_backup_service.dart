@@ -10,7 +10,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/book.dart';
 import '../models/reader_bookmark.dart';
+import '../models/reader_note.dart';
 import '../models/reader_settings.dart';
+import 'archive_safety.dart';
 import 'book_export_service.dart';
 import 'book_id.dart';
 import 'storage/chapter_disk_store.dart';
@@ -18,7 +20,7 @@ import 'storage_service.dart';
 import 'update_service.dart';
 
 const readvibeBackupFormat = 'readvibe-backup';
-const readvibeBackupSchemaVersion = 1;
+const readvibeBackupSchemaVersion = 2;
 const _readvibeRootToken = '{{READVIBE_ROOT}}';
 
 const _progressPrefix = 'readvibe_progress_';
@@ -28,6 +30,7 @@ const _pdfNotesPrefix = 'readvibe_pdf_notes_';
 const _pdfDisplayThemePrefix = 'readvibe_pdf_display_theme_';
 const _tocCollapsedPrefix = 'readvibe_toc_collapsed_';
 const _bookmarksPrefix = 'readvibe_bookmarks_';
+const _notesPrefix = 'readvibe_notes_';
 
 class BackupOptions {
   const BackupOptions({
@@ -708,6 +711,29 @@ class LibraryBackupService {
         );
       }
     }
+
+    final rawNotes = state['notes'];
+    if (rawNotes is List) {
+      final parsed = <ReaderNote>[
+        for (final entry in rawNotes)
+          ?ReaderNote.fromJson(entry, fallbackBookId: bookId),
+      ];
+      if (parsed.isNotEmpty) {
+        final existingNotes = isExisting
+            ? await _storage.getNotes(bookId)
+            : const <ReaderNote>[];
+        final byId = <String, ReaderNote>{
+          for (final note in existingNotes) note.id: note,
+        };
+        for (final incoming in parsed) {
+          final current = byId[incoming.id];
+          if (current == null || incoming.updatedAt.isAfter(current.updatedAt)) {
+            byId[incoming.id] = incoming;
+          }
+        }
+        await _storage.saveNotes(bookId, byId.values.toList());
+      }
+    }
   }
 }
 
@@ -731,6 +757,7 @@ Map<String, dynamic> _collectBookState(
   copyJson('$_progressPrefix$bookId', 'progress');
   copyJson('$_pdfProgressPrefix$bookId', 'pdfProgress');
   copyJson('$_bookmarksPrefix$bookId', 'bookmarks');
+  copyJson('$_notesPrefix$bookId', 'notes');
   copyJson('$_pdfBookmarksPrefix$bookId', 'pdfBookmarks');
   copyJson('$_pdfNotesPrefix$bookId', 'pdfNotes');
   copyJson('$_tocCollapsedPrefix$bookId', 'tocCollapsed');
@@ -814,6 +841,18 @@ BackupPreview _inspectBackupWorker(String zipPath) {
           }
         }
       }
+      final notes = rawState['notes'];
+      if (notes is List) {
+        for (final entry in notes) {
+          if (entry is! Map) continue;
+          final quote = entry['quote'];
+          final content = entry['content'];
+          if ((quote is String && quote.trim().isNotEmpty) ||
+              (content is String && content.trim().isNotEmpty)) {
+            noteCount++;
+          }
+        }
+      }
       final pdfBookmarks = rawState['pdfBookmarks'];
       if (pdfBookmarks is List) {
         bookmarkCount += pdfBookmarks.length;
@@ -855,10 +894,15 @@ String _readAndValidateManifestWorker(String zipPath) {
   final input = InputFileStream(zipPath);
   try {
     final archive = ZipDecoder().decodeStream(input);
+    final budget = ArchiveExtractionBudget();
     ArchiveFile? manifestEntry;
     for (final entry in archive) {
-      _assertSafeArchiveEntry(entry);
+      assertSafeArchiveEntry(entry);
+      budget.recordHeader(entry);
       if (!entry.isDirectory && entry.name == 'backup.json') {
+        if (entry.size > kMaxManifestBytes) {
+          throw const FormatException('备份清单体积超出安全上限');
+        }
         manifestEntry = entry;
       }
     }
@@ -889,8 +933,10 @@ void _extractPayloadFilesWorker({
 
   try {
     final archive = ZipDecoder().decodeStream(input);
+    final budget = ArchiveExtractionBudget();
     for (final entry in archive) {
-      _assertSafeArchiveEntry(entry);
+      assertSafeArchiveEntry(entry);
+      budget.recordHeader(entry);
       if (entry.isDirectory) continue;
       final normalized = _normalizeZipEntryName(entry.name);
       if (!normalized.startsWith('payload/')) continue;
@@ -1011,28 +1057,6 @@ Map<String, dynamic> _parseValidatedBackupManifest(String raw) {
     throw const FormatException('备份文件缺少书籍列表');
   }
   return map;
-}
-
-void _assertSafeArchiveEntry(ArchiveFile entry) {
-  if (entry.isSymbolicLink) {
-    throw const FormatException('备份包含不受支持的符号链接条目');
-  }
-  final name = entry.name;
-  if (name.isEmpty ||
-      name.startsWith('/') ||
-      name.startsWith('\\') ||
-      name.contains('\\') ||
-      RegExp(r'^[A-Za-z]:').hasMatch(name)) {
-    throw const FormatException('备份包含不安全的文件路径');
-  }
-  final cleaned = entry.isDirectory && name.endsWith('/')
-      ? name.substring(0, name.length - 1)
-      : name;
-  if (cleaned.isEmpty) return;
-  final segments = cleaned.split('/');
-  if (segments.any((s) => s.isEmpty || s == '.' || s == '..')) {
-    throw const FormatException('备份包含非法路径片段');
-  }
 }
 
 String _normalizeZipEntryName(String name) =>

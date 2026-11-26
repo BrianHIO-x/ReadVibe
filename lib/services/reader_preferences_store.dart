@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/book.dart';
 import '../models/reader_bookmark.dart';
+import '../models/reader_note.dart';
 import '../models/reader_settings.dart';
 
 const _settingsKey = 'readvibe_settings';
@@ -15,6 +16,8 @@ const _pdfNotesPrefix = 'readvibe_pdf_notes_';
 const _pdfDisplayThemePrefix = 'readvibe_pdf_display_theme_';
 const _tocCollapsedPrefix = 'readvibe_toc_collapsed_';
 const _bookmarksPrefix = 'readvibe_bookmarks_';
+const _notesPrefix = 'readvibe_notes_';
+const _notesMigratedPrefix = 'readvibe_notes_migrated_';
 const _shelfGroupsKey = 'readvibe_shelf_groups';
 const _privateShelfGroupsKey = 'readvibe_private_shelf_groups';
 
@@ -277,6 +280,165 @@ class ReaderPreferencesStore {
     );
   }
 
+  Future<List<ReaderNote>> getNotes(
+    String bookId, {
+    bool isPdf = false,
+    int? pdfPageCount,
+  }) async {
+    if (bookId.isEmpty || _isBookDeleted(bookId)) return const <ReaderNote>[];
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('$_notesPrefix$bookId');
+    var notes = <ReaderNote>[];
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is List) {
+          final seenIds = <String>{};
+          for (final entry in decoded.take(maxReaderNotesPerBook)) {
+            final parsed = ReaderNote.fromJson(entry, fallbackBookId: bookId);
+            if (parsed != null && seenIds.add(parsed.id)) {
+              notes.add(parsed);
+            }
+          }
+        }
+      } on Object {
+        // Fall through to migration check.
+      }
+    }
+
+    if (prefs.getBool('$_notesMigratedPrefix$bookId') != true) {
+      final migrated = await _migrateLegacyNotesIfNeeded(
+        prefs,
+        bookId,
+        existing: notes,
+        isPdf: isPdf,
+        pdfPageCount: pdfPageCount,
+      );
+      notes = migrated;
+    }
+
+    return sortedReaderNotes(notes);
+  }
+
+  Future<List<ReaderNote>> _migrateLegacyNotesIfNeeded(
+    SharedPreferences prefs,
+    String bookId, {
+    required List<ReaderNote> existing,
+    required bool isPdf,
+    int? pdfPageCount,
+  }) async {
+    final seenIds = <String>{for (final n in existing) n.id};
+    final combined = List<ReaderNote>.of(existing);
+    var changed = false;
+
+    if (!isPdf) {
+      final legacyMarks = await getBookmarks(bookId);
+      final remainingMarks = <ReaderBookmark>[];
+      for (final mark in legacyMarks) {
+        if (!mark.hasNote) {
+          remainingMarks.add(mark);
+          continue;
+        }
+        final legacyId = 'legacy_${mark.id}';
+        if (seenIds.add(legacyId)) {
+          combined.add(
+            ReaderNote(
+              id: legacyId,
+              bookId: bookId,
+              chapterIndex: mark.chapterIndex,
+              chapterTitle: mark.chapterTitle,
+              paragraphIndex: mark.paragraphIndex,
+              startOffset: 0,
+              endOffset: 0,
+              quote: clampNoteText(mark.excerpt, maxReaderNoteQuote),
+              content: clampNoteText(mark.note, maxReaderNoteContent),
+              color: NoteColor.amber,
+              style: NoteStyle.underline,
+              category: NoteCategory.thought,
+              chapterProgress: mark.chapterProgress,
+              isPdf: false,
+              createdAt: mark.createdAt,
+              updatedAt: mark.createdAt,
+            ),
+          );
+          changed = true;
+        }
+      }
+      if (remainingMarks.length != legacyMarks.length) {
+        await saveBookmarks(bookId, remainingMarks);
+      }
+    }
+
+    final rawPdfNotes = prefs.getString('$_pdfNotesPrefix$bookId');
+    if (rawPdfNotes != null && rawPdfNotes.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawPdfNotes);
+        if (decoded is Map) {
+          final now = DateTime.now();
+          for (final entry in decoded.entries.take(2000)) {
+            final page = int.tryParse(entry.key.toString());
+            final value = entry.value;
+            if (page == null || page < 0 || value is! String) continue;
+            if (pdfPageCount != null && pdfPageCount > 0 && page >= pdfPageCount) {
+              continue;
+            }
+            final normalized = value.trim();
+            if (normalized.isEmpty) continue;
+            final legacyId = 'legacy_pdf_${bookId}_$page';
+            if (seenIds.add(legacyId)) {
+              combined.add(
+                ReaderNote(
+                  id: legacyId,
+                  bookId: bookId,
+                  chapterIndex: page,
+                  chapterTitle: '第 ${page + 1} 页',
+                  paragraphIndex: -1,
+                  quote: '',
+                  content: clampNoteText(normalized, maxReaderNoteContent),
+                  color: NoteColor.amber,
+                  style: NoteStyle.highlight,
+                  category: NoteCategory.thought,
+                  chapterProgress: pdfPageCount != null && pdfPageCount > 1
+                      ? (page / (pdfPageCount - 1)).clamp(0.0, 1.0)
+                      : 0.0,
+                  isPdf: true,
+                  createdAt: now,
+                  updatedAt: now,
+                ),
+              );
+              changed = true;
+            }
+          }
+        }
+      } on Object {
+        // Ignore malformed legacy PDF notes map.
+      }
+    }
+
+    if (changed) {
+      await saveNotes(bookId, combined);
+    }
+    await prefs.setBool('$_notesMigratedPrefix$bookId', true);
+    return combined;
+  }
+
+  Future<void> saveNotes(String bookId, List<ReaderNote> notes) async {
+    if (bookId.isEmpty || _isBookDeleted(bookId)) return;
+    final capped = notes.length <= maxReaderNotesPerBook
+        ? notes
+        : (notes.toList()..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)))
+              .take(maxReaderNotesPerBook)
+              .toList();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('$_notesMigratedPrefix$bookId', true);
+    await _setLatestString(
+      '$_notesPrefix$bookId',
+      jsonEncode([
+        for (final note in sortedReaderNotes(capped)) note.toJson(),
+      ]),
+    );
+  }
+
   Future<Set<String>> getCollapsedTocGroups(String bookId) async {
     if (bookId.isEmpty) return <String>{};
     final raw = (await SharedPreferences.getInstance()).getString(
@@ -385,6 +547,8 @@ class ReaderPreferencesStore {
       '$_pdfDisplayThemePrefix$bookId',
       '$_tocCollapsedPrefix$bookId',
       '$_bookmarksPrefix$bookId',
+      '$_notesPrefix$bookId',
+      '$_notesMigratedPrefix$bookId',
     ];
     final versions = <String, int>{
       for (final key in keys) key: _invalidateWrite(key),

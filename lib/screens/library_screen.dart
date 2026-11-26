@@ -13,6 +13,7 @@ import '../controllers/library_update_controller.dart';
 import '../controllers/private_shelf_controller.dart';
 import '../models/book.dart';
 import '../models/library_filter.dart';
+import '../models/reader_note.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/android_book_picker.dart';
@@ -20,10 +21,12 @@ import '../services/book_export_service.dart';
 import '../services/book_import_coordinator.dart';
 import '../services/book_import_format.dart';
 import '../services/chinese_text.dart';
+import '../services/data_safety_vault_service.dart';
 import '../services/font_service.dart';
 import '../services/incoming_file_service.dart';
 import '../services/library_backup_service.dart';
 import '../services/private_shelf_lock.dart';
+import '../services/reading_session_store.dart';
 import '../services/storage_service.dart';
 import '../services/update_service.dart';
 import '../theme/app_motion.dart';
@@ -34,14 +37,16 @@ import '../widgets/app_dialog.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/book_card.dart';
+import '../widgets/data_safety_sheet.dart';
 import '../widgets/global_settings_sheet.dart';
-import '../widgets/library_backup_sheet.dart';
 import '../widgets/library_batch_bar.dart';
 import '../widgets/library_group_bar.dart';
 import '../widgets/library_reorder_grid.dart';
 import '../widgets/library_search_controls.dart';
 import '../widgets/side_drawer.dart';
+import 'library_notes_screen.dart';
 import 'pdf_reader_screen.dart';
+import 'reader/reader_pagination_support.dart';
 import 'reader_screen.dart';
 
 /// Library / bookshelf screen
@@ -84,9 +89,12 @@ class _LibraryScreenState extends State<LibraryScreen>
   late final BookImportCoordinator _bookImporter;
   late final BookExporter _bookExporter;
   late final LibraryBackupService _backupService;
+  late final DataSafetyVaultService _vaultService;
   late final LibraryMaintenanceController _maintenance;
   late final LibraryUpdateController _updateController;
   late final PrivateShelfController _privateShelf;
+  final _sessionStore = ReadingSessionStore();
+  late final Future<void> _privateConfigReady;
   final _selection = LibrarySelectionController();
 
   List<Book> _books = [];
@@ -103,6 +111,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   int _importBatchTotal = 0;
   bool _exporting = false;
   bool _openingBook = false;
+  bool _restoringSession = false;
+  bool _sessionRestoreAttempted = false;
   bool _settingsOpen = false;
   int _loadSerial = 0;
 
@@ -142,6 +152,10 @@ class _LibraryScreenState extends State<LibraryScreen>
       _storage is StorageService ? _storage : StorageService(),
       readAppVersion: checker.currentVersion,
     );
+    _vaultService = DataSafetyVaultService(
+      _storage is StorageService ? _storage : StorageService(),
+      readAppVersion: checker.currentVersion,
+    );
     _updateController = LibraryUpdateController(
       updateChecker: checker,
       contextProvider: () => context,
@@ -161,6 +175,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     _privateShelf = PrivateShelfController(
       lock: widget.privateShelfLock ?? PrivateShelfLock(),
       storage: _storage,
+      sessionStore: _sessionStore,
       contextProvider: () => context,
       isMounted: () => mounted,
       isOpeningBook: () => _openingBook,
@@ -173,6 +188,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       onReloadLibrary: _loadData,
       onMessage: _showMessage,
       onError: _showError,
+      onRestorePrivateBook: _restorePrivateBookById,
       onAppResume: _updateController.syncAutomaticUpdateCheck,
     );
     _maintenance = LibraryMaintenanceController(
@@ -206,7 +222,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     _gridScrollController.addListener(_handleGridScroll);
     _selection.addListener(_handleSelectionChanged);
     unawaited(_updateController.loadApplicationVersion());
-    unawaited(_privateShelf.loadConfig());
+    _privateConfigReady = _privateShelf.loadConfig();
     _loadData();
     unawaited(
       IncomingFileService.start(_importIncomingBook, onError: _showError),
@@ -263,6 +279,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   void dispose() {
     _loadSerial++;
+    _vaultService.dispose();
     _updateController.dispose();
     _privateShelf.dispose();
     _maintenance.dispose();
@@ -367,10 +384,11 @@ class _LibraryScreenState extends State<LibraryScreen>
     final serial = ++_loadSerial;
     final private = _privateMode;
     try {
-      final results = await Future.wait<Object>([
+      final results = await Future.wait<Object?>([
         _storage.getBookSummaries(),
         _storage.getSettings(),
         _storage.getShelfGroups(private: private),
+        _privateConfigReady,
       ]);
       final books = results[0] as List<Book>;
       final storedSettings = results[1] as ReaderSettings;
@@ -408,12 +426,17 @@ class _LibraryScreenState extends State<LibraryScreen>
           _settings = settings;
           _loading = false;
         });
+        _privateShelf.syncThemeColors(_feedbackColors);
         _selection.retainValid(<String>{
           for (final book in _shelfBooks) book.id,
         });
         _syncShelfAnimations();
         _updateController.syncAutomaticUpdateCheck();
         _maintenance.schedule();
+        if (!_sessionRestoreAttempted) {
+          _sessionRestoreAttempted = true;
+          unawaited(_attemptColdStartSessionRestore());
+        }
       }
     } catch (e) {
       debugPrint('Failed to load library: $e');
@@ -421,6 +444,75 @@ class _LibraryScreenState extends State<LibraryScreen>
         setState(() => _loading = false);
         _showError('书架加载失败，请重新打开应用后重试');
       }
+    }
+  }
+
+  Future<void> _attemptColdStartSessionRestore() async {
+    if (!mounted || _openingBook || _importing || _exporting) return;
+    if (await IncomingFileService.hasPendingIncoming()) return;
+    final session = await _sessionStore.load();
+    if (!mounted || session == null || _openingBook || _importing) return;
+
+    if (session.isPrivate) {
+      if (!_privateShelf.configured) {
+        await _sessionStore.clearPrivateSession();
+        return;
+      }
+      String? targetBookId;
+      if (session.surface == ReadingSessionSurface.privateReader &&
+          _settings.autoResumeLastRead &&
+          session.bookId != null) {
+        final match = _findRestorableBook(session.bookId!, private: true);
+        if (match != null) {
+          targetBookId = match.id;
+        }
+      }
+      _privateShelf.requestColdStartRestore(bookId: targetBookId);
+      return;
+    }
+
+    if (session.surface == ReadingSessionSurface.reader &&
+        _settings.autoResumeLastRead &&
+        session.bookId != null) {
+      final match = _findRestorableBook(session.bookId!, private: false);
+      if (match == null) {
+        await _sessionStore.markLibrary();
+        return;
+      }
+      await _restoreBookLaunch(match);
+    }
+  }
+
+  Book? _findRestorableBook(String bookId, {required bool private}) {
+    for (final book in _books) {
+      if (book.id == bookId && book.isPrivate == private) {
+        final availability =
+            _availabilityMap[book.id] ?? BookAvailability.available;
+        if (!availability.blocksOpening) return book;
+        return null;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _restorePrivateBookById(String bookId) async {
+    final match = _findRestorableBook(bookId, private: true);
+    if (match == null) {
+      await _sessionStore.markPrivateShelf();
+      return;
+    }
+    await _restoreBookLaunch(match);
+  }
+
+  Future<void> _restoreBookLaunch(Book book) async {
+    if (!mounted || _openingBook || _importing || _exporting) return;
+    _openingBook = true;
+    setState(() => _restoringSession = true);
+    try {
+      await _openBook(book, restored: true);
+    } finally {
+      _openingBook = false;
+      if (mounted) setState(() => _restoringSession = false);
     }
   }
 
@@ -453,13 +545,13 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   void _persistSettings(ReaderSettings settings) {
     unawaited(
-      _storage.saveSettings(settings).catchError((
-        Object error,
-        StackTrace stack,
-      ) {
-        debugPrint('Failed to save reader settings: $error');
-        debugPrintStack(stackTrace: stack);
-      }),
+      _storage
+          .saveSettings(settings)
+          .then((_) => _vaultService.scheduleAutoSync())
+          .catchError((Object error, StackTrace stack) {
+            debugPrint('Failed to save reader settings: $error');
+            debugPrintStack(stackTrace: stack);
+          }),
     );
   }
 
@@ -623,6 +715,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         onStalled: () => active = false,
       );
       if (importedBook == null) return;
+      _vaultService.scheduleAutoSync();
       if (_importBatchTotal <= 1) {
         _showMessage(
           private
@@ -919,6 +1012,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   Future<void> _persistBookOrder() async {
     try {
       await _storage.saveBookOrder(_books.map((book) => book.id).toList());
+      _vaultService.scheduleAutoSync();
     } on Object catch (error, stackTrace) {
       debugPrint('Failed to save shelf order: $error');
       debugPrintStack(stackTrace: stackTrace);
@@ -964,6 +1058,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                     setSheetState(() => sheetSettings = picked);
                     if (mounted) setState(() => _settings = picked);
                     await _storage.saveSettings(picked);
+                    _vaultService.scheduleAutoSync();
                     _showMessage('字体已导入并应用');
                   } catch (e) {
                     _showError(
@@ -994,6 +1089,10 @@ class _LibraryScreenState extends State<LibraryScreen>
                   Navigator.of(context).pop();
                   unawaited(_openBackupSheet());
                 },
+                onOpenNotes: () {
+                  Navigator.of(context).pop();
+                  unawaited(_openLibraryNotes());
+                },
               ),
             );
           },
@@ -1003,9 +1102,48 @@ class _LibraryScreenState extends State<LibraryScreen>
     unawaited(dialog.whenComplete(() => _settingsOpen = false));
   }
 
+  Future<void> _openLibraryNotes() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => LibraryNotesScreen(
+          storage: _storage,
+          books: _books,
+          colors: _feedbackColors,
+          privateMode: _privateMode,
+          runWithSystemDialog: _privateShelf.runWithSystemDialog,
+          onOpenNote: (book, note) => _openBookAtNote(book, note),
+        ),
+      ),
+    );
+    if (mounted) await _loadData();
+    _vaultService.scheduleAutoSync();
+  }
+
+  Future<void> _openBookAtNote(Book book, ReaderNote note) async {
+    if (_openingBook || _exporting) return;
+    _openingBook = true;
+    try {
+      await _openBook(
+        book,
+        restored: true,
+        initialAnchor: note.isPdf
+            ? null
+            : ReadingTextAnchor(
+                chapterIndex: math.max(0, note.chapterIndex),
+                paragraphIndex: math.max(0, note.paragraphIndex),
+                characterOffset: math.max(0, note.startOffset),
+              ),
+        initialPage: note.isPdf ? note.chapterIndex : null,
+      );
+    } finally {
+      _openingBook = false;
+    }
+  }
+
   Future<void> _openBackupSheet() {
-    return showLibraryBackupSheet(
+    return showDataSafetySheet(
       context,
+      vaultService: _vaultService,
       backupService: _backupService,
       privateShelf: _privateShelf,
       colors: _feedbackColors,
@@ -1019,7 +1157,10 @@ class _LibraryScreenState extends State<LibraryScreen>
       storage: _storage,
       colors: _feedbackColors,
       private: _privateMode,
-      onChanged: _loadData,
+      onChanged: () async {
+        await _loadData();
+        _vaultService.scheduleAutoSync();
+      },
     );
   }
 
@@ -1042,6 +1183,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       onApplied: _loadData,
     );
     if (saved && mounted) {
+      _vaultService.scheduleAutoSync();
       _showMessage(targets.length > 1 ? '已更新选中书籍的分组' : '分组设置已保存');
     }
   }
@@ -1057,13 +1199,19 @@ class _LibraryScreenState extends State<LibraryScreen>
       return;
     }
     try {
+      final movedIds = books.map((book) => book.id).toList();
       await _storage.setBooksPrivate(
-        books.map((book) => book.id),
+        movedIds,
         private: private,
+      );
+      await _sessionStore.clearIfBook(
+        movedIds,
+        stayInPrivateShelf: _privateMode,
       );
       if (!mounted) return;
       _selection.exit();
       await _loadData();
+      _vaultService.scheduleAutoSync();
       if (!mounted) return;
       if (books.length == 1) {
         final book = books.first;
@@ -1111,9 +1259,15 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
     if (confirmed != true || !mounted) return;
     try {
-      await _storage.deleteBooks(books.map((book) => book.id));
+      final deletedIds = books.map((book) => book.id).toList();
+      await _storage.deleteBooks(deletedIds);
+      await _sessionStore.clearIfBook(
+        deletedIds,
+        stayInPrivateShelf: _privateMode,
+      );
       _selection.exit();
       await _loadData();
+      _vaultService.scheduleAutoSync();
       if (mounted && books.length > 1) {
         _showMessage('已删除 ${books.length} 本书');
       }
@@ -1342,6 +1496,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           ),
         );
       }
+      _vaultService.scheduleAutoSync();
       _showMessage('书籍信息已修改');
     } on Object catch (error) {
       _showError(error is FormatException ? error.message : '修改名称失败，请稍后重试');
@@ -1355,10 +1510,22 @@ class _LibraryScreenState extends State<LibraryScreen>
     return renderObject.localToGlobal(Offset.zero) & renderObject.size;
   }
 
+  void _clearRestoringBannerAfterPush() {
+    if (!_restoringSession) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _restoringSession) {
+        setState(() => _restoringSession = false);
+      }
+    });
+  }
+
   Future<void> _openBook(
     Book book, {
     Rect? sourceRect,
     ui.Image? coverImage,
+    bool restored = false,
+    ReadingTextAnchor? initialAnchor,
+    int? initialPage,
   }) async {
     var readableBook = book;
     try {
@@ -1366,18 +1533,47 @@ class _LibraryScreenState extends State<LibraryScreen>
         final loaded = await _storage.getBook(readableBook.id);
         if (loaded == null) {
           _showError('这本书的正文数据为空或已损坏，请删除后重新导入');
+          await _sessionStore.clearIfBook([
+            book.id,
+          ], stayInPrivateShelf: _privateMode);
           return;
         }
         readableBook = loaded;
       }
       if (!mounted) return;
 
+      await _sessionStore.markReading(readableBook);
+      if (!mounted) return;
+
       if (readableBook.isPdf) {
-        await Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => PdfReaderScreen(book: readableBook),
-          ),
+        final pushFuture = Navigator.of(context).push(
+          restored
+              ? PageRouteBuilder<void>(
+                  transitionDuration: const Duration(milliseconds: 120),
+                  reverseTransitionDuration: AppMotion.normal,
+                  pageBuilder: (_, _, _) => PdfReaderScreen(
+                    book: readableBook,
+                    initialPage: initialPage,
+                  ),
+                  transitionsBuilder: (_, animation, _, child) =>
+                      FadeTransition(opacity: animation, child: child),
+                )
+              : MaterialPageRoute<void>(
+                  builder: (_) => PdfReaderScreen(
+                    book: readableBook,
+                    initialPage: initialPage,
+                  ),
+                ),
         );
+        _clearRestoringBannerAfterPush();
+        await pushFuture;
+        if (mounted) {
+          unawaited(
+            _privateMode
+                ? _sessionStore.markPrivateShelf()
+                : _sessionStore.markLibrary(),
+          );
+        }
         return;
       }
       final transitionColors = ValueNotifier<ReaderThemeColors>(
@@ -1395,6 +1591,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           settings.theme,
           systemBrightness: MediaQuery.platformBrightnessOf(context),
         );
+        _privateShelf.syncThemeColors(colors);
         if (!identical(transitionColors.value, colors)) {
           transitionColors.value = colors;
         }
@@ -1406,18 +1603,47 @@ class _LibraryScreenState extends State<LibraryScreen>
       }
 
       try {
-        final readerRoute = buildFadeScaleRoute<void>(
-          (_) => ReaderScreen(
-            book: readableBook,
+        if (restored) {
+          final quickRoute = PageRouteBuilder<void>(
+            transitionDuration: const Duration(milliseconds: 140),
+            reverseTransitionDuration: AppMotion.normal,
+            pageBuilder: (_, _, _) => ReaderScreen(
+              book: readableBook,
+              transitionColors: transitionColors,
+              onSettingsChanged: syncReaderSettings,
+              initialAnchor: initialAnchor,
+            ),
+            transitionsBuilder: (_, animation, _, child) =>
+                FadeTransition(opacity: animation, child: child),
+          );
+          final pushFuture = Navigator.of(context).push(quickRoute);
+          _clearRestoringBannerAfterPush();
+          await pushFuture;
+          await quickRoute.completed;
+        } else {
+          final readerRoute = buildFadeScaleRoute<void>(
+            (_) => ReaderScreen(
+              book: readableBook,
+              transitionColors: transitionColors,
+              onSettingsChanged: syncReaderSettings,
+              initialAnchor: initialAnchor,
+            ),
+            sourceRect: sourceRect,
+            coverImage: coverImage,
             transitionColors: transitionColors,
-            onSettingsChanged: syncReaderSettings,
-          ),
-          sourceRect: sourceRect,
-          coverImage: coverImage,
-          transitionColors: transitionColors,
-        );
-        await Navigator.of(context).push(readerRoute);
-        await readerRoute.completed;
+          );
+          final pushFuture = Navigator.of(context).push(readerRoute);
+          _clearRestoringBannerAfterPush();
+          await pushFuture;
+          await readerRoute.completed;
+        }
+        if (mounted) {
+          unawaited(
+            _privateMode
+                ? _sessionStore.markPrivateShelf()
+                : _sessionStore.markLibrary(),
+          );
+        }
       } catch (error, stackTrace) {
         debugPrint('Book opening animation failed: $error');
         debugPrintStack(stackTrace: stackTrace);
@@ -1427,10 +1653,20 @@ class _LibraryScreenState extends State<LibraryScreen>
             book: readableBook,
             transitionColors: transitionColors,
             onSettingsChanged: syncReaderSettings,
+            initialAnchor: initialAnchor,
           ),
         );
-        await Navigator.of(context).push(fallbackRoute);
+        final pushFuture = Navigator.of(context).push(fallbackRoute);
+        _clearRestoringBannerAfterPush();
+        await pushFuture;
         await fallbackRoute.completed;
+        if (mounted) {
+          unawaited(
+            _privateMode
+                ? _sessionStore.markPrivateShelf()
+                : _sessionStore.markLibrary(),
+          );
+        }
       } finally {
         transitionColors.dispose();
       }
@@ -1441,6 +1677,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     } finally {
       coverImage?.dispose();
       if (mounted) await _loadData();
+      _vaultService.scheduleAutoSync();
     }
   }
 
@@ -1855,7 +2092,10 @@ class _LibraryScreenState extends State<LibraryScreen>
                         const SizedBox(width: AppSpacing.xs),
                         Expanded(
                           child: Text(
-                            '离开应用以后，隐私书架会自动锁上',
+                            _privateShelf.config.lockDelay ==
+                                    PrivateShelfLockDelay.immediate
+                                ? '离开应用后自动锁定，验证可回到当前页面'
+                                : '离开应用 ${_privateShelf.config.lockDelay.label} 自动锁定',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -2031,6 +2271,12 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Widget _buildShelfContent(ReaderThemeColors colors) {
+    if (_restoringSession) {
+      return ColoredBox(
+        key: const ValueKey('restoring-session'),
+        color: colors.background,
+      );
+    }
     if (_loading) {
       return const Center(
         key: ValueKey('loading'),

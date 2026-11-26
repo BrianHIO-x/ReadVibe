@@ -16,6 +16,17 @@ enum PrivateShelfBiometric {
   final String label;
 }
 
+enum PrivateShelfLockDelay {
+  immediate('立即锁定', Duration.zero),
+  oneMinute('1 分钟后', Duration(minutes: 1)),
+  fiveMinutes('5 分钟后', Duration(minutes: 5));
+
+  const PrivateShelfLockDelay(this.label, this.duration);
+
+  final String label;
+  final Duration duration;
+}
+
 /// What the private shelf is protected with. The PIN always exists once the
 /// shelf is configured; biometrics are optional shortcuts on top of it.
 @immutable
@@ -24,11 +35,13 @@ class PrivateShelfConfig {
     this.configured = false,
     this.biometrics = const <PrivateShelfBiometric>{},
     this.defaultBiometric,
+    this.lockDelay = PrivateShelfLockDelay.immediate,
   });
 
   final bool configured;
   final Set<PrivateShelfBiometric> biometrics;
   final PrivateShelfBiometric? defaultBiometric;
+  final PrivateShelfLockDelay lockDelay;
 
   /// The one biometric offered when unlocking. A stale default that is no
   /// longer enabled falls back to whichever kind still is.
@@ -127,6 +140,7 @@ class PrivateShelfLock {
   static const _kIterations = 'private_shelf_iterations';
   static const _kBiometrics = 'private_shelf_biometrics';
   static const _kDefaultBiometric = 'private_shelf_default_biometric';
+  static const _kLockDelay = 'private_shelf_lock_delay';
   static const _kFailures = 'private_shelf_failures';
   static const _kLockedUntil = 'private_shelf_locked_until';
   static const _kLockedElapsedUntil = 'private_shelf_locked_elapsed_until';
@@ -148,7 +162,17 @@ class PrivateShelfLock {
       biometrics: Set.unmodifiable(biometrics),
       defaultBiometric: PrivateShelfBiometric.values
           .asNameMap()[prefs.getString(_kDefaultBiometric)],
+      lockDelay:
+          PrivateShelfLockDelay.values.asNameMap()[prefs.getString(
+            _kLockDelay,
+          )] ??
+          PrivateShelfLockDelay.immediate,
     );
+  }
+
+  Future<void> saveLockDelay(PrivateShelfLockDelay delay) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kLockDelay, delay.name);
   }
 
   static bool isValidPin(String pin) =>
@@ -253,6 +277,7 @@ class PrivateShelfLock {
       _kIterations,
       _kBiometrics,
       _kDefaultBiometric,
+      _kLockDelay,
       _kFailures,
       _kLockedUntil,
       _kLockedElapsedUntil,
@@ -367,6 +392,9 @@ class PrivateShelfLock {
         : remainingWallMs;
     return DateTime.now().add(Duration(milliseconds: clampedWallMs));
   }
+
+  Future<({int elapsedRealtimeMs, int bootCount, int wallTimeMs})?>
+  readMonotonicClock() => _readClock();
 
   Future<({int elapsedRealtimeMs, int bootCount, int wallTimeMs})?>
   _readClock() async {

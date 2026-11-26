@@ -45,6 +45,15 @@ class IncomingFileService {
     _channel.setMethodCallHandler(null);
   }
 
+  static Future<bool> hasPendingIncoming() async {
+    if (_consuming || _consumeAgain) return true;
+    try {
+      return await _channel.invokeMethod<bool>('hasPending') ?? false;
+    } on Object {
+      return false;
+    }
+  }
+
   static Future<void> _consumePending() async {
     if (_consuming) {
       _consumeAgain = true;

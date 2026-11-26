@@ -159,6 +159,240 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
     );
   }
 
+  void _rebuildNotesIndex(List<ReaderNote> notes) {
+    final map = <int, Map<int, List<ReaderNote>>>{};
+    for (final note in notes) {
+      if (note.isPdf || note.paragraphIndex < 0) continue;
+      final byPara = map.putIfAbsent(
+        note.chapterIndex,
+        () => <int, List<ReaderNote>>{},
+      );
+      byPara.putIfAbsent(note.paragraphIndex, () => <ReaderNote>[]).add(note);
+    }
+    _notesByChapterParagraph = map;
+  }
+
+  List<ReaderNoteHighlightSpan> _noteSpansForParagraph(
+    int chapterIndex,
+    int paragraphIndex,
+  ) {
+    final notes = _notesByChapterParagraph[chapterIndex]?[paragraphIndex];
+    if (notes == null || notes.isEmpty) {
+      return const <ReaderNoteHighlightSpan>[];
+    }
+    return <ReaderNoteHighlightSpan>[
+      for (final note in notes)
+        ReaderNoteHighlightSpan(
+          note: note,
+          startOffset: note.startOffset,
+          endOffset: note.endOffset,
+        ),
+    ];
+  }
+
+  List<int?>? _epubParagraphIndexByBlock(Chapter chapter) {
+    if (!chapter.hasRichEpubContent) return null;
+    final blocks = chapter.epubBlocks;
+    final result = List<int?>.filled(blocks.length, null, growable: false);
+    var p = 0;
+    for (var i = 0; i < blocks.length; i++) {
+      final block = blocks[i];
+      if (block.isText && block.text.trim().isNotEmpty) {
+        result[i] = p++;
+      }
+    }
+    return result;
+  }
+
+  List<ReaderNoteHighlightSpan> _continuousChapterNoteSpans(
+    int chapterIndex,
+    List<String> paragraphs,
+    String separator,
+  ) {
+    final chapterMap = _notesByChapterParagraph[chapterIndex];
+    if (chapterMap == null || chapterMap.isEmpty) {
+      return const <ReaderNoteHighlightSpan>[];
+    }
+    final paragraphStarts = List<int>.filled(paragraphs.length, 0);
+    var cursor = 0;
+    for (var i = 0; i < paragraphs.length; i++) {
+      paragraphStarts[i] = cursor;
+      cursor += paragraphs[i].length;
+      if (i < paragraphs.length - 1) cursor += separator.length;
+    }
+    final spans = <ReaderNoteHighlightSpan>[];
+    for (final entry in chapterMap.entries) {
+      final pIdx = entry.key;
+      if (pIdx < 0 || pIdx >= paragraphStarts.length) continue;
+      final base = paragraphStarts[pIdx];
+      for (final note in entry.value) {
+        if (note.endOffset > note.startOffset) {
+          spans.add(
+            ReaderNoteHighlightSpan(
+              note: note,
+              startOffset: base + note.startOffset,
+              endOffset: base + note.endOffset,
+            ),
+          );
+        } else {
+          spans.add(
+            ReaderNoteHighlightSpan(
+              note: note,
+              startOffset: base,
+              endOffset: base + paragraphs[pIdx].length,
+            ),
+          );
+        }
+      }
+    }
+    return spans;
+  }
+
+  void _commitNotes(List<ReaderNote> updated) {
+    final sorted = sortedReaderNotes(updated);
+    _setReaderState(() {
+      _notes = sorted;
+      _rebuildNotesIndex(sorted);
+    });
+    unawaited(
+      _storage.saveNotes(_book.id, sorted).catchError((
+        Object error,
+        StackTrace stack,
+      ) {
+        debugPrint('Failed to save reader notes: $error');
+        debugPrintStack(stackTrace: stack);
+      }),
+    );
+  }
+
+  ({
+    int chapterIndex,
+    int paragraphIndex,
+    int startOffset,
+    int endOffset,
+    String quote,
+  })?
+  _resolveSelectionSpan(ReaderSelectionPayload payload) {
+    if (_book.chapters.isEmpty) return null;
+    final cleanQuote = clampNoteText(payload.selectedText, maxReaderNoteQuote);
+    if (cleanQuote.isEmpty) return null;
+
+    final snapshot = _currentScrollSnapshot();
+    var approxOffset = snapshot.offset;
+    final surfaceObj = _readingSurfaceKey.currentContext?.findRenderObject();
+    if (payload.startGlobalDy != null &&
+        surfaceObj is RenderBox &&
+        surfaceObj.attached &&
+        surfaceObj.hasSize) {
+      final localDy =
+          payload.startGlobalDy! - surfaceObj.localToGlobal(Offset.zero).dy;
+      if (localDy.isFinite) {
+        approxOffset = math.max(0.0, snapshot.offset + localDy);
+      }
+    }
+    final hintAnchor = _captureReadingTextAnchor(
+      ScrollSnapshot(offset: approxOffset, progress: snapshot.progress),
+    );
+    final candidateChapters = <int>[
+      if (hintAnchor != null) hintAnchor.chapterIndex else _chapterIndex,
+      if (_settings.readingMode == ReaderReadingMode.continuous) ...[
+        if (_chapterIndex + 1 < _book.chapters.length) _chapterIndex + 1,
+        if (_chapterIndex - 1 >= 0) _chapterIndex - 1,
+      ],
+    ];
+    final lines = payload.selectedText
+        .split(RegExp(r'\n+'))
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+    final needle = lines.isNotEmpty ? lines.first : cleanQuote;
+
+    for (final cIdx in candidateChapters.toSet()) {
+      if (cIdx < 0 || cIdx >= _book.chapters.length) continue;
+      final paragraphs = _paragraphsFor(_book.chapters[cIdx]);
+      if (paragraphs.isEmpty) continue;
+      final center =
+          (hintAnchor != null && hintAnchor.chapterIndex == cIdx)
+          ? hintAnchor.paragraphIndex.clamp(0, paragraphs.length - 1)
+          : 0;
+      final order = <int>[center];
+      for (var d = 1; d < paragraphs.length; d++) {
+        if (center + d < paragraphs.length) order.add(center + d);
+        if (center - d >= 0) order.add(center - d);
+      }
+      for (final pIdx in order) {
+        final text = paragraphs[pIdx];
+        final hit = _bestMatchOffset(
+          text,
+          needle,
+          nearOffset: (hintAnchor != null &&
+                  hintAnchor.chapterIndex == cIdx &&
+                  hintAnchor.paragraphIndex == pIdx)
+              ? hintAnchor.characterOffset
+              : 0,
+        );
+        if (hit != null) {
+          return (
+            chapterIndex: cIdx,
+            paragraphIndex: pIdx,
+            startOffset: hit.$1,
+            endOffset: hit.$2,
+            quote: cleanQuote,
+          );
+        }
+      }
+    }
+
+    final fallback = hintAnchor ?? _bookmarkAnchor();
+    if (fallback == null) return null;
+    final pLen = _paragraphsFor(_book.chapters[fallback.chapterIndex])
+        .elementAtOrNull(fallback.paragraphIndex)
+        ?.length ??
+        0;
+    final start = fallback.characterOffset.clamp(0, pLen);
+    return (
+      chapterIndex: fallback.chapterIndex,
+      paragraphIndex: fallback.paragraphIndex,
+      startOffset: start,
+      endOffset: math.min(pLen, start + needle.length),
+      quote: cleanQuote,
+    );
+  }
+
+  static (int, int)? _bestMatchOffset(
+    String haystack,
+    String needle, {
+    required int nearOffset,
+  }) {
+    if (needle.isEmpty || haystack.isEmpty) return null;
+    var index = haystack.indexOf(needle);
+    if (index >= 0) {
+      var bestStart = index;
+      var bestDist = (index - nearOffset).abs();
+      while (true) {
+        index = haystack.indexOf(needle, index + 1);
+        if (index < 0) break;
+        final dist = (index - nearOffset).abs();
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestStart = index;
+        }
+      }
+      return (bestStart, math.min(haystack.length, bestStart + needle.length));
+    }
+    final probeLen = math.min(18, needle.length);
+    if (probeLen >= 3) {
+      final prefixHit = haystack.indexOf(needle.substring(0, probeLen));
+      if (prefixHit >= 0) {
+        return (
+          prefixHit,
+          math.min(haystack.length, prefixHit + needle.length),
+        );
+      }
+    }
+    return null;
+  }
+
   void _toggleBookmark() {
     final anchor = _bookmarkAnchor();
     if (anchor == null) {
@@ -171,7 +405,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
         _bookmarks.where((mark) => mark.id != existing.id).toList(),
         currentMarked: false,
       );
-      _showReaderMessage(existing.hasNote ? '已删除书签和笔记' : '已删除书签');
+      _showReaderMessage('已删除书签');
       return;
     }
     if (_bookmarks.length >= maxReaderBookmarksPerBook) {
@@ -185,57 +419,240 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
     _showReaderMessage('已添加书签');
   }
 
-  /// Entry point for the selection toolbar. The selected text becomes the
-  /// excerpt so the note reads back against the sentence it was written for.
-  Future<void> _addNoteForSelection(String selectedText) async {
-    if (!mounted || _readerModalOpen) return;
-    final anchor = _bookmarkAnchor();
-    if (anchor == null) {
+  Future<void> _quickHighlightSelection(
+    ReaderSelectionPayload payload,
+    NoteColor color,
+    NoteStyle style,
+  ) async {
+    if (!mounted) return;
+    if (_notes.length >= maxReaderNotesPerBook) {
+      _showReaderMessage('这本书的笔记已达 $maxReaderNotesPerBook 条上限');
+      return;
+    }
+    final span = _resolveSelectionSpan(payload);
+    if (span == null) {
       _showReaderMessage('正文还没有排版完成，请稍后再试');
       return;
     }
-    if (_bookmarks.length >= maxReaderBookmarksPerBook) {
-      _showReaderMessage('这本书的书签已达 $maxReaderBookmarksPerBook 条上限');
+    final now = DateTime.now();
+    final chapter = _book.chapters[span.chapterIndex];
+    final created = ReaderNote(
+      id: '${_book.id}:${span.chapterIndex}:${span.paragraphIndex}:${now.microsecondsSinceEpoch}',
+      bookId: _book.id,
+      chapterIndex: span.chapterIndex,
+      chapterTitle: clampNoteText(chapter.title, 120),
+      paragraphIndex: span.paragraphIndex,
+      startOffset: span.startOffset,
+      endOffset: span.endOffset,
+      quote: span.quote,
+      color: color,
+      style: style,
+      category: NoteCategory.highlight,
+      chapterProgress: _lastScrollSnapshot.progress.clamp(0.0, 1.0),
+      isPdf: false,
+      createdAt: now,
+      updatedAt: now,
+    );
+    _commitNotes(<ReaderNote>[..._notes, created]);
+    _showReaderMessage('已添加${color.label}${style.label}');
+  }
+
+  /// Entry point for the selection toolbar. Opens the rich composer anchored
+  /// onto the exact selected span.
+  Future<void> _addNoteForSelection(
+    ReaderSelectionPayload payload, {
+    NoteStyle? style,
+  }) async {
+    if (!mounted || _readerModalOpen) return;
+    if (_notes.length >= maxReaderNotesPerBook) {
+      _showReaderMessage('这本书的笔记已达 $maxReaderNotesPerBook 条上限');
       return;
     }
-    final excerpt = clampBookmarkText(selectedText, maxReaderBookmarkExcerpt);
+    final span = _resolveSelectionSpan(payload);
+    if (span == null) {
+      _showReaderMessage('正文还没有排版完成，请稍后再试');
+      return;
+    }
+    final chapter = _book.chapters[span.chapterIndex];
+    final chapterTitle = _epubLayout.formatChapterTitle(chapter.title);
     final colors = _readerThemeColors;
     _beginReaderModal();
-    String? note;
+    ReaderNoteDraft? draft;
     try {
-      note = await showReaderNoteDialog(
+      draft = await showReaderNoteComposerSheet(
         context: context,
         colors: colors,
-        title: '添加笔记',
-        excerpt: excerpt,
+        title: '写阅读笔记',
+        locationLabel: chapterTitle.isNotEmpty
+            ? chapterTitle
+            : '第 ${span.chapterIndex + 1} 章',
+        initialQuote: span.quote,
+        initialStyle: style ?? NoteStyle.highlight,
       );
     } finally {
       _endReaderModal();
     }
-    if (note == null || !mounted) return;
-    final mark = _buildBookmark(anchor, note: note);
-    _commitBookmarks([
-      ..._bookmarks,
-      excerpt.isEmpty ? mark : mark.copyWith(excerpt: excerpt),
-    ], currentMarked: true);
-    _showReaderMessage(note.trim().isEmpty ? '已添加书签' : '已保存笔记');
+    if (draft == null || draft.deleted || !mounted) return;
+    final now = DateTime.now();
+    final note = ReaderNote(
+      id: '${_book.id}:${span.chapterIndex}:${span.paragraphIndex}:${now.microsecondsSinceEpoch}',
+      bookId: _book.id,
+      chapterIndex: span.chapterIndex,
+      chapterTitle: clampNoteText(chapter.title, 120),
+      paragraphIndex: span.paragraphIndex,
+      startOffset: span.startOffset,
+      endOffset: span.endOffset,
+      quote: draft.quote,
+      content: draft.content,
+      color: draft.color,
+      style: draft.style,
+      category: draft.category,
+      tags: draft.tags,
+      chapterProgress: _lastScrollSnapshot.progress.clamp(0.0, 1.0),
+      isPdf: false,
+      createdAt: now,
+      updatedAt: now,
+    );
+    _commitNotes(<ReaderNote>[..._notes, note]);
+    _showReaderMessage(note.hasContent ? '已保存阅读笔记' : '已保存划线高亮');
   }
 
-  Future<void> _editBookmarkNote(ReaderBookmark mark) async {
-    if (!mounted) return;
-    final colors = _readerThemeColors;
-    final note = await showReaderNoteDialog(
-      context: context,
-      colors: colors,
-      title: mark.hasNote ? '编辑笔记' : '添加笔记',
-      excerpt: mark.excerpt,
-      initialNote: mark.note,
+  Future<void> _shareQuoteCardForSelection(ReaderSelectionPayload payload) async {
+    if (!mounted || _readerModalOpen) return;
+    final span = _resolveSelectionSpan(payload);
+    final chapterIndex = span?.chapterIndex ?? _chapterIndex;
+    final chapterTitle = chapterIndex >= 0 && chapterIndex < _book.chapters.length
+        ? _epubLayout.formatChapterTitle(_book.chapters[chapterIndex].title)
+        : '';
+    final now = DateTime.now();
+    final previewNote = ReaderNote(
+      id: 'preview:${now.microsecondsSinceEpoch}',
+      bookId: _book.id,
+      chapterIndex: chapterIndex,
+      chapterTitle: chapterTitle,
+      paragraphIndex: span?.paragraphIndex ?? 0,
+      startOffset: span?.startOffset ?? 0,
+      endOffset: span?.endOffset ?? 0,
+      quote: span?.quote ?? payload.selectedText.trim(),
+      color: NoteColor.terracotta,
+      style: NoteStyle.highlight,
+      category: NoteCategory.insight,
+      chapterProgress: _lastScrollSnapshot.progress.clamp(0.0, 1.0),
+      createdAt: now,
+      updatedAt: now,
     );
-    if (note == null || !mounted) return;
-    _commitBookmarks([
-      for (final entry in _bookmarks)
-        if (entry.id == mark.id) entry.copyWith(note: note.trim()) else entry,
+    final colors = _readerThemeColors;
+    _beginReaderModal();
+    try {
+      await showReaderQuoteCardSheet(
+        context: context,
+        colors: colors,
+        bookTitle: _book.title,
+        author: _book.author,
+        note: previewNote,
+      );
+    } finally {
+      _endReaderModal();
+    }
+  }
+
+  Future<void> _showInlineNoteQuickSheet(ReaderNote note) async {
+    if (!mounted || _readerModalOpen) return;
+    var activeNote = note;
+    final colors = _readerThemeColors;
+    _beginReaderModal();
+    QuickNoteAction? action;
+    try {
+      action = await showReaderNoteQuickSheet(
+        context: context,
+        note: note,
+        colors: colors,
+        onUpdateAppearance: (updated) {
+          activeNote = updated;
+          _commitNotes([
+            for (final entry in _notes)
+              if (entry.id == updated.id) updated else entry,
+          ]);
+        },
+      );
+    } finally {
+      _endReaderModal();
+    }
+    if (!mounted || action == null) return;
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    switch (action) {
+      case QuickNoteAction.edit:
+        await _editRichNote(activeNote);
+      case QuickNoteAction.quoteCard:
+        _beginReaderModal();
+        try {
+          await showReaderQuoteCardSheet(
+            context: context,
+            colors: colors,
+            bookTitle: _book.title,
+            author: _book.author,
+            note: activeNote,
+          );
+        } finally {
+          _endReaderModal();
+        }
+      case QuickNoteAction.delete:
+        _deleteRichNote(activeNote);
+        _showReaderMessage('已删除划线与笔记');
+    }
+  }
+
+  Future<void> _editRichNote(ReaderNote note) async {
+    if (!mounted || _readerModalOpen) return;
+    final colors = _readerThemeColors;
+    _beginReaderModal();
+    ReaderNoteDraft? draft;
+    try {
+      draft = await showReaderNoteComposerSheet(
+        context: context,
+        colors: colors,
+        title: note.hasContent ? '编辑笔记' : '写笔记',
+        locationLabel: note.chapterTitle.isNotEmpty
+            ? note.chapterTitle
+            : '第 ${note.chapterIndex + 1} 章',
+        initialQuote: note.quote,
+        initialContent: note.content,
+        initialColor: note.color,
+        initialStyle: note.style,
+        initialCategory: note.category,
+        initialTags: note.tags,
+        allowDelete: true,
+      );
+    } finally {
+      _endReaderModal();
+    }
+    if (draft == null || !mounted) return;
+    if (draft.deleted) {
+      _deleteRichNote(note);
+      _showReaderMessage('已删除笔记');
+      return;
+    }
+    _commitNotes([
+      for (final entry in _notes)
+        if (entry.id == note.id)
+          entry.copyWith(
+            quote: draft.quote,
+            content: draft.content,
+            color: draft.color,
+            style: draft.style,
+            category: draft.category,
+            tags: draft.tags,
+            updatedAt: DateTime.now(),
+          )
+        else
+          entry,
     ]);
+    _showReaderMessage('笔记已更新');
+  }
+
+  void _deleteRichNote(ReaderNote note) {
+    _commitNotes(_notes.where((entry) => entry.id != note.id).toList());
   }
 
   void _deleteBookmark(ReaderBookmark mark) {
@@ -261,7 +678,8 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
     if (!mounted || _readerModalOpen) return;
     final themeColors = _readerThemeColors;
     _beginReaderModal();
-    ReaderBookmark? selected;
+    ReaderBookmark? selectedBookmark;
+    ReaderNote? selectedNote;
     try {
       await showAppSheet<void>(
         context: context,
@@ -271,24 +689,102 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
           reverseDuration: AppMotion.normal,
         ),
         builder: (sheetContext) => DraggableScrollableSheet(
-          initialChildSize: 0.75,
+          initialChildSize: 0.78,
           maxChildSize: 0.95,
           minChildSize: 0.3,
           builder: (_, scrollController) => StatefulBuilder(
-            builder: (_, setSheetState) => ReaderBookmarkSheet(
+            builder: (_, setSheetState) => ReaderNotesHubSheet(
+              bookTitle: _book.title,
+              author: _book.author,
+              notes: _notes,
               bookmarks: _bookmarks,
               colors: themeColors,
               scrollController: scrollController,
-              onSelect: (mark) {
-                selected = mark;
+              onSelectNote: (note) {
+                selectedNote = note;
                 Navigator.of(sheetContext).pop();
               },
-              onEditNote: (mark) async {
-                await _editBookmarkNote(mark);
+              onEditNote: (note) async {
+                final draft = await showReaderNoteComposerSheet(
+                  context: sheetContext,
+                  colors: themeColors,
+                  title: note.hasContent ? '编辑笔记' : '写笔记',
+                  locationLabel: note.chapterTitle.isNotEmpty
+                      ? note.chapterTitle
+                      : '第 ${note.chapterIndex + 1} 章',
+                  initialQuote: note.quote,
+                  initialContent: note.content,
+                  initialColor: note.color,
+                  initialStyle: note.style,
+                  initialCategory: note.category,
+                  initialTags: note.tags,
+                  allowDelete: true,
+                );
+                if (draft == null || !mounted) return;
+                if (draft.deleted) {
+                  _deleteRichNote(note);
+                } else {
+                  _commitNotes([
+                    for (final entry in _notes)
+                      if (entry.id == note.id)
+                        entry.copyWith(
+                          quote: draft.quote,
+                          content: draft.content,
+                          color: draft.color,
+                          style: draft.style,
+                          category: draft.category,
+                          tags: draft.tags,
+                          updatedAt: DateTime.now(),
+                        )
+                      else
+                        entry,
+                  ]);
+                }
                 setSheetState(() {});
               },
-              onDelete: (mark) {
+              onDeleteNote: (note) {
+                _deleteRichNote(note);
+                setSheetState(() {});
+              },
+              onSelectBookmark: (mark) {
+                selectedBookmark = mark;
+                Navigator.of(sheetContext).pop();
+              },
+              onDeleteBookmark: (mark) {
                 _deleteBookmark(mark);
+                setSheetState(() {});
+              },
+              onPromoteBookmarkToNote: (mark) async {
+                final draft = await showReaderNoteComposerSheet(
+                  context: sheetContext,
+                  colors: themeColors,
+                  title: '将书签转为笔记',
+                  locationLabel: mark.chapterTitle.isNotEmpty
+                      ? mark.chapterTitle
+                      : '第 ${mark.chapterIndex + 1} 章',
+                  initialQuote: mark.excerpt,
+                );
+                if (draft == null || draft.deleted || !mounted) return;
+                final now = DateTime.now();
+                final created = ReaderNote(
+                  id: '${_book.id}:${mark.chapterIndex}:${mark.paragraphIndex}:${now.microsecondsSinceEpoch}',
+                  bookId: _book.id,
+                  chapterIndex: mark.chapterIndex,
+                  chapterTitle: mark.chapterTitle,
+                  paragraphIndex: mark.paragraphIndex,
+                  startOffset: 0,
+                  endOffset: 0,
+                  quote: draft.quote,
+                  content: draft.content,
+                  color: draft.color,
+                  style: draft.style,
+                  category: draft.category,
+                  tags: draft.tags,
+                  chapterProgress: mark.chapterProgress,
+                  createdAt: now,
+                  updatedAt: now,
+                );
+                _commitNotes(<ReaderNote>[..._notes, created]);
                 setSheetState(() {});
               },
             ),
@@ -301,11 +797,45 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
 
     // Route and keyboard disposal complete before the reader builds a new
     // controller for the mark's anchor, matching the search-result path.
-    final target = selected;
-    if (target == null || !mounted) return;
+    final noteTarget = selectedNote;
+    if (noteTarget != null && mounted) {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      _openNote(noteTarget);
+      return;
+    }
+    final markTarget = selectedBookmark;
+    if (markTarget == null || !mounted) return;
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return;
-    _openBookmark(target);
+    _openBookmark(markTarget);
+  }
+
+  void _openNote(ReaderNote note) {
+    if (note.chapterIndex < 0 || note.chapterIndex >= _book.chapters.length) {
+      _showReaderMessage('这条笔记指向的章节已不存在');
+      return;
+    }
+    final anchor = ReadingTextAnchor(
+      chapterIndex: note.chapterIndex,
+      paragraphIndex: math.max(0, note.paragraphIndex),
+      characterOffset: math.max(0, note.startOffset),
+    );
+    if (!_readingModeReloading) {
+      _setReaderState(() => _readingModeReloading = true);
+    }
+    if (_settings.readingMode == ReaderReadingMode.continuous) {
+      _switchContinuousChapter(note.chapterIndex, startAtTop: true);
+      _requestContinuousRestore(0, textAnchor: anchor);
+    } else {
+      _switchChapter(note.chapterIndex, startAtTop: true);
+      _requestScrollRestore(
+        offset: 0,
+        progress: 0,
+        preferProgress: false,
+        textAnchor: anchor,
+      );
+    }
   }
 
   void _openBookmark(ReaderBookmark mark) {

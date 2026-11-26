@@ -9,10 +9,11 @@ Future<T?> showAppSheet<T>({
   required ReaderThemeColors colors,
   required WidgetBuilder builder,
   AnimationStyle? sheetAnimationStyle,
+  bool isScrollControlled = true,
 }) async {
   final navigator = Navigator.of(context);
   final route = ModalBottomSheetRoute<T>(
-    isScrollControlled: true,
+    isScrollControlled: isScrollControlled,
     useSafeArea: true,
     backgroundColor: Colors.transparent,
     elevation: 0,
@@ -76,9 +77,15 @@ class AppSheetSurface extends StatelessWidget {
 }
 
 class AppSheetHeader extends StatelessWidget {
-  const AppSheetHeader({super.key, required this.title, this.subtitle});
+  const AppSheetHeader({
+    super.key,
+    required this.title,
+    this.subtitle,
+    this.trailing,
+  });
   final String title;
   final String? subtitle;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -98,6 +105,7 @@ class AppSheetHeader extends StatelessWidget {
             ],
           ),
         ),
+        ?trailing,
         IconButton(
           tooltip: '关闭',
           onPressed: () => Navigator.of(context).pop(),

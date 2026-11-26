@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/book.dart';
 import '../models/book_content_revision.dart';
 import '../models/reader_bookmark.dart';
+import '../models/reader_note.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
 import 'book_id.dart';
@@ -912,6 +913,21 @@ class StorageService
   @override
   Future<void> saveBookmarks(String bookId, List<ReaderBookmark> bookmarks) =>
       _readerPreferences.saveBookmarks(bookId, bookmarks);
+
+  @override
+  Future<List<ReaderNote>> getNotes(
+    String bookId, {
+    bool isPdf = false,
+    int? pdfPageCount,
+  }) => _readerPreferences.getNotes(
+    bookId,
+    isPdf: isPdf,
+    pdfPageCount: pdfPageCount,
+  );
+
+  @override
+  Future<void> saveNotes(String bookId, List<ReaderNote> notes) =>
+      _readerPreferences.saveNotes(bookId, notes);
 
   @override
   Future<ReaderSettings> getSettings() => _readerPreferences.getSettings();

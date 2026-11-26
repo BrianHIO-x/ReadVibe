@@ -53,18 +53,27 @@ class AppOverlayTheme extends StatelessWidget {
     );
     final buttonText = body.copyWith(fontSize: 14, fontWeight: FontWeight.w600);
     const buttonPadding = EdgeInsets.symmetric(horizontal: 18, vertical: 12);
+    final accentTint = Color.alphaBlend(
+      colors.accent.withValues(alpha: dark ? 0.24 : 0.14),
+      colors.headerBg,
+    );
     return base.copyWith(
       brightness: dark ? Brightness.dark : Brightness.light,
       colorScheme: (dark ? const ColorScheme.dark() : const ColorScheme.light())
           .copyWith(
             primary: colors.accent,
             onPrimary: onAccent(colors),
+            primaryContainer: accentTint,
+            onPrimaryContainer: colors.accent,
             secondary: colors.accent,
             onSecondary: onAccent(colors),
+            secondaryContainer: accentTint,
+            onSecondaryContainer: colors.accent,
             surface: colors.headerBg,
             onSurface: colors.text,
             onSurfaceVariant: colors.secondary,
             outline: colors.border,
+            outlineVariant: colors.border,
             error: error,
             onError: dark ? colors.background : Colors.white,
             surfaceTint: Colors.transparent,
@@ -203,6 +212,31 @@ class AppOverlayTheme extends StatelessWidget {
         ),
         textStyle: body.copyWith(fontSize: 12),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      ),
+      segmentedButtonTheme: SegmentedButtonThemeData(
+        style: SegmentedButton.styleFrom(
+          backgroundColor: colors.headerBg,
+          foregroundColor: colors.text,
+          selectedBackgroundColor: accentTint,
+          selectedForegroundColor: colors.accent,
+          side: BorderSide(color: colors.border),
+        ),
+      ),
+      chipTheme: ChipThemeData(
+        backgroundColor: colors.headerBg,
+        selectedColor: accentTint,
+        disabledColor: colors.headerBg.withValues(alpha: 0.5),
+        checkmarkColor: colors.accent,
+        side: BorderSide(color: colors.border),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.md),
+        ),
+        labelStyle: body.copyWith(fontSize: 13, color: colors.text),
+        secondaryLabelStyle: body.copyWith(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          color: colors.accent,
+        ),
       ),
       progressIndicatorTheme: ProgressIndicatorThemeData(color: colors.accent),
     );

@@ -26,6 +26,7 @@ class GlobalSettingsSheet extends StatelessWidget {
   final VoidCallback onPrivateShelf;
   final VoidCallback onPrivateShelfSettings;
   final VoidCallback? onOpenBackup;
+  final VoidCallback? onOpenNotes;
 
   const GlobalSettingsSheet({
     super.key,
@@ -42,6 +43,7 @@ class GlobalSettingsSheet extends StatelessWidget {
     required this.onPrivateShelf,
     required this.onPrivateShelfSettings,
     this.onOpenBackup,
+    this.onOpenNotes,
   });
 
   @override
@@ -169,6 +171,40 @@ class GlobalSettingsSheet extends StatelessWidget {
                     ),
                     const SizedBox(height: AppSpacing.xl),
                     Text(
+                      '阅读恢复',
+                      style: TextStyle(
+                        color: colors.text,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    SwitchListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: Text(
+                        '启动时恢复上次阅读',
+                        style: TextStyle(
+                          color: colors.text,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        '重新打开应用时自动回到上次未关闭的书籍界面；隐私书籍需先验证。',
+                        style: TextStyle(
+                          color: colors.secondary,
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                      value: settings.autoResumeLastRead,
+                      onChanged: (enabled) => onChange(
+                        settings.copyWith(autoResumeLastRead: enabled),
+                      ),
+                    ),
+                    const SizedBox(height: AppSpacing.xl),
+                    Text(
                       '外部应用',
                       style: TextStyle(
                         color: colors.text,
@@ -250,10 +286,10 @@ class GlobalSettingsSheet extends StatelessWidget {
                         side: BorderSide(color: colors.border),
                       ),
                     ),
-                    if (onOpenBackup != null) ...[
+                    if (onOpenNotes != null) ...[
                       const SizedBox(height: AppSpacing.xl),
                       Text(
-                        '备份与恢复',
+                        '阅读笔记',
                         style: TextStyle(
                           color: colors.text,
                           fontSize: 15,
@@ -262,7 +298,39 @@ class GlobalSettingsSheet extends StatelessWidget {
                       ),
                       const SizedBox(height: AppSpacing.sm),
                       Text(
-                        '导出阅读进度、书签笔记、设置或完整书籍压缩包，便于换机与本地迁移。',
+                        privateShelfOpen
+                            ? '集中浏览隐私书架内所有书籍的高亮划线与想法批注。'
+                            : '集中浏览普通书架内所有书籍的高亮划线、想法与金句卡片。',
+                        style: TextStyle(
+                          color: colors.secondary,
+                          fontSize: 12,
+                          height: 1.5,
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.sm),
+                      OutlinedButton.icon(
+                        onPressed: onOpenNotes,
+                        icon: const Icon(Icons.sticky_note_2_outlined, size: 18),
+                        label: Text(privateShelfOpen ? '打开隐私笔记本' : '打开读书笔记'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: colors.accent,
+                          side: BorderSide(color: colors.border),
+                        ),
+                      ),
+                    ],
+                    if (onOpenBackup != null) ...[
+                      const SizedBox(height: AppSpacing.xl),
+                      Text(
+                        '数据安全与备份',
+                        style: TextStyle(
+                          color: colors.text,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.sm),
+                      Text(
+                        '设置防卸载守护目录自动增量同步，或导出/恢复便携 .zip 备份包。',
                         style: TextStyle(
                           color: colors.secondary,
                           fontSize: 12,
@@ -272,8 +340,8 @@ class GlobalSettingsSheet extends StatelessWidget {
                       const SizedBox(height: AppSpacing.sm),
                       OutlinedButton.icon(
                         onPressed: onOpenBackup,
-                        icon: const Icon(Icons.archive_outlined, size: 18),
-                        label: const Text('备份与恢复'),
+                        icon: const Icon(Icons.verified_user_outlined, size: 18),
+                        label: const Text('数据安全与备份'),
                         style: OutlinedButton.styleFrom(
                           foregroundColor: colors.accent,
                           side: BorderSide(color: colors.border),

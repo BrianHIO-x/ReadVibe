@@ -74,6 +74,36 @@ class BookExportService implements BookExporter {
       await prepared.dispose();
     }
   }
+
+  Future<bool> exportBytes({
+    required List<int> bytes,
+    required String fileName,
+    required String mimeType,
+  }) async {
+    final cache = await _temporaryDirectory();
+    final root = Directory(p.join(cache.path, 'readvibe_exports'));
+    await root.create(recursive: true);
+    final stagingDir = await root.createTemp('asset_');
+    final safeFileName = _sanitizeExportFileName(fileName);
+    final staged = File(p.join(stagingDir.path, safeFileName));
+    try {
+      await staged.writeAsBytes(bytes, flush: true);
+      return await destination.save(
+        sourcePath: staged.path,
+        fileName: safeFileName,
+        mimeType: mimeType,
+      );
+    } finally {
+      await _clearStaging(stagingDir);
+    }
+  }
+}
+
+String _sanitizeExportFileName(String name) {
+  final cleaned = name
+      .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f\x7f]'), '_')
+      .trim();
+  return cleaned.isEmpty ? 'readvibe_export' : cleaned;
 }
 
 String _fileName(String title, String extension) {

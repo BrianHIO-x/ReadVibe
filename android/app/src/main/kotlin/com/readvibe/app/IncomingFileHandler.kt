@@ -26,34 +26,38 @@ class IncomingFileHandler(
 
     init {
         channel.setMethodCallHandler { call, result ->
-            if (call.method != "consumeNext") {
-                result.notImplemented()
-                return@setMethodCallHandler
-            }
-            val incoming = synchronized(intents) {
-                if (intents.isEmpty()) null else intents.removeFirst()
-            }
-            if (incoming == null) {
-                result.success(null)
-                return@setMethodCallHandler
-            }
-            executor.execute {
-                try {
-                    val copied = copyIncomingFile(incoming)
-                    if (!disposed) {
-                        activity.runOnUiThread { result.success(copied) }
+            when (call.method) {
+                "hasPending" -> {
+                    result.success(synchronized(intents) { intents.isNotEmpty() })
+                }
+                "consumeNext" -> {
+                    val incoming = synchronized(intents) {
+                        if (intents.isEmpty()) null else intents.removeFirst()
                     }
-                } catch (error: Throwable) {
-                    if (!disposed) {
-                        activity.runOnUiThread {
-                            result.error(
-                                "INCOMING_FILE_FAILED",
-                                error.message ?: "无法读取外部文件",
-                                null,
-                            )
+                    if (incoming == null) {
+                        result.success(null)
+                        return@setMethodCallHandler
+                    }
+                    executor.execute {
+                        try {
+                            val copied = copyIncomingFile(incoming)
+                            if (!disposed) {
+                                activity.runOnUiThread { result.success(copied) }
+                            }
+                        } catch (error: Throwable) {
+                            if (!disposed) {
+                                activity.runOnUiThread {
+                                    result.error(
+                                        "INCOMING_FILE_FAILED",
+                                        error.message ?: "无法读取外部文件",
+                                        null,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
+                else -> result.notImplemented()
             }
         }
         enqueue(initialIntent, notifyFlutter = false)

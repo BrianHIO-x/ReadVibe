@@ -81,7 +81,7 @@ extension SimulationPageTurnEffectInfo on SimulationPageTurnEffect {
 }
 
 class ReaderSettings {
-  static const schemaVersion = 6;
+  static const schemaVersion = 7;
   static const systemFontFamily = 'system';
   static const builtinSerifFamily = 'SourceHanSerifSC';
   static const builtinKaitiFamily = 'ARPLKaitiMGB';
@@ -99,6 +99,7 @@ class ReaderSettings {
   final ReaderReadingMode readingMode;
   final SimulationPageTurnEffect simulationPageTurnEffect;
   final bool automaticUpdateChecks;
+  final bool autoResumeLastRead;
 
   const ReaderSettings({
     this.fontSize = 20.0,
@@ -114,6 +115,7 @@ class ReaderSettings {
     this.readingMode = ReaderReadingMode.chapter,
     this.simulationPageTurnEffect = SimulationPageTurnEffect.simulation,
     this.automaticUpdateChecks = false,
+    this.autoResumeLastRead = true,
   });
 
   bool get usesSystemFont => fontFamily == systemFontFamily;
@@ -187,6 +189,7 @@ class ReaderSettings {
     ReaderReadingMode? readingMode,
     SimulationPageTurnEffect? simulationPageTurnEffect,
     bool? automaticUpdateChecks,
+    bool? autoResumeLastRead,
     bool clearImportedFont = false,
   }) {
     return ReaderSettings(
@@ -211,6 +214,7 @@ class ReaderSettings {
           simulationPageTurnEffect ?? this.simulationPageTurnEffect,
       automaticUpdateChecks:
           automaticUpdateChecks ?? this.automaticUpdateChecks,
+      autoResumeLastRead: autoResumeLastRead ?? this.autoResumeLastRead,
     );
   }
 
@@ -229,6 +233,7 @@ class ReaderSettings {
     'readingMode': readingMode.name,
     'simulationPageTurnEffect': simulationPageTurnEffect.name,
     'automaticUpdateChecks': automaticUpdateChecks,
+    'autoResumeLastRead': autoResumeLastRead,
   };
 
   factory ReaderSettings.fromJson(Map<String, dynamic> json) {
@@ -289,6 +294,7 @@ class ReaderSettings {
             : SimulationPageTurnEffect.simulation,
       ),
       automaticUpdateChecks: json['automaticUpdateChecks'] == true,
+      autoResumeLastRead: json['autoResumeLastRead'] != false,
     );
   }
 }

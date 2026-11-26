@@ -739,6 +739,16 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
     if (simulationTurnWasActive) {
       _endHorizontalPageTurn(simulationVelocity, width);
     } else if (shouldToggle) {
+      if (!_showOverlay && !_readerModalOpen) {
+        final hitNote = _noteHighlightRegistry.hitTest(
+          event.position,
+          MediaQuery.sizeOf(context),
+        );
+        if (hitNote != null) {
+          unawaited(_showInlineNoteQuickSheet(hitNote));
+          return;
+        }
+      }
       _toggleOverlay();
     }
   }

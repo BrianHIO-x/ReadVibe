@@ -15,6 +15,7 @@ class MainActivity : FlutterActivity() {
     private var bookPickerHandler: BookPickerHandler? = null
     private var docExtractorHandler: DocExtractorHandler? = null
     private var systemTextActionHandler: SystemTextActionHandler? = null
+    private var storageVaultHandler: StorageVaultHandler? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -29,6 +30,7 @@ class MainActivity : FlutterActivity() {
         bookPickerHandler = BookPickerHandler(this, messenger)
         docExtractorHandler = DocExtractorHandler(this, messenger)
         systemTextActionHandler = SystemTextActionHandler(this, messenger)
+        storageVaultHandler = StorageVaultHandler(this, messenger)
     }
 
     override fun onPause() {
@@ -50,6 +52,7 @@ class MainActivity : FlutterActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (bookPickerHandler?.onActivityResult(requestCode, resultCode, data) == true) return
         if (bookExporter?.onActivityResult(requestCode, resultCode, data) == true) return
+        if (storageVaultHandler?.onActivityResult(requestCode, resultCode, data) == true) return
         super.onActivityResult(requestCode, resultCode, data)
     }
 
@@ -74,6 +77,8 @@ class MainActivity : FlutterActivity() {
         docExtractorHandler = null
         systemTextActionHandler?.dispose()
         systemTextActionHandler = null
+        storageVaultHandler?.dispose()
+        storageVaultHandler = null
         super.onDestroy()
     }
 }

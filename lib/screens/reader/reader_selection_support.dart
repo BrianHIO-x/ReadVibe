@@ -5,13 +5,25 @@ import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show SelectedContent;
 
+import '../../models/reader_note.dart';
 import '../../services/system_text_action_service.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/app_sheet.dart';
+import '../../widgets/reader_selection_toolbar.dart';
 import '../../theme/app_overlay_theme.dart';
 import 'reader_selection_edge_scroller.dart';
+
+class ReaderSelectionPayload {
+  const ReaderSelectionPayload({
+    required this.selectedText,
+    this.startGlobalDy,
+  });
+
+  final String selectedText;
+  final double? startGlobalDy;
+}
 
 class ReaderSelectionArea extends StatefulWidget {
   final Widget child;
@@ -24,9 +36,21 @@ class ReaderSelectionArea extends StatefulWidget {
   final ScrollController? edgeScrollController;
   final bool edgeScrollEnabled;
 
-  /// Saves the selected text as a note at the current reading position. The
-  /// reader owns the mark list, so the toolbar only forwards the selection.
-  final Future<void> Function(String selectedText)? onAddNote;
+  final Future<void> Function(
+    ReaderSelectionPayload payload,
+    NoteColor color,
+    NoteStyle style,
+  )?
+  onQuickHighlight;
+
+  /// Saves the selected text as a rich note at the resolved reading position.
+  final Future<void> Function(
+    ReaderSelectionPayload payload, {
+    NoteStyle? style,
+  })?
+  onAddNote;
+
+  final Future<void> Function(ReaderSelectionPayload payload)? onShareQuoteCard;
 
   const ReaderSelectionArea({
     super.key,
@@ -39,7 +63,9 @@ class ReaderSelectionArea extends StatefulWidget {
     required this.onReaderModalClosed,
     this.edgeScrollController,
     this.edgeScrollEnabled = true,
+    this.onQuickHighlight,
     this.onAddNote,
+    this.onShareQuoteCard,
   });
 
   @override
@@ -85,6 +111,7 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
   bool _ownsSelectionDrag = false;
   bool _bodyScrollInProgress = false;
   int _scrollMenuGeneration = 0;
+  NoteStyle _selectedStyle = NoteStyle.highlight;
   ValueListenable<SelectableRegionSelectionStatus>? _regionStatus;
   ContextMenuController? _scrollContextMenu;
 
@@ -316,15 +343,52 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
     return null;
   }
 
+  ReaderSelectionPayload? _capturePayload(String selectedText) {
+    final trimmed = selectedText.trim();
+    if (trimmed.isEmpty) return null;
+    double? startDy;
+    final box = _geometryKey.currentContext?.findRenderObject();
+    final point = _geometry?.value.startSelectionPoint;
+    if (box is RenderBox && box.attached && box.hasSize && point != null) {
+      final global = box.localToGlobal(point.localPosition);
+      if (global.isFinite) startDy = global.dy;
+    }
+    return ReaderSelectionPayload(
+      selectedText: trimmed,
+      startGlobalDy: startDy,
+    );
+  }
+
+  Future<void> _quickHighlightSelection(NoteColor color) async {
+    final raw = _selectedContent?.plainText;
+    final payload = raw == null ? null : _capturePayload(raw);
+    final handler = widget.onQuickHighlight;
+    ContextMenuController.removeAny();
+    _selectionAreaKey.currentState?.selectableRegion.clearSelection();
+    if (handler == null || payload == null) return;
+    await handler(payload, color, _selectedStyle);
+  }
+
   /// Hands the selected text to the reader, then dismisses the toolbar and the
-  /// selection so the note dialog opens over clean body text.
+  /// selection so the note composer opens over clean body text.
   Future<void> _addNoteForSelection() async {
-    final selectedText = _selectedContent?.plainText.trim();
+    final raw = _selectedContent?.plainText;
+    final payload = raw == null ? null : _capturePayload(raw);
     final handler = widget.onAddNote;
     ContextMenuController.removeAny();
-    if (handler == null || selectedText == null || selectedText.isEmpty) return;
+    if (handler == null || payload == null) return;
     _selectionAreaKey.currentState?.selectableRegion.clearSelection();
-    await handler(selectedText);
+    await handler(payload, style: _selectedStyle);
+  }
+
+  Future<void> _shareQuoteCardForSelection() async {
+    final raw = _selectedContent?.plainText;
+    final payload = raw == null ? null : _capturePayload(raw);
+    final handler = widget.onShareQuoteCard;
+    ContextMenuController.removeAny();
+    if (handler == null || payload == null) return;
+    _selectionAreaKey.currentState?.selectableRegion.clearSelection();
+    await handler(payload);
   }
 
   Future<void> _runSystemTextAction({required bool translate}) async {
@@ -773,42 +837,25 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
       _scheduleInvalidSelectionClear();
       return const SizedBox.shrink();
     }
-    final buttons = <ContextMenuButtonItem>[
-      copy.copyWith(label: '复制'),
-      if (share != null) share.copyWith(label: '分享'),
-      if (selectAll != null) selectAll.copyWith(label: '全选'),
-      if (widget.onAddNote != null)
-        ContextMenuButtonItem(
-          label: '笔记',
-          onPressed: () => unawaited(_addNoteForSelection()),
-        ),
-      ContextMenuButtonItem(
-        label: '翻译',
-        onPressed: () => unawaited(_runSystemTextAction(translate: true)),
-      ),
-      ContextMenuButtonItem(
-        label: '搜索',
-        onPressed: () => unawaited(_runSystemTextAction(translate: false)),
-      ),
-    ];
-    final baseTheme = Theme.of(context);
-    return Theme(
-      data: baseTheme.copyWith(
-        colorScheme: baseTheme.colorScheme.copyWith(
-          primary: widget.colors.accent,
-          surface: widget.colors.headerBg,
-          onSurface: widget.colors.text,
-        ),
-        textButtonTheme: TextButtonThemeData(
-          style: TextButton.styleFrom(
-            foregroundColor: widget.colors.text,
-            textStyle: const TextStyle(fontWeight: FontWeight.w500),
-          ),
-        ),
-      ),
-      child: AdaptiveTextSelectionToolbar.buttonItems(
+    return StatefulBuilder(
+      builder: (_, setToolbarState) => ReaderSelectionToolbar(
         anchors: _toolbarAnchors(context),
-        buttonItems: buttons,
+        colors: widget.colors,
+        activeStyle: _selectedStyle,
+        onStyleChanged: (style) => setToolbarState(() => _selectedStyle = style),
+        onQuickHighlight: (color) =>
+            unawaited(_quickHighlightSelection(color)),
+        onAddNote: widget.onAddNote == null
+            ? null
+            : () => unawaited(_addNoteForSelection()),
+        onQuoteCard: widget.onShareQuoteCard == null
+            ? null
+            : () => unawaited(_shareQuoteCardForSelection()),
+        onCopy: () => copy.onPressed?.call(),
+        onShare: share?.onPressed,
+        onSelectAll: selectAll?.onPressed,
+        onTranslate: () => unawaited(_runSystemTextAction(translate: true)),
+        onSearch: () => unawaited(_runSystemTextAction(translate: false)),
       ),
     );
   }

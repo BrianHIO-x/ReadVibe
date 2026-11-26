@@ -5,17 +5,20 @@ import 'package:flutter/material.dart';
 import '../models/book.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/private_shelf_lock.dart';
+import '../services/reading_session_store.dart';
 import '../theme/app_theme.dart';
 import '../widgets/app_dialog.dart';
 import '../widgets/private_shelf_sheets.dart';
+import 'private_session_gate.dart';
 import 'reader_window_controller.dart';
 
-/// Owns private shelf lock state, foreground-resume biometric waits,
-/// background auto-lock, and dynamic FLAG_SECURE protection.
+/// Owns private shelf lock state, monotonic lock-delay checks, cold/warm
+/// in-place lock-gate protection, and dynamic FLAG_SECURE protection.
 class PrivateShelfController {
   PrivateShelfController({
     required this.lock,
     required this.storage,
+    required this.sessionStore,
     required this.contextProvider,
     required this.isMounted,
     required this.isOpeningBook,
@@ -26,12 +29,19 @@ class PrivateShelfController {
     required this.onReloadLibrary,
     required this.onMessage,
     required this.onError,
+    this.onRestorePrivateBook,
     this.onAppResume,
-  }) {
+    PrivateSessionGate? gate,
+  }) : gate = gate ?? PrivateSessionGate.instance {
+    this.gate.attach(
+      lock: lock,
+      onUnlocked: _handleGateUnlocked,
+      onReturnToNormalShelf: _handleGateReturnToNormalShelf,
+      onClearShelf: clearPrivateShelf,
+    );
     _lifecycle = AppLifecycleListener(
-      onInactive: _handleAppInactive,
-      onHide: _handleAppHide,
-      onPause: cancelPendingForegroundResume,
+      onHide: _handleAppLeave,
+      onPause: _handleAppLeave,
       onDetach: cancelPendingForegroundResume,
       onResume: _handleAppResume,
     );
@@ -41,6 +51,7 @@ class PrivateShelfController {
 
   final PrivateShelfLock lock;
   final LibraryRepository storage;
+  final ReadingSessionStore sessionStore;
   final BuildContext? Function() contextProvider;
   final bool Function() isMounted;
   final bool Function() isOpeningBook;
@@ -51,7 +62,9 @@ class PrivateShelfController {
   final Future<void> Function() onReloadLibrary;
   final void Function(String message) onMessage;
   final void Function(String message) onError;
+  final Future<void> Function(String bookId)? onRestorePrivateBook;
   final VoidCallback? onAppResume;
+  final PrivateSessionGate gate;
 
   late final AppLifecycleListener _lifecycle;
   PrivateShelfConfig _config = const PrivateShelfConfig();
@@ -61,6 +74,12 @@ class PrivateShelfController {
   Completer<bool>? _pendingForegroundResume;
   Timer? _pendingForegroundTimer;
   bool _flowBusy = false;
+
+  ({int elapsedRealtimeMs, int bootCount, int wallTimeMs})?
+  _backgroundLeftClock;
+  bool _awaitingTimedUnlockCheck = false;
+  bool _pendingColdStartRestore = false;
+  String? _pendingColdStartBookId;
 
   PrivateShelfConfig get config => _config;
   bool get configured => _config.configured;
@@ -88,14 +107,72 @@ class PrivateShelfController {
     }
   }
 
+  void syncThemeColors(ReaderThemeColors colors) {
+    gate.updateColors(colors);
+  }
+
   void _handleAppResume() {
     _resolvePendingForegroundResume(true);
+    if (gate.locked) {
+      gate.onAppResumed();
+    } else if (_awaitingTimedUnlockCheck) {
+      unawaited(_evaluateTimedBackgroundLock());
+    }
     onAppResume?.call();
   }
 
-  void _handleAppHide() {
+  void _handleAppLeave() {
     _resolvePendingForegroundResume(false);
-    lockOnLeave();
+    unawaited(_handleLeaveImpl());
+  }
+
+  Future<void> _handleLeaveImpl() async {
+    if (!_isOpen ||
+        _systemDialogDepth > 0 ||
+        _foregroundPromptDepth > 0 ||
+        gate.authenticating ||
+        !_config.configured ||
+        !isMounted()) {
+      return;
+    }
+    if (gate.locked) return;
+    syncThemeColors(colorsProvider());
+    if (_config.lockDelay == PrivateShelfLockDelay.immediate) {
+      _awaitingTimedUnlockCheck = false;
+      _backgroundLeftClock = null;
+      gate.lock(
+        purpose: '验证以继续隐私空间',
+        hasPendingBook: false,
+      );
+      return;
+    }
+    if (_awaitingTimedUnlockCheck) return;
+    _awaitingTimedUnlockCheck = true;
+    _backgroundLeftClock = await lock.readMonotonicClock();
+  }
+
+  Future<void> _evaluateTimedBackgroundLock() async {
+    _awaitingTimedUnlockCheck = false;
+    final left = _backgroundLeftClock;
+    _backgroundLeftClock = null;
+    if (!_isOpen || !_config.configured || gate.locked || !isMounted()) return;
+    final now = await lock.readMonotonicClock();
+    var expired = false;
+    if (left == null || now == null) {
+      expired = true;
+    } else if (left.bootCount >= 0 && now.bootCount != left.bootCount) {
+      expired = true;
+    } else if (now.elapsedRealtimeMs < left.elapsedRealtimeMs) {
+      expired = true;
+    } else {
+      final elapsedMs = now.elapsedRealtimeMs - left.elapsedRealtimeMs;
+      expired = elapsedMs >= _config.lockDelay.duration.inMilliseconds;
+    }
+    if (expired && isMounted()) {
+      syncThemeColors(colorsProvider());
+      gate.lock(purpose: '已超过自动锁定时长，请验证后继续');
+      gate.onAppResumed();
+    }
   }
 
   void _resolvePendingForegroundResume(bool resumed) {
@@ -110,35 +187,66 @@ class PrivateShelfController {
 
   void cancelPendingForegroundResume() => _resolvePendingForegroundResume(false);
 
-  void _handleAppInactive() {
-    if (_foregroundPromptDepth > 0) return;
-    lockOnLeave();
-  }
-
-  void lockOnLeave() {
-    final context = contextProvider();
-    if (!_isOpen ||
-        _systemDialogDepth > 0 ||
-        !isMounted() ||
-        context == null ||
-        !context.mounted) {
+  /// Locks immediately into an opaque full-screen gate on cold start when the
+  /// previous session was inside the private shelf or reading a private book.
+  void requestColdStartRestore({String? bookId}) {
+    if (!_config.configured) {
+      unawaited(sessionStore.clearPrivateSession());
       return;
     }
-    if (!isOpeningBook()) {
-      final shelfRoute = ModalRoute.of(context);
-      Navigator.of(
-        context,
-      ).popUntil((route) => route == shelfRoute || route is! PopupRoute);
-    }
-    setPrivateMode(false);
+    _pendingColdStartRestore = true;
+    _pendingColdStartBookId = bookId;
+    syncThemeColors(colorsProvider());
+    gate.lock(
+      purpose: bookId != null ? '验证后回到上次阅读的隐私书籍' : '验证后回到隐私书架',
+      hasPendingBook: bookId != null,
+    );
   }
 
-  void setPrivateMode(bool private) {
+  Future<void> _handleGateUnlocked() async {
+    await loadConfig();
+    if (!isMounted()) return;
+    if (_pendingColdStartRestore) {
+      final bookId = _pendingColdStartBookId;
+      _pendingColdStartRestore = false;
+      _pendingColdStartBookId = null;
+      setPrivateMode(true, updateSession: bookId == null);
+      if (bookId != null) {
+        unawaited(onRestorePrivateBook?.call(bookId));
+      } else {
+        unawaited(sessionStore.markPrivateShelf());
+      }
+      return;
+    }
+    if (_isOpen) {
+      unawaited(ReaderWindowController.setSecure(this, true));
+    }
+  }
+
+  Future<void> _handleGateReturnToNormalShelf() async {
+    _pendingColdStartRestore = false;
+    _pendingColdStartBookId = null;
+    _awaitingTimedUnlockCheck = false;
+    _backgroundLeftClock = null;
+    appNavigatorKey.currentState?.popUntil((route) => route.isFirst);
+    setPrivateMode(false);
+    await sessionStore.markLibrary();
+  }
+
+  void setPrivateMode(bool private, {bool updateSession = true}) {
     if (!private) {
       cancelPendingForegroundResume();
+      _awaitingTimedUnlockCheck = false;
+      _backgroundLeftClock = null;
     }
     unawaited(ReaderWindowController.setSecure(this, private));
-    if (_isOpen == private || !isMounted()) return;
+    if (!isMounted()) return;
+    if (updateSession && _isOpen != private) {
+      unawaited(
+        private ? sessionStore.markPrivateShelf() : sessionStore.markLibrary(),
+      );
+    }
+    if (_isOpen == private) return;
     _isOpen = private;
     onPrivateModeChanged(private);
   }
@@ -194,7 +302,7 @@ class PrivateShelfController {
 
   Future<bool> ensureUnlocked(String purpose) async {
     if (!_config.configured) return false;
-    if (_isOpen) return true;
+    if (_isOpen && !gate.locked) return true;
     final result = await _unlock(purpose);
     return result == PrivateShelfUnlock.unlocked &&
         await awaitPrivateShelfForeground() &&
@@ -211,7 +319,7 @@ class PrivateShelfController {
       lock: lock,
       colors: colorsProvider(),
       purpose: purpose,
-      onClearShelf: clearPrivateShelf,
+      onClearShelf: () => clearPrivateShelf(requireConfirm: true),
     );
     await loadConfig();
     return result;
@@ -306,6 +414,7 @@ class PrivateShelfController {
     try {
       await storage.setBooksPrivate(privateIds, private: false);
       await lock.clear();
+      await sessionStore.clearPrivateSession();
     } on Object catch (error, stack) {
       debugPrint('Failed to turn off the private shelf: $error');
       debugPrintStack(stackTrace: stack);
@@ -319,38 +428,41 @@ class PrivateShelfController {
     return true;
   }
 
-  Future<bool> clearPrivateShelf() async {
-    final context = contextProvider();
-    if (context == null || !context.mounted) return false;
+  Future<bool> clearPrivateShelf({bool requireConfirm = true}) async {
     final privateBooks = <Book>[
       for (final book in allBooksProvider())
         if (book.isPrivate) book,
     ];
-    final confirmed = await showAppDialog<bool>(
-      context: context,
-      colors: colorsProvider(),
-      builder: (dialogContext) => AppDialog(
-        title: const Text('清空隐私书架'),
-        content: Text(
-          '没有开启指纹或人脸验证时，只能清空隐私书架后重新设置。'
-          '清空会删除其中的 ${privateBooks.length} 本书和阅读记录，并且无法恢复。',
+    if (requireConfirm) {
+      final context = contextProvider();
+      if (context == null || !context.mounted) return false;
+      final confirmed = await showAppDialog<bool>(
+        context: context,
+        colors: colorsProvider(),
+        builder: (dialogContext) => AppDialog(
+          title: const Text('清空隐私书架'),
+          content: Text(
+            '没有开启指纹或人脸验证时，只能清空隐私书架后重新设置。'
+            '清空会删除其中的 ${privateBooks.length} 本书和阅读记录，并且无法恢复。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('取消'),
+            ),
+            AppDestructiveButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('清空'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
-          ),
-          AppDestructiveButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('清空'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !isMounted()) return false;
+      );
+      if (confirmed != true || !isMounted()) return false;
+    }
     try {
       await storage.deleteBooks(privateBooks.map((book) => book.id));
       await lock.clear();
+      await sessionStore.clearPrivateSession();
     } on Object catch (error, stack) {
       debugPrint('Failed to clear the private shelf: $error');
       debugPrintStack(stackTrace: stack);

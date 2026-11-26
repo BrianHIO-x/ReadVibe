@@ -85,6 +85,10 @@ class StorageUsageService {
       p.join(temporary.path, 'readvibe_updates'),
       p.join(temporary.path, 'readvibe_picked_fonts'),
       p.join(temporary.path, 'readvibe_backup_import'),
+      p.join(temporary.path, 'readvibe_vault_staging'),
+      p.join(temporary.path, 'readvibe_picked'),
+      p.join(temporary.path, 'readvibe_incoming'),
+      p.join(temporary.path, 'readvibe_exports'),
     ];
   }
 
@@ -248,6 +252,40 @@ class StorageUsageService {
         ),
       );
     }
+
+    // Reclaim abandoned import/export/vault staging files older than 1 hour.
+    final stagingCutoff = (referenceTime ?? DateTime.now()).subtract(
+      const Duration(hours: 1),
+    );
+    try {
+      final temporary = await getTemporaryDirectory();
+      for (final dirName in const <String>[
+        'readvibe_vault_staging',
+        'readvibe_picked',
+        'readvibe_incoming',
+        'readvibe_exports',
+      ]) {
+        final target = Directory(p.join(temporary.path, dirName)).absolute;
+        if (!await target.exists()) continue;
+        await for (final entity in target.list(followLinks: false)) {
+          if (!await isOlderThan(entity, stagingCutoff)) continue;
+          try {
+            if (entity is File) {
+              await entity.delete();
+              removedFiles++;
+            } else if (entity is Directory) {
+              await entity.delete(recursive: true);
+              removedDirectories++;
+            }
+          } on FileSystemException {
+            // Best-effort cleanup of stale staging temp entries.
+          }
+        }
+      }
+    } on Object {
+      // Temporary directory cleanup never fails library maintenance.
+    }
+
     return StorageCleanupResult(
       removedFiles: removedFiles,
       removedDirectories: removedDirectories,

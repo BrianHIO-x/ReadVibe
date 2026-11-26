@@ -20,6 +20,7 @@ import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
 import '../models/book.dart';
 import '../models/reader_bookmark.dart';
+import '../models/reader_note.dart';
 import '../models/reader_settings.dart';
 import '../models/reading_paragraph.dart';
 import '../repositories/reader_repositories.dart';
@@ -30,9 +31,12 @@ import '../services/storage_service.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/chapter_list.dart';
-import '../widgets/reader_bookmark_sheet.dart';
 import '../widgets/chapter_editor_sheet.dart';
 import '../widgets/book_search_sheet.dart';
+import '../widgets/reader_note_composer_sheet.dart';
+import '../widgets/reader_note_quick_sheet.dart';
+import '../widgets/reader_notes_hub_sheet.dart';
+import '../widgets/reader_quote_card_sheet.dart';
 import '../widgets/reader_settings_sheet.dart';
 import '../widgets/pressable_scale.dart';
 import '../controllers/chapter_editing_controller.dart';
@@ -44,6 +48,7 @@ import '../controllers/reader_window_controller.dart';
 import 'reader/reader_epub_layout.dart';
 import 'reader/reader_justified_text.dart';
 import 'reader/reader_layout_cache.dart';
+import 'reader/reader_note_highlights.dart';
 import 'reader/reader_pagination_support.dart';
 import 'reader/reader_selection_support.dart';
 import 'reader/reader_selectable_block.dart';
@@ -64,6 +69,7 @@ class ReaderScreen extends StatefulWidget {
   final ReaderRepository? repository;
   final ValueListenable<ReaderThemeColors>? transitionColors;
   final ValueChanged<ReaderSettings>? onSettingsChanged;
+  final ReadingTextAnchor? initialAnchor;
 
   const ReaderScreen({
     super.key,
@@ -71,6 +77,7 @@ class ReaderScreen extends StatefulWidget {
     this.repository,
     this.transitionColors,
     this.onSettingsChanged,
+    this.initialAnchor,
   });
 
   @override
@@ -161,6 +168,11 @@ class _ReaderScreenState extends State<ReaderScreen>
   ReadingProgress? _currentProgress;
   Set<String> _collapsedTocGroupIds = <String>{};
   List<ReaderBookmark> _bookmarks = const <ReaderBookmark>[];
+  List<ReaderNote> _notes = const <ReaderNote>[];
+  Map<int, Map<int, List<ReaderNote>>> _notesByChapterParagraph =
+      const <int, Map<int, List<ReaderNote>>>{};
+  final ReaderNoteHighlightRegistry _noteHighlightRegistry =
+      ReaderNoteHighlightRegistry();
   // Resolving the reading anchor lays out every paragraph above the viewport,
   // so the toggle icon reads this cached flag instead of probing each build.
   // It is refreshed when the chrome appears and whenever a mark is committed.
@@ -515,12 +527,14 @@ class _ReaderScreenState extends State<ReaderScreen>
       debugPrint('Failed to load reader state: $error');
       debugPrintStack(stackTrace: stackTrace);
     }
-    // Marks are auxiliary. Loading them separately keeps a bookmark failure
+    // Marks and notes are auxiliary. Loading them separately keeps a failure
     // from discarding the settings and reading position fetched above.
     try {
+      _notes = await _storage.getNotes(_book.id);
+      _rebuildNotesIndex(_notes);
       _bookmarks = await _storage.getBookmarks(_book.id);
     } on Object catch (error, stackTrace) {
-      debugPrint('Failed to load reader bookmarks: $error');
+      debugPrint('Failed to load reader notes and bookmarks: $error');
       debugPrintStack(stackTrace: stackTrace);
     }
 
@@ -551,11 +565,19 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (loadedSettings.fontFamily != savedSettings.fontFamily) {
       _persistSettings(loadedSettings);
     }
-    if (_book.chapters.isNotEmpty && savedProgress != null) {
-      _chapterIndex = savedProgress.chapterIndex.clamp(
-        0,
-        _book.chapters.length - 1,
-      );
+    final launchAnchor = widget.initialAnchor;
+    if (_book.chapters.isNotEmpty) {
+      if (launchAnchor != null) {
+        _chapterIndex = launchAnchor.chapterIndex.clamp(
+          0,
+          _book.chapters.length - 1,
+        );
+      } else if (savedProgress != null) {
+        _chapterIndex = savedProgress.chapterIndex.clamp(
+          0,
+          _book.chapters.length - 1,
+        );
+      }
     }
     if (_book.chapters.isNotEmpty) {
       try {
@@ -615,14 +637,18 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (loadedSettings.readingMode == ReaderReadingMode.continuous) {
       _requestContinuousRestore(
         hasSavedProgressRatio ? safeRestoredProgress : 0,
-        offset: safeRestoredOffset,
+        offset: launchAnchor != null ? null : safeRestoredOffset,
+        textAnchor: launchAnchor,
       );
     } else {
       _scheduleAdjacentWarmup();
       _requestScrollRestore(
-        offset: safeRestoredOffset,
-        progress: hasSavedProgressRatio ? safeRestoredProgress : null,
-        preferProgress: hasSavedProgressRatio,
+        offset: launchAnchor != null ? 0 : safeRestoredOffset,
+        progress: launchAnchor != null
+            ? null
+            : (hasSavedProgressRatio ? safeRestoredProgress : null),
+        preferProgress: launchAnchor == null && hasSavedProgressRatio,
+        textAnchor: launchAnchor,
       );
       _scheduleSimulationSnapshotWarmup();
     }
@@ -1021,6 +1047,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       'update reader keep screen on',
     );
     if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       unawaited(_saveProgress());

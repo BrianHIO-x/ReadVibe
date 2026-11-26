@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'controllers/private_session_gate.dart';
 import 'theme/app_theme.dart';
 import 'theme/app_motion.dart';
 import 'screens/library_screen.dart';
@@ -17,6 +18,7 @@ import 'services/motion_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  PrivateSessionGate.instance.installBackObserver();
   // Draw behind the status and navigation bars everywhere, so every screen can
   // run its own surface under the gesture bar instead of leaving a blank strip.
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -50,6 +52,7 @@ class ReadVibeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: appNavigatorKey,
       title: 'ReadVibe',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.theme,
@@ -57,9 +60,11 @@ class ReadVibeApp extends StatelessWidget {
       themeMode: ThemeMode.system,
       // Every route's lists report their scrolling here, so the display runs
       // at its fastest rate only while something actually moves.
-      builder: (context, child) => NotificationListener<ScrollNotification>(
-        onNotification: MotionService.handleScroll,
-        child: child ?? const SizedBox.shrink(),
+      builder: (context, child) => PrivateLockOverlay(
+        child: NotificationListener<ScrollNotification>(
+          onNotification: MotionService.handleScroll,
+          child: child ?? const SizedBox.shrink(),
+        ),
       ),
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,

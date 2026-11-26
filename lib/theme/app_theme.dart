@@ -105,12 +105,18 @@ class AppTheme {
 
   static ThemeData get theme => ThemeData(
     scaffoldBackgroundColor: background,
-    colorScheme: ColorScheme.light(
+    colorScheme: const ColorScheme.light(
       primary: accent,
-      secondary: accentLight,
-      surface: surface,
       onPrimary: Colors.white,
+      primaryContainer: Color(0xFFF6E3DC),
+      onPrimaryContainer: accent,
+      secondary: accentLight,
+      secondaryContainer: Color(0xFFF6E3DC),
+      onSecondaryContainer: accent,
+      surface: surface,
       onSurface: textPrimary,
+      outline: border,
+      outlineVariant: borderLight,
     ),
     appBarTheme: const AppBarTheme(
       backgroundColor: background,

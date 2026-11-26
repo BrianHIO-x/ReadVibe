@@ -36,7 +36,13 @@ class BookExportHandler(private val activity: Activity, messenger: BinaryMesseng
                     require(name.isNotBlank() && !name.contains('/') && !name.contains('\\')) {
                         "文件名无效"
                     }
-                    require(mime == "text/plain" || mime == "application/pdf" || mime == "application/zip") { "文件类型无效" }
+                    require(
+                        mime == "text/plain" ||
+                            mime == "text/markdown" ||
+                            mime == "application/pdf" ||
+                            mime == "application/zip" ||
+                            mime == "image/png",
+                    ) { "文件类型无效" }
                     pending = Pending(source, result)
                     activity.startActivityForResult(
                         Intent(Intent.ACTION_CREATE_DOCUMENT).apply {

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import '../models/book.dart';
 import '../models/reader_bookmark.dart';
+import '../models/reader_note.dart';
 import '../models/reader_settings.dart';
 import 'app_data_directory_provider.dart';
 
@@ -164,6 +165,14 @@ abstract interface class LibraryRepository
 
   Future<ReadingProgress?> getShelfProgress(Book book);
 
+  Future<List<ReaderNote>> getNotes(
+    String bookId, {
+    bool isPdf = false,
+    int? pdfPageCount,
+  });
+
+  Future<void> saveNotes(String bookId, List<ReaderNote> notes);
+
   Future<ReaderSettings> getSettings();
 
   Future<void> saveSettings(ReaderSettings settings);
@@ -198,6 +207,14 @@ abstract interface class ReaderRepository
 
   Future<void> saveBookmarks(String bookId, List<ReaderBookmark> bookmarks);
 
+  Future<List<ReaderNote>> getNotes(
+    String bookId, {
+    bool isPdf = false,
+    int? pdfPageCount,
+  });
+
+  Future<void> saveNotes(String bookId, List<ReaderNote> notes);
+
   Future<void> deleteBook(String bookId);
 }
 
@@ -222,6 +239,14 @@ abstract interface class PdfReaderRepository {
     Map<int, String> notes,
     int pageCount,
   );
+
+  Future<List<ReaderNote>> getNotes(
+    String bookId, {
+    bool isPdf = true,
+    int? pdfPageCount,
+  });
+
+  Future<void> saveNotes(String bookId, List<ReaderNote> notes);
 
   Future<PdfDisplayTheme> getPdfDisplayTheme(String bookId);
 

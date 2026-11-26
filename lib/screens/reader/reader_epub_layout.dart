@@ -11,6 +11,7 @@ import '../../theme/app_spacing.dart';
 import '../../services/resource_presence.dart';
 import '../../theme/app_theme.dart';
 import 'reader_justified_text.dart';
+import 'reader_note_highlights.dart';
 
 class EpubBlockLayoutMetrics {
   final double leading;
@@ -651,6 +652,8 @@ class ReaderEpubLayout {
     required double width,
     required bool simulationPage,
     double? itemExtent,
+    List<ReaderNoteHighlightSpan> noteSpans = const <ReaderNoteHighlightSpan>[],
+    ReaderNoteHighlightRegistry? noteHighlightRegistry,
   }) {
     final mode = simulationPage
         ? ReaderReadingMode.simulation
@@ -755,9 +758,18 @@ class ReaderEpubLayout {
               : null,
         );
       }
+      final isDarkTheme = themeColors.background.computeLuminance() < 0.35;
+      final decoratedText = noteSpans.isEmpty
+          ? text
+          : ReaderAnnotatedParagraph(
+              spans: noteSpans,
+              isDarkTheme: isDarkTheme,
+              registry: noteHighlightRegistry,
+              child: text,
+            );
       content = simulationPage
-          ? SizedBox(width: width, height: metrics.content, child: text)
-          : SizedBox(width: width, child: text);
+          ? SizedBox(width: width, height: metrics.content, child: decoratedText)
+          : SizedBox(width: width, child: decoratedText);
     }
 
     final backgroundPath = block.style.backgroundImagePath;

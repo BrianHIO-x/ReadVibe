@@ -372,11 +372,11 @@ extension _ReaderScreenOverlayBars on _ReaderScreenState {
                           color: themeColors.secondary,
                         ),
                         _bottomBarButton(
-                          icon: Icons.bookmarks_outlined,
-                          label: '书签',
-                          subtitle: _bookmarks.isEmpty
+                          icon: Icons.sticky_note_2_outlined,
+                          label: '笔记',
+                          subtitle: (_notes.length + _bookmarks.length) == 0
                               ? '未添加'
-                              : '${_bookmarks.length}',
+                              : '${_notes.length + _bookmarks.length}',
                           onTap: _showBookmarks,
                           color: themeColors.secondary,
                         ),

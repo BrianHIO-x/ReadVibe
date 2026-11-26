@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 
 import '../models/book.dart';
 import '../controllers/reader_window_controller.dart';
+import '../models/reader_bookmark.dart';
+import '../models/reader_note.dart';
 import '../models/reader_settings.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/pdf_renderer_service.dart';
@@ -21,17 +23,21 @@ import '../widgets/app_sheet.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/app_popup_menu.dart';
 import '../widgets/pdf_page_text_sheet.dart';
+import '../widgets/reader_note_composer_sheet.dart';
+import '../widgets/reader_notes_hub_sheet.dart';
 
 class PdfReaderScreen extends StatefulWidget {
   final Book book;
   final PdfReaderRepository? repository;
   final PdfRendererGateway? renderer;
+  final int? initialPage;
 
   const PdfReaderScreen({
     super.key,
     required this.book,
     this.repository,
     this.renderer,
+    this.initialPage,
   });
 
   @override
@@ -58,6 +64,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
   bool _deleting = false;
   Set<int> _bookmarks = <int>{};
   Map<int, String> _notes = <int, String>{};
+  List<ReaderNote> _richNotes = const <ReaderNote>[];
   PdfDisplayTheme _displayTheme = PdfDisplayTheme.original;
   int? _sliderPage;
   String? _fatalError;
@@ -101,6 +108,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     PdfReadingProgress? progress;
     Set<int> bookmarks = <int>{};
     Map<int, String> notes = <int, String>{};
+    List<ReaderNote> richNotes = const <ReaderNote>[];
     var displayTheme = PdfDisplayTheme.original;
     try {
       final values = await Future.wait<Object?>([
@@ -113,12 +121,18 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
             .catchError(
               (Object _, StackTrace _) => const <PdfTextAnnotation>[],
             ),
+        _storage.getNotes(
+          widget.book.id,
+          isPdf: true,
+          pdfPageCount: _pageCount,
+        ),
       ]);
       progress = values[0] as PdfReadingProgress?;
       bookmarks = values[1] as Set<int>;
       notes = values[2] as Map<int, String>;
       displayTheme = values[3] as PdfDisplayTheme;
       final embeddedAnnotations = values[4] as List<PdfTextAnnotation>;
+      richNotes = values[5] as List<ReaderNote>;
       for (final annotation in embeddedAnnotations) {
         if (annotation.pageIndex < 0 || annotation.pageIndex >= _pageCount) {
           continue;
@@ -135,14 +149,14 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
       debugPrint('Failed to load PDF state: $error');
       debugPrintStack(stackTrace: stackTrace);
     }
-    final page = _pageCount > 0
-        ? (progress?.pageIndex ?? 0).clamp(0, _pageCount - 1)
-        : 0;
+    final requestedPage = widget.initialPage ?? progress?.pageIndex ?? 0;
+    final page = _pageCount > 0 ? requestedPage.clamp(0, _pageCount - 1) : 0;
     if (!mounted) return;
     setState(() {
       _currentPage = page;
       _bookmarks = bookmarks;
       _notes = notes;
+      _richNotes = richNotes;
       _displayTheme = displayTheme;
       _pageController = PageController(initialPage: page);
       _ready = true;
@@ -288,154 +302,220 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
 
   Future<void> _showBookmarks() async {
     _autoHideTimer?.cancel();
-    final pages = <int>{..._bookmarks, ..._notes.keys}.toList()..sort();
     final colors = _overlayColors;
-    final selected = await showAppSheet<int>(
+    int? selectedPage;
+    await showAppSheet<void>(
       context: context,
       colors: colors,
-      builder: (sheetContext) => AppSheetSurface(
-        colors: colors,
-        child: SafeArea(
-          top: false,
-          bottom: false,
-          child: SizedBox(
-            height: math.min(
-              MediaQuery.sizeOf(sheetContext).height * 0.65,
-              520.0,
-            ),
-            child: Column(
-              children: [
-                const AppSheetHeader(title: 'PDF 书签与笔记'),
-                const Divider(),
-                Expanded(
-                  child: pages.isEmpty
-                      ? Center(
-                          child: Text(
-                            '还没有书签或笔记',
-                            style: TextStyle(color: colors.secondary),
-                          ),
-                        )
-                      : ListView.builder(
-                          padding: EdgeInsets.only(
-                            bottom: MediaQuery.paddingOf(sheetContext).bottom,
-                          ),
-                          itemCount: pages.length,
-                          itemBuilder: (context, index) {
-                            final page = pages[index];
-                            final note = _notes[page];
-                            return ListTile(
-                              leading: Icon(
-                                _bookmarks.contains(page)
-                                    ? Icons.bookmark_rounded
-                                    : Icons.note_alt_outlined,
-                                color: colors.accent,
-                              ),
-                              title: Text('第 ${page + 1} 页'),
-                              subtitle: note == null
-                                  ? null
-                                  : Text(
-                                      note,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                              trailing: const Icon(Icons.chevron_right_rounded),
-                              onTap: () => Navigator.of(sheetContext).pop(page),
-                            );
-                          },
-                        ),
-                ),
-              ],
-            ),
-          ),
+      builder: (sheetContext) => DraggableScrollableSheet(
+        initialChildSize: 0.75,
+        maxChildSize: 0.95,
+        minChildSize: 0.3,
+        builder: (_, scrollController) => StatefulBuilder(
+          builder: (_, setSheetState) {
+            final pageMarks = (_bookmarks.toList()..sort())
+                .map(
+                  (page) => ReaderBookmark(
+                    id: 'pdf:$page',
+                    chapterIndex: page,
+                    chapterTitle: '第 ${page + 1} 页',
+                    paragraphIndex: 0,
+                    characterOffset: 0,
+                    excerpt: '',
+                    note: '',
+                    chapterProgress: _pageCount <= 1
+                        ? 0
+                        : page / (_pageCount - 1),
+                    createdAt: DateTime.now(),
+                  ),
+                )
+                .toList(growable: false);
+            return ReaderNotesHubSheet(
+              bookTitle: widget.book.title,
+              author: widget.book.author,
+              isPdf: true,
+              notes: _richNotes,
+              bookmarks: pageMarks,
+              colors: colors,
+              scrollController: scrollController,
+              onSelectNote: (note) {
+                selectedPage = note.chapterIndex;
+                Navigator.of(sheetContext).pop();
+              },
+              onEditNote: (note) async {
+                await _editPageNoteFor(note.chapterIndex, existing: note);
+                setSheetState(() {});
+              },
+              onDeleteNote: (note) {
+                unawaited(_deleteRichNote(note));
+                setSheetState(() {});
+              },
+              onSelectBookmark: (bookmark) {
+                selectedPage = bookmark.chapterIndex;
+                Navigator.of(sheetContext).pop();
+              },
+              onDeleteBookmark: (bookmark) {
+                final updated = Set<int>.of(_bookmarks)
+                  ..remove(bookmark.chapterIndex);
+                setState(() => _bookmarks = updated);
+                unawaited(
+                  _storage.savePdfBookmarks(
+                    widget.book.id,
+                    updated,
+                    _pageCount,
+                  ),
+                );
+                setSheetState(() {});
+              },
+              onAddNoteFromHub: () async {
+                await _editPageNoteFor(_currentPage);
+                setSheetState(() {});
+              },
+            );
+          },
         ),
       ),
     );
-    if (selected != null && mounted) await _goToPage(selected);
+    if (selectedPage != null && mounted) await _goToPage(selectedPage!);
     if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
 
   Future<void> _editPageNote() async {
+    ReaderNote? existing;
+    for (final note in _richNotes) {
+      if (note.chapterIndex == _currentPage) {
+        existing = note;
+        break;
+      }
+    }
+    await _editPageNoteFor(_currentPage, existing: existing);
+  }
+
+  Future<void> _editPageNoteFor(
+    int pageIndex, {
+    ReaderNote? existing,
+    String? initialQuote,
+  }) async {
     if (_savingNote) return;
-    final pageIndex = _currentPage;
     _autoHideTimer?.cancel();
-    final controller = TextEditingController(text: _notes[_currentPage] ?? '');
-    final note = await showAppDialog<String?>(
+    final draft = await showReaderNoteComposerSheet(
       context: context,
       colors: _overlayColors,
-      builder: (dialogContext) => AppDialog(
-        title: Text('第 ${_currentPage + 1} 页笔记'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          minLines: 4,
-          maxLines: 8,
-          maxLength: 4000,
-          decoration: const InputDecoration(hintText: '输入本地笔记'),
-        ),
-        actions: [
-          if (_notes.containsKey(_currentPage))
-            AppDestructiveButton(
-              filled: false,
-              onPressed: () => Navigator.of(dialogContext).pop(''),
-              child: const Text('删除笔记'),
-            ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
+      title: existing != null ? '编辑第 ${pageIndex + 1} 页笔记' : '添加第 ${pageIndex + 1} 页笔记',
+      locationLabel: '第 ${pageIndex + 1} 页 · 共 $_pageCount 页',
+      initialQuote: existing?.quote ?? (initialQuote ?? ''),
+      initialContent: existing?.content ?? '',
+      initialColor: existing?.color ?? NoteColor.amber,
+      initialStyle: existing?.style ?? NoteStyle.highlight,
+      initialCategory: existing?.category ?? NoteCategory.thought,
+      initialTags: existing?.tags ?? const <String>[],
+      allowStyleSelection: false,
+      allowEditQuote: true,
+      allowDelete: existing != null,
     );
-    controller.dispose();
-    if (note == null || !mounted) return;
+    if (draft == null || !mounted) return;
     _savingNote = true;
-    final nextNotes = Map<int, String>.of(_notes);
-    final normalized = note.trim();
-    if (normalized.isEmpty) {
-      nextNotes.remove(pageIndex);
+    try {
+      final nextRich = List<ReaderNote>.of(_richNotes);
+      if (draft.deleted && existing != null) {
+        nextRich.removeWhere((n) => n.id == existing.id);
+      } else if (existing != null) {
+        final idx = nextRich.indexWhere((n) => n.id == existing.id);
+        if (idx >= 0) {
+          nextRich[idx] = nextRich[idx].copyWith(
+            quote: draft.quote,
+            content: draft.content,
+            color: draft.color,
+            category: draft.category,
+            tags: draft.tags,
+            updatedAt: DateTime.now(),
+          );
+        }
+      } else {
+        final now = DateTime.now();
+        nextRich.add(
+          ReaderNote(
+            id: 'pdf:${widget.book.id}:$pageIndex:${now.microsecondsSinceEpoch}',
+            bookId: widget.book.id,
+            chapterIndex: pageIndex,
+            chapterTitle: '第 ${pageIndex + 1} 页',
+            paragraphIndex: -1,
+            quote: draft.quote,
+            content: draft.content,
+            color: draft.color,
+            style: draft.style,
+            category: draft.category,
+            tags: draft.tags,
+            chapterProgress: _pageCount <= 1 ? 0 : pageIndex / (_pageCount - 1),
+            isPdf: true,
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+      }
+      await _commitPdfRichNotes(nextRich, syncPageIndex: pageIndex);
+    } finally {
+      _savingNote = false;
+    }
+    if (mounted && _chromeVisible) _scheduleChromeAutoHide();
+  }
+
+  Future<void> _deleteRichNote(ReaderNote note) async {
+    final nextRich = _richNotes.where((n) => n.id != note.id).toList();
+    await _commitPdfRichNotes(nextRich, syncPageIndex: note.chapterIndex);
+  }
+
+  Future<void> _commitPdfRichNotes(
+    List<ReaderNote> nextRich, {
+    required int syncPageIndex,
+  }) async {
+    final sorted = sortedReaderNotes(nextRich);
+    final nextLegacy = Map<int, String>.of(_notes);
+    final pageNotes = sorted
+        .where((n) => n.chapterIndex == syncPageIndex)
+        .map((n) => n.hasContent ? n.content : n.quote)
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
+    final combinedSummary = pageNotes.join('\n');
+    if (combinedSummary.isEmpty) {
+      nextLegacy.remove(syncPageIndex);
     } else {
-      nextNotes[pageIndex] = normalized;
+      nextLegacy[syncPageIndex] = combinedSummary;
     }
     try {
-      await _storage.savePdfNotes(widget.book.id, nextNotes, _pageCount);
+      await Future.wait([
+        _storage.saveNotes(widget.book.id, sorted),
+        _storage.savePdfNotes(widget.book.id, nextLegacy, _pageCount),
+      ]);
     } on Object catch (error) {
       debugPrint('PDF note save failed: $error');
-      _savingNote = false;
       if (mounted) {
         AppToast.error(context, '笔记保存失败，请重试', colors: _overlayColors);
       }
       return;
     }
-    if (mounted) setState(() => _notes = nextNotes);
+    if (mounted) {
+      setState(() {
+        _richNotes = sorted;
+        _notes = nextLegacy;
+      });
+    }
     final sourcePath = _sourcePath;
     if (sourcePath != null) {
       try {
         await _renderer.syncTextNote(
           filePath: sourcePath,
-          pageIndex: pageIndex,
-          noteId: 'ReadVibe:${widget.book.id}:$pageIndex',
-          contents: note.trim(),
+          pageIndex: syncPageIndex,
+          noteId: 'ReadVibe:${widget.book.id}:$syncPageIndex',
+          contents: combinedSummary,
         );
         _renderTasks.clear();
         if (mounted) setState(() {});
       } on Object catch (error, stackTrace) {
         debugPrint('Failed to embed PDF text annotation: $error');
         debugPrintStack(stackTrace: stackTrace);
-        if (mounted) {
-          AppToast.error(
-            context,
-            '本地笔记已保存，但写入 PDF 批注失败',
-            colors: _overlayColors,
-          );
-        }
       }
     }
-    _savingNote = false;
-    if (mounted && _chromeVisible) _scheduleChromeAutoHide();
   }
 
   Future<List<PdfTextSearchResult>> _searchPdf(String query) async {
@@ -581,6 +661,8 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
           source: source,
           colors: colors,
           scrollController: scrollController,
+          onAddNote: (selectedQuote) =>
+              _editPageNoteFor(pageIndex, initialQuote: selectedQuote),
         ),
       ),
     );
@@ -1207,15 +1289,19 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
                       ),
                     ),
                     IconButton(
-                      tooltip: _notes.containsKey(_currentPage)
-                          ? '编辑笔记'
-                          : '添加笔记',
+                      tooltip:
+                          _richNotes.any((n) => n.chapterIndex == _currentPage)
+                          ? '编辑本页笔记'
+                          : '添加本页笔记',
                       onPressed: _editPageNote,
                       icon: Icon(
-                        _notes.containsKey(_currentPage)
+                        _richNotes.any((n) => n.chapterIndex == _currentPage)
                             ? Icons.note_alt_rounded
                             : Icons.note_add_outlined,
-                        color: _notes.containsKey(_currentPage)
+                        color:
+                            _richNotes.any(
+                              (n) => n.chapterIndex == _currentPage,
+                            )
                             ? Colors.lightBlueAccent
                             : Colors.white70,
                       ),
