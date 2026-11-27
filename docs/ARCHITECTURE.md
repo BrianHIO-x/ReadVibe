@@ -247,7 +247,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `app_toast.dart` | 全局悬浮灵动胶囊轻提示（`AppToast`）。基于根 `OverlayEntry` + `RepaintBoundary` 纯合成层驱动（零毛玻璃与零底层重绘），按正文长度自适应紧凑胶囊/圆角卡宽度并适配浅/暖/深/纯黑主题的高对比暖墨配色；支持 `SpringSimulation` 弹簧上浮、连续触发时的原地宽幅形变（`AnimatedSize` + 微弹不闪烁）、语义色徽标/高亮色珠/加载指示与下滑轻触关闭，并始终浮于面板和对话框之上且不拦截外部操作。 |
+| `app_toast.dart` | 全局悬浮灵动胶囊轻提示（`AppToast`）。基于根 `OverlayEntry` + `RepaintBoundary` 纯合成层驱动（零毛玻璃与零底层重绘），按正文长度自适应紧凑胶囊/圆角卡宽度，底色、微光渐变、描边、文字、柔和阴影与语义徽标完整跟随当前书籍/页面主题（浅色、暖色、深色、纯黑）；支持 `SpringSimulation` 弹簧上浮、连续触发时的原地宽幅形变（`AnimatedSize` + 微弹不闪烁）、语义色徽标/高亮色珠/加载指示与下滑轻触关闭，并始终浮于面板和对话框之上且不拦截外部操作。 |
 | `app_dialog.dart` | 应用统一对话框。`showAppDialog` 捕获主题上下文并控制入场/退场时长与遮罩透明度，`_AppDialogRoute` 在淡入的同时从 96% 尺寸居中放大，退场使用翻转曲线；`AppDialog` 规范内边距与最大宽度；`AppDestructiveButton` 以错误色呈现破坏性操作（填充或描边两态）。 |
 | `app_sheet.dart` | 应用统一全沉浸底部面板。`showAppSheet` 通过轻量 `ModalBottomSheetRoute` 承载可滚动面板（无毛玻璃模糊，保留背景正文可见与低开销）并补齐 `sheetCurve` 入场与翻转退场；`AppSheetSurface` 保持 28dp 顶部圆角、纸面直达屏幕底部全沉浸与平滑 `AnimatedSize` 高度形变；`AppSheetDragHandle` 融入 `AppSheetHeader` 或各无顶栏滚动区顶部，避免遮挡裁切滚动内容。 |
 | `app_popup_menu.dart` | 主题化弹出菜单。`AppPopupMenuButton` 自行计算锚点矩形后调用 `showMenu`，限定宽度并绘制选中态（勾选图标与强调底色）；可选的 `menuRightInset` 把菜单右缘钉在距屏幕右边固定距离处，用于与下方内容列对齐；`AppMenuEntry` 携带值、标签、图标与选中标记。 |

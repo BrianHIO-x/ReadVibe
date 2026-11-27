@@ -377,38 +377,80 @@ class _ToastCapsuleOverlayState extends State<_ToastCapsuleOverlay>
     final palette = _payload.palette;
     final isDarkPaper = AppOverlayTheme.isDark(palette);
     final isOledBlack = palette.background.computeLuminance() < 0.01;
+    final isPureWhite = palette.background.computeLuminance() > 0.98;
 
-    // Warm obsidian-espresso pill on light/warm pages for jewel-like contrast
-    // without covering reading prose in a muddy beige rectangle; warm elevated
-    // graphite on dark/OLED pages with delicate luminous rim.
+    // Follow the active book / app reading theme seamlessly across Light,
+    // Warm, Dark, and OLED Black surfaces with soft floating elevation.
     final Color bgTop;
     final Color bgBottom;
     final Color rimColor;
     final Color textColor;
+    final Color shadowBase;
+    final double shadowWideAlpha;
+    final double shadowTightAlpha;
     if (isOledBlack) {
-      bgTop = const Color(0xFF25211F);
-      bgBottom = const Color(0xFF1B1816);
+      bgTop = const Color(0xFF211E1C);
+      bgBottom = const Color(0xFF151311);
       rimColor = Colors.white.withValues(alpha: 0.16);
-      textColor = const Color(0xFFF0E9E0);
+      textColor = const Color(0xFFE8E0D6);
+      shadowBase = Colors.black;
+      shadowWideAlpha = 0.56;
+      shadowTightAlpha = 0.36;
     } else if (isDarkPaper) {
-      bgTop = const Color(0xFF352F2B);
-      bgBottom = const Color(0xFF2B2622);
-      rimColor = Colors.white.withValues(alpha: 0.14);
-      textColor = const Color(0xFFF5EFE8);
+      bgTop = Color.alphaBlend(
+        Colors.white.withValues(alpha: 0.085),
+        palette.headerBg,
+      );
+      bgBottom = Color.alphaBlend(
+        Colors.white.withValues(alpha: 0.03),
+        palette.headerBg,
+      );
+      rimColor = Color.alphaBlend(
+        Colors.white.withValues(alpha: 0.12),
+        palette.border,
+      );
+      textColor = palette.text;
+      shadowBase = Colors.black;
+      shadowWideAlpha = 0.44;
+      shadowTightAlpha = 0.26;
+    } else if (isPureWhite) {
+      bgTop = const Color(0xFFFFFFFF);
+      bgBottom = const Color(0xFFFAF8F5);
+      rimColor = palette.border;
+      textColor = palette.text;
+      shadowBase = const Color(0xFF2B221B);
+      shadowWideAlpha = 0.13;
+      shadowTightAlpha = 0.06;
     } else {
-      bgTop = const Color(0xFF332B26);
-      bgBottom = const Color(0xFF27211C);
-      rimColor = Colors.white.withValues(alpha: 0.13);
-      textColor = const Color(0xFFFAF6F0);
+      bgTop = Color.alphaBlend(
+        Colors.white.withValues(alpha: 0.85),
+        palette.headerBg,
+      );
+      bgBottom = Color.alphaBlend(
+        Colors.white.withValues(alpha: 0.42),
+        palette.headerBg,
+      );
+      rimColor = Color.alphaBlend(
+        palette.text.withValues(alpha: 0.06),
+        palette.border,
+      );
+      textColor = palette.text;
+      shadowBase = const Color(0xFF3D3229);
+      shadowWideAlpha = 0.15;
+      shadowTightAlpha = 0.07;
     }
 
     final Color badgeAccent =
         _payload.swatchColor ??
         _payload.accentColor ??
         switch (_payload.tone) {
-          AppToastTone.info => const Color(0xFFEBA07C),
-          AppToastTone.success => const Color(0xFF7BE0A3),
-          AppToastTone.error => const Color(0xFFFF8C8C),
+          AppToastTone.info => palette.accent,
+          AppToastTone.success =>
+            isDarkPaper ? const Color(0xFF82C99A) : AppTheme.success,
+          AppToastTone.error =>
+            isDarkPaper
+                ? const Color(0xFFF08A8A)
+                : AppOverlayTheme.danger(palette),
         };
     final IconData iconData =
         _payload.icon ??
@@ -481,19 +523,19 @@ class _ToastCapsuleOverlayState extends State<_ToastCapsuleOverlay>
                           colors: [bgTop, bgBottom],
                         ),
                         borderRadius: borderRadius,
-                        border: Border.all(color: rimColor, width: 0.85),
+                        border: Border.all(color: rimColor, width: 0.9),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(
-                              alpha: isDarkPaper ? 0.44 : 0.22,
+                            color: shadowBase.withValues(
+                              alpha: shadowWideAlpha,
                             ),
-                            blurRadius: 24,
+                            blurRadius: 22,
                             spreadRadius: -3,
-                            offset: const Offset(0, 10),
+                            offset: const Offset(0, 8),
                           ),
                           BoxShadow(
-                            color: Colors.black.withValues(
-                              alpha: isDarkPaper ? 0.28 : 0.10,
+                            color: shadowBase.withValues(
+                              alpha: shadowTightAlpha,
                             ),
                             blurRadius: 6,
                             offset: const Offset(0, 2),
@@ -537,6 +579,7 @@ class _ToastCapsuleOverlayState extends State<_ToastCapsuleOverlay>
                                   swatchColor: _payload.swatchColor,
                                   accent: badgeAccent,
                                   icon: iconData,
+                                  isDark: isDarkPaper,
                                 ),
                                 const SizedBox(width: 9),
                                 Flexible(
@@ -577,12 +620,14 @@ class _ToastBadge extends StatelessWidget {
     required this.swatchColor,
     required this.accent,
     required this.icon,
+    required this.isDark,
   });
 
   final bool loading;
   final Color? swatchColor;
   final Color accent;
   final IconData icon;
+  final bool isDark;
 
   @override
   Widget build(BuildContext context) {
@@ -607,7 +652,7 @@ class _ToastBadge extends StatelessWidget {
         height: 22,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: swatchColor!.withValues(alpha: 0.24),
+          color: swatchColor!.withValues(alpha: isDark ? 0.24 : 0.18),
         ),
         child: Center(
           child: Container(
@@ -616,10 +661,16 @@ class _ToastBadge extends StatelessWidget {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: swatchColor,
+              border: isDark
+                  ? null
+                  : Border.all(
+                      color: swatchColor!.withValues(alpha: 0.45),
+                      width: 0.6,
+                    ),
               boxShadow: [
                 BoxShadow(
-                  color: swatchColor!.withValues(alpha: 0.55),
-                  blurRadius: 6,
+                  color: swatchColor!.withValues(alpha: isDark ? 0.55 : 0.35),
+                  blurRadius: 5,
                 ),
               ],
             ),
@@ -633,7 +684,7 @@ class _ToastBadge extends StatelessWidget {
       height: 24,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: accent.withValues(alpha: 0.18),
+        color: accent.withValues(alpha: isDark ? 0.19 : 0.13),
       ),
       child: Center(child: Icon(icon, size: 14.5, color: accent)),
     );
