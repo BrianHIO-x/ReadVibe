@@ -8,6 +8,7 @@ import '../theme/app_motion.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_choice_pill.dart';
 import 'app_sheet.dart';
 import 'pressable_scale.dart';
 
@@ -500,36 +501,23 @@ class _ReaderNoteComposerSheetState extends State<_ReaderNoteComposerSheet> {
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             for (final tag in displayTags)
-              PressableScale(
-                pressedScale: 0.95,
-                child: FilterChip(
-                  label: Text('#$tag', style: const TextStyle(fontSize: 12)),
-                  selected: _tags.contains(tag),
-                  showCheckmark: false,
-                  visualDensity: VisualDensity.compact,
-                  selectedColor: accentColor.withValues(alpha: 0.16),
-                  side: BorderSide(
-                    color: _tags.contains(tag) ? accentColor : colors.border,
-                  ),
-                  labelStyle: TextStyle(
-                    color: _tags.contains(tag) ? accentColor : colors.secondary,
-                    fontWeight: _tags.contains(tag)
-                        ? FontWeight.w600
-                        : FontWeight.w400,
-                  ),
-                  onSelected: (_) => _toggleTag(tag),
-                ),
+              AppChoicePill(
+                label: '#$tag',
+                selected: _tags.contains(tag),
+                compact: true,
+                accentColor: accentColor,
+                colors: colors,
+                onTap: () => _toggleTag(tag),
               ),
             if (!_addingTag && _tags.length < maxReaderNoteTags)
-              PressableScale(
-                pressedScale: 0.95,
-                child: ActionChip(
-                  avatar: Icon(Icons.add_rounded, size: 15, color: accentColor),
-                  label: const Text('自定义', style: TextStyle(fontSize: 12)),
-                  visualDensity: VisualDensity.compact,
-                  side: BorderSide(color: colors.border),
-                  onPressed: () => setState(() => _addingTag = true),
-                ),
+              AppChoicePill(
+                icon: Icons.add_rounded,
+                label: '自定义',
+                selected: false,
+                compact: true,
+                accentColor: accentColor,
+                colors: colors,
+                onTap: () => setState(() => _addingTag = true),
               ),
           ],
         ),

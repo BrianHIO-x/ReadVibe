@@ -137,6 +137,8 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
 
     return AppSheetSurface(
       colors: widget.colors,
+      floating: false,
+      animateSize: false,
       child: SafeArea(
         top: false,
         bottom: false,

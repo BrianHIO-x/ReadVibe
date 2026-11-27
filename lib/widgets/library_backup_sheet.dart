@@ -10,6 +10,7 @@ import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_segmented_control.dart';
 import 'app_sheet.dart';
+import 'app_switch.dart';
 import 'app_toast.dart';
 
 Future<void> showLibraryBackupSheet(
@@ -315,10 +316,22 @@ class _LibraryBackupSheetState extends State<_LibraryBackupSheet> {
                       onChanged: (selected) => setState(() => _mode = selected),
                     ),
                     const SizedBox(height: AppSpacing.lg),
-                    if (_mode == _BackupSheetMode.exportBackup)
-                      _buildExportView()
-                    else
-                      _buildRestoreView(),
+                    AppTabTransition(
+                      index: _mode.index,
+                      child: _mode == _BackupSheetMode.exportBackup
+                          ? KeyedSubtree(
+                              key: const ValueKey<_BackupSheetMode>(
+                                _BackupSheetMode.exportBackup,
+                              ),
+                              child: _buildExportView(),
+                            )
+                          : KeyedSubtree(
+                              key: const ValueKey<_BackupSheetMode>(
+                                _BackupSheetMode.restoreBackup,
+                              ),
+                              child: _buildRestoreView(),
+                            ),
+                    ),
                   ],
                 ),
               ),
@@ -333,8 +346,9 @@ class _LibraryBackupSheetState extends State<_LibraryBackupSheet> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SwitchListTile.adaptive(
-          contentPadding: EdgeInsets.zero,
+        AppSwitchTile(
+          colors: widget.colors,
+          contentPadding: const EdgeInsets.symmetric(vertical: 8),
           title: Text('包含完整书籍文件', style: TextStyle(color: widget.colors.text)),
           subtitle: Text(
             '包含已导入的章节正文、PDF、EPUB 图片与内置资源，换机可直接阅读',
@@ -345,8 +359,9 @@ class _LibraryBackupSheetState extends State<_LibraryBackupSheet> {
               ? null
               : (v) => setState(() => _includeBookFiles = v),
         ),
-        SwitchListTile.adaptive(
-          contentPadding: EdgeInsets.zero,
+        AppSwitchTile(
+          colors: widget.colors,
+          contentPadding: const EdgeInsets.symmetric(vertical: 8),
           title: Text('包含全局设置与字体', style: TextStyle(color: widget.colors.text)),
           subtitle: Text(
             '保存主题、字号排版设置与已导入的自定义字体文件',
@@ -357,8 +372,9 @@ class _LibraryBackupSheetState extends State<_LibraryBackupSheet> {
               ? null
               : (v) => setState(() => _includeSettings = v),
         ),
-        SwitchListTile.adaptive(
-          contentPadding: EdgeInsets.zero,
+        AppSwitchTile(
+          colors: widget.colors,
+          contentPadding: const EdgeInsets.symmetric(vertical: 8),
           title: Text('包含隐私书架内容', style: TextStyle(color: widget.colors.text)),
           subtitle: Text(
             widget.privateShelf.configured
@@ -436,8 +452,9 @@ class _LibraryBackupSheetState extends State<_LibraryBackupSheet> {
           ),
           const SizedBox(height: AppSpacing.sm),
           if (preview.hasSettings)
-            SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
+            AppSwitchTile(
+              colors: widget.colors,
+              contentPadding: const EdgeInsets.symmetric(vertical: 8),
               title: Text(
                 '恢复全局设置与导入字体',
                 style: TextStyle(color: widget.colors.text),
@@ -448,8 +465,9 @@ class _LibraryBackupSheetState extends State<_LibraryBackupSheet> {
                   : (v) => setState(() => _restoreSettings = v),
             ),
           if (preview.privateBookCount > 0) ...[
-            SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
+            AppSwitchTile(
+              colors: widget.colors,
+              contentPadding: const EdgeInsets.symmetric(vertical: 8),
               title: Text(
                 '将备份中的隐私书籍放入普通书架',
                 style: TextStyle(color: widget.colors.text),

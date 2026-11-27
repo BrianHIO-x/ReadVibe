@@ -9,7 +9,9 @@ import '../theme/app_button_styles.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_choice_pill.dart';
 import 'app_dialog.dart';
+import 'app_segmented_control.dart';
 import 'app_sheet.dart';
 import 'app_toast.dart';
 import 'pressable_scale.dart';
@@ -258,17 +260,38 @@ class _VaultDirectoryPickerSheetState
                     : null,
               ),
               Divider(height: 1, color: colors.border),
-              if (_loading)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 64),
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              else if (!(_access?.supported ?? false))
-                _buildUnsupported(colors)
-              else if (!(_access?.granted ?? false))
-                _buildPermissionGuide(colors, dark)
-              else
-                Flexible(child: _buildDirectoryBrowser(colors, dark)),
+              Flexible(
+                child: AppTabTransition(
+                  index: _loading
+                      ? 0
+                      : !(_access?.supported ?? false)
+                      ? 1
+                      : !(_access?.granted ?? false)
+                      ? 2
+                      : 3,
+                  animateSize: false,
+                  child: _loading
+                      ? const Padding(
+                          key: ValueKey<int>(0),
+                          padding: EdgeInsets.symmetric(vertical: 64),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      : !(_access?.supported ?? false)
+                      ? KeyedSubtree(
+                          key: const ValueKey<int>(1),
+                          child: _buildUnsupported(colors),
+                        )
+                      : !(_access?.granted ?? false)
+                      ? KeyedSubtree(
+                          key: const ValueKey<int>(2),
+                          child: _buildPermissionGuide(colors, dark),
+                        )
+                      : KeyedSubtree(
+                          key: const ValueKey<int>(3),
+                          child: _buildDirectoryBrowser(colors, dark),
+                        ),
+                ),
+              ),
             ],
           ),
         ),
@@ -402,14 +425,12 @@ class _VaultDirectoryPickerSheetState
 
     Widget quickChip(String label, String path) {
       final selected = listing?.currentPath == path;
-      return PressableScale(
+      return AppChoicePill(
+        label: label,
+        selected: selected,
         enabled: !_busy,
-        pressedScale: 0.95,
-        child: ChoiceChip(
-          label: Text(label),
-          selected: selected,
-          onSelected: _busy ? null : (_) => _openDirectory(path),
-        ),
+        colors: colors,
+        onTap: () => _openDirectory(path),
       );
     }
 

@@ -12,10 +12,14 @@ import 'app_theme.dart';
 /// by Flutter's built-in animation APIs.
 class AppMotion {
   /// Tactile press-down micro-feedback duration.
-  static const pressDown = Duration(milliseconds: 90);
+  static const pressDown = Duration(milliseconds: 85);
 
   /// Soft spring-like release duration for pressable controls.
-  static const pressUp = Duration(milliseconds: 170);
+  static const pressUp = Duration(milliseconds: 220);
+
+  /// Minimum time a quick tap holds its compression before springing back so
+  /// light taps still deliver a clear, unmistakable tactile bounce.
+  static const pressImpulseHold = Duration(milliseconds: 55);
 
   /// Micro press feedback (see [PressableScale]).
   static const quick = Duration(milliseconds: 96);
@@ -28,13 +32,17 @@ class AppMotion {
 
   /// Segmented controls and small setting chips. Long enough to read as
   /// deliberate, short enough to keep repeated setting changes responsive.
-  static const control = Duration(milliseconds: 260);
+  static const control = Duration(milliseconds: 280);
+
+  /// Content height / tab transition morph inside floating sheets.
+  static const tabSwitch = Duration(milliseconds: 300);
 
   /// Reader top/bottom chrome.
   static const menu = Duration(milliseconds: 280);
 
   /// Bottom sheets.
-  static const sheet = Duration(milliseconds: 360);
+  static const sheet = Duration(milliseconds: 380);
+  static const sheetClose = Duration(milliseconds: 250);
 
   /// Reader settings are intentionally only a little quicker than other
   /// sheets, keeping the motion readable while making repeated tuning feel

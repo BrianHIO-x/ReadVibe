@@ -9,8 +9,8 @@ import '../repositories/reader_repositories.dart';
 import '../services/chinese_text.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_choice_pill.dart';
 import '../widgets/app_toast.dart';
-import '../widgets/pressable_scale.dart';
 import '../widgets/reader_note_card.dart';
 import '../widgets/reader_note_composer_sheet.dart';
 import '../widgets/reader_quote_card_sheet.dart';
@@ -261,16 +261,31 @@ class _LibraryNotesScreenState extends State<LibraryNotesScreen> {
                                       _selectedColor =
                                           _selectedColor == color ? null : color;
                                     }),
-                                    child: Container(
-                                      width: 22,
-                                      height: 22,
-                                      margin: const EdgeInsets.only(right: 8),
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: color.swatchColor(isDark),
-                                        border: _selectedColor == color
-                                            ? Border.all(color: colors.text, width: 2)
-                                            : null,
+                                    child: AnimatedScale(
+                                      scale: _selectedColor == color
+                                          ? 1.16
+                                          : 1.0,
+                                      duration: const Duration(
+                                        milliseconds: 180,
+                                      ),
+                                      curve: Curves.easeOutBack,
+                                      child: AnimatedContainer(
+                                        duration: const Duration(
+                                          milliseconds: 180,
+                                        ),
+                                        width: 22,
+                                        height: 22,
+                                        margin: const EdgeInsets.only(right: 8),
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: color.swatchColor(isDark),
+                                          border: _selectedColor == color
+                                              ? Border.all(
+                                                  color: colors.text,
+                                                  width: 2,
+                                                )
+                                              : null,
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -280,74 +295,49 @@ class _LibraryNotesScreenState extends State<LibraryNotesScreen> {
                                   if (_booksById[bookId] != null)
                                     Padding(
                                       padding: const EdgeInsets.only(right: 6),
-                                      child: PressableScale(
-                                        pressedScale: 0.95,
-                                        child: FilterChip(
-                                          label: Text(
-                                            _booksById[bookId]!.title,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontSize: 11.5,
-                                            ),
-                                          ),
-                                          selected: _selectedBookId == bookId,
-                                          showCheckmark: false,
-                                          visualDensity: VisualDensity.compact,
-                                          onSelected: (_) => setState(() {
-                                            _selectedBookId =
-                                                _selectedBookId == bookId
-                                                ? null
-                                                : bookId;
-                                          }),
-                                        ),
+                                      child: AppChoicePill(
+                                        label: _booksById[bookId]!.title,
+                                        selected: _selectedBookId == bookId,
+                                        compact: true,
+                                        maxLabelWidth: 140,
+                                        colors: colors,
+                                        onTap: () => setState(() {
+                                          _selectedBookId =
+                                              _selectedBookId == bookId
+                                              ? null
+                                              : bookId;
+                                        }),
                                       ),
                                     ),
                                 for (final cat in NoteCategory.values)
                                   Padding(
                                     padding: const EdgeInsets.only(right: 6),
-                                    child: PressableScale(
-                                      pressedScale: 0.95,
-                                      child: FilterChip(
-                                        label: Text(
-                                          cat.label,
-                                          style: const TextStyle(
-                                            fontSize: 11.5,
-                                          ),
-                                        ),
-                                        selected: _selectedCategory == cat,
-                                        showCheckmark: false,
-                                        visualDensity: VisualDensity.compact,
-                                        onSelected: (_) => setState(() {
-                                          _selectedCategory =
-                                              _selectedCategory == cat
-                                              ? null
-                                              : cat;
-                                        }),
-                                      ),
+                                    child: AppChoicePill(
+                                      label: cat.label,
+                                      selected: _selectedCategory == cat,
+                                      compact: true,
+                                      colors: colors,
+                                      onTap: () => setState(() {
+                                        _selectedCategory =
+                                            _selectedCategory == cat
+                                            ? null
+                                            : cat;
+                                      }),
                                     ),
                                   ),
                                 for (final tag in tags)
                                   Padding(
                                     padding: const EdgeInsets.only(right: 6),
-                                    child: PressableScale(
-                                      pressedScale: 0.95,
-                                      child: FilterChip(
-                                        label: Text(
-                                          '#$tag',
-                                          style: const TextStyle(
-                                            fontSize: 11.5,
-                                          ),
-                                        ),
-                                        selected: _selectedTag == tag,
-                                        showCheckmark: false,
-                                        visualDensity: VisualDensity.compact,
-                                        onSelected: (_) => setState(() {
-                                          _selectedTag = _selectedTag == tag
-                                              ? null
-                                              : tag;
-                                        }),
-                                      ),
+                                    child: AppChoicePill(
+                                      label: '#$tag',
+                                      selected: _selectedTag == tag,
+                                      compact: true,
+                                      colors: colors,
+                                      onTap: () => setState(() {
+                                        _selectedTag = _selectedTag == tag
+                                            ? null
+                                            : tag;
+                                      }),
                                     ),
                                   ),
                               ],

@@ -2,13 +2,12 @@ import 'package:flutter/material.dart';
 
 import '../models/book.dart';
 import '../repositories/reader_repositories.dart';
-import '../theme/app_motion.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_choice_pill.dart';
 import 'app_dialog.dart';
 import 'app_sheet.dart';
 import 'app_toast.dart';
-import 'pressable_scale.dart';
 
 /// Horizontal chip strip for filtering the active shelf by custom group.
 class LibraryGroupBar extends StatelessWidget {
@@ -89,41 +88,14 @@ class _GroupChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PressableScale(
-      pressedScale: 0.95,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(AppRadius.pill),
-          overlayColor: const WidgetStatePropertyAll(Colors.transparent),
-          child: AnimatedContainer(
-            duration: AppMotion.quick,
-            curve: AppMotion.standard,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: selected
-                  ? colors.accent.withValues(alpha: 0.14)
-                  : colors.headerBg,
-              borderRadius: BorderRadius.circular(AppRadius.pill),
-              border: Border.all(
-                color: selected ? colors.accent : colors.border,
-                width: selected ? 1.2 : 1,
-              ),
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                color: selected ? colors.accent : colors.text,
-              ),
-            ),
-          ),
-        ),
+    return Center(
+      child: AppChoicePill(
+        label: label,
+        selected: selected,
+        colors: colors,
+        compact: true,
+        pillShape: true,
+        onTap: onTap,
       ),
     );
   }
@@ -144,38 +116,15 @@ class _GroupActionChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PressableScale(
-      pressedScale: 0.95,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(AppRadius.pill),
-          overlayColor: const WidgetStatePropertyAll(Colors.transparent),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(AppRadius.pill),
-              border: Border.all(color: colors.border),
-            ),
-            alignment: Alignment.center,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 14, color: colors.secondary),
-                const SizedBox(width: 4),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: colors.secondary,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+    return Center(
+      child: AppChoicePill(
+        icon: icon,
+        label: label,
+        selected: false,
+        colors: colors,
+        compact: true,
+        pillShape: true,
+        onTap: onTap,
       ),
     );
   }

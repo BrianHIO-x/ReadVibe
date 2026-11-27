@@ -10,12 +10,13 @@ import '../theme/app_button_styles.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_choice_pill.dart';
 import 'app_dialog.dart';
 import 'app_segmented_control.dart';
 import 'app_sheet.dart';
+import 'app_switch.dart';
 import 'app_toast.dart';
 import 'library_backup_sheet.dart';
-import 'pressable_scale.dart';
 import 'vault_directory_picker_sheet.dart';
 
 Future<void> showDataSafetySheet(
@@ -62,6 +63,8 @@ class _DataSafetySheet extends StatefulWidget {
 class _DataSafetySheetState extends State<_DataSafetySheet> {
   int _tab = 0;
   VaultStatus? _status;
+  int? _optimisticQuotaBytes;
+  bool? _optimisticAutoSync;
   bool _loading = true;
   bool _busy = false;
   String? _busyMessage;
@@ -78,6 +81,8 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
       if (mounted) {
         setState(() {
           _status = next;
+          _optimisticQuotaBytes = null;
+          _optimisticAutoSync = null;
           _loading = false;
         });
       }
@@ -555,9 +560,18 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
                     AppSpacing.lg,
                     AppSpacing.xl + MediaQuery.paddingOf(context).bottom,
                   ),
-                  child: _tab == 0
-                      ? _buildVaultTab(colors, danger)
-                      : _buildZipTab(colors),
+                  child: AppTabTransition(
+                    index: _tab,
+                    child: _tab == 0
+                        ? KeyedSubtree(
+                            key: const ValueKey<int>(0),
+                            child: _buildVaultTab(colors, danger),
+                          )
+                        : KeyedSubtree(
+                            key: const ValueKey<int>(1),
+                            child: _buildZipTab(colors),
+                          ),
+                  ),
                 ),
               ),
             ],
@@ -578,7 +592,8 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
     final config = status?.config ?? const VaultConfig();
     final isBound = config.isBound;
     final valid = status?.permissionValid ?? false;
-    final quotaBytes = config.quotaBytes;
+    final quotaBytes = _optimisticQuotaBytes ?? config.quotaBytes;
+    final autoSync = _optimisticAutoSync ?? config.autoSync;
     final usedBytes = status?.usedBytes ?? 0;
     final quotaRatio = quotaBytes > 0
         ? (usedBytes / quotaBytes).clamp(0.0, 1.0)
@@ -799,22 +814,20 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
         const SizedBox(height: AppSpacing.xs),
         Wrap(
           spacing: 8,
-          runSpacing: 6,
+          runSpacing: 8,
           children: [
             for (final preset in kVaultQuotaPresets)
-              PressableScale(
+              AppChoicePill(
+                label: preset.label,
+                selected: quotaBytes == preset.bytes,
                 enabled: !_busy,
-                pressedScale: 0.95,
-                child: ChoiceChip(
-                  label: Text(preset.label),
-                  selected: config.quotaBytes == preset.bytes,
-                  onSelected: _busy
-                      ? null
-                      : (_) async {
-                          await widget.vaultService.setQuotaBytes(preset.bytes);
-                          await _refreshStatus();
-                        },
-                ),
+                colors: colors,
+                onTap: () async {
+                  if (quotaBytes == preset.bytes) return;
+                  setState(() => _optimisticQuotaBytes = preset.bytes);
+                  await widget.vaultService.setQuotaBytes(preset.bytes);
+                  await _refreshStatus();
+                },
               ),
           ],
         ),
@@ -823,25 +836,28 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
           color: colors.headerBg,
           surfaceTintColor: Colors.transparent,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadius.md),
+            borderRadius: BorderRadius.circular(AppRadius.lg),
             side: BorderSide(color: colors.border),
           ),
           clipBehavior: Clip.antiAlias,
           child: Column(
             children: [
-              SwitchListTile.adaptive(
-                value: config.autoSync,
+              AppSwitchTile(
+                colors: colors,
+                value: autoSync,
                 title: const Text('自动增量同步'),
                 subtitle: const Text('导入书籍、阅读退出、记笔记或调整书架后自动后台更新'),
                 onChanged: _busy
                     ? null
                     : (value) async {
+                        setState(() => _optimisticAutoSync = value);
                         await widget.vaultService.setAutoSync(value);
                         await _refreshStatus();
                       },
               ),
               Divider(height: 1, color: colors.border),
-              SwitchListTile.adaptive(
+              AppSwitchTile(
+                colors: colors,
                 value: config.includePrivate,
                 title: const Text('同步隐私书架'),
                 subtitle: const Text('默认关闭；关闭时会立即删除守护目录中的隐私书籍备份'),

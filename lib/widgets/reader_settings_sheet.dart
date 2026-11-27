@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
+import 'app_segmented_control.dart';
 import 'app_sheet.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
@@ -40,7 +41,7 @@ class ReaderSettingsSheet extends StatelessWidget {
           child: SingleChildScrollView(
             padding: EdgeInsets.fromLTRB(
               AppSpacing.lg,
-              AppSpacing.md,
+              AppSpacing.sm,
               AppSpacing.lg,
               AppSpacing.lg + bottomInset,
             ),
@@ -48,19 +49,6 @@ class ReaderSettingsSheet extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Drag handle
-                Center(
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: colors.secondary.withValues(alpha: 0.30),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: AppSpacing.md),
-
                 // ── Font Size ──────────────────────────────
                 _buildLabel('字号'),
                 const SizedBox(height: AppSpacing.xs),
@@ -234,113 +222,27 @@ class ReaderSettingsSheet extends StatelessWidget {
     );
   }
 
-  /// A segmented-control style selector: a single highlight block slides
-  /// between equally-sized slots as the selection changes, instead of each
-  /// option independently flipping its own background colour.
+  /// Spring-physics segmented control matching the rest of the app.
   Widget _buildSegmentedControl<T>({
     required List<T> options,
     required T selectedValue,
     required String Function(T) labelBuilder,
     required ValueChanged<T> onSelect,
   }) {
-    // Fall back to the first slot if the current value isn't one of the
-    // options (e.g. a value restored from a future settings format) rather
-    // than letting the highlight block land off-screen at index -1.
-    final selectedIndex = options
-        .indexOf(selectedValue)
-        .clamp(0, options.length - 1);
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final itemCount = options.length;
-        final slotWidth = constraints.maxWidth / itemCount;
-        return SizedBox(
-          height: 36,
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: colors.border.withValues(alpha: 0.2),
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                  ),
-                ),
-              ),
-              TweenAnimationBuilder<double>(
-                tween: Tween<double>(
-                  begin: selectedIndex.toDouble(),
-                  end: selectedIndex.toDouble(),
-                ),
-                duration: AppMotion.control,
-                curve: AppMotion.controlCurve,
-                builder: (context, animatedIndex, child) {
-                  return Transform.translate(
-                    offset: Offset(animatedIndex * slotWidth, 0),
-                    child: child,
-                  );
-                },
-                child: SizedBox(
-                  width: slotWidth,
-                  height: 36,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AppSpacing.xs,
-                      vertical: 2,
-                    ),
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: colors.accent,
-                        borderRadius: BorderRadius.circular(AppRadius.sm),
-                        boxShadow: [
-                          BoxShadow(
-                            color: colors.accent.withValues(alpha: 0.24),
-                            blurRadius: 14,
-                            offset: const Offset(0, 5),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              Row(
-                children: List.generate(itemCount, (i) {
-                  final isActive = i == selectedIndex;
-                  final option = options[i];
-                  return SizedBox(
-                    width: slotWidth,
-                    height: 36,
-                    child: Material(
-                      color: Colors.transparent,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(AppRadius.sm),
-                        overlayColor: WidgetStateProperty.all(
-                          Colors.transparent,
-                        ),
-                        onTap: () => onSelect(option),
-                        child: Center(
-                          child: AnimatedDefaultTextStyle(
-                            duration: AppMotion.control,
-                            curve: AppMotion.controlCurve,
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: isActive
-                                  ? FontWeight.w600
-                                  : FontWeight.normal,
-                              color: isActive ? Colors.white : colors.text,
-                            ),
-                            child: Text(labelBuilder(option)),
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                }),
-              ),
-            ],
-          ),
-        );
-      },
+    final safeValue = options.contains(selectedValue)
+        ? selectedValue
+        : options.first;
+    return AppSegmentedControl<T>(
+      options: [
+        for (final option in options)
+          AppSegmentOption<T>(value: option, label: labelBuilder(option)),
+      ],
+      value: safeValue,
+      colors: colors,
+      variant: AppSegmentedVariant.accent,
+      height: 38,
+      fontSize: 13.5,
+      onChanged: onSelect,
     );
   }
 

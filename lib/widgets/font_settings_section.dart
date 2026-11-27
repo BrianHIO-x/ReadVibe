@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../models/reader_settings.dart';
 import '../theme/app_button_styles.dart';
-import '../theme/app_motion.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
-import 'pressable_scale.dart';
+import 'app_segmented_control.dart';
+
+enum _FontChoiceSlot { system, serif, kaiti, imported }
 
 class FontSettingsSection extends StatelessWidget {
   final ReaderSettings settings;
@@ -21,6 +22,13 @@ class FontSettingsSection extends StatelessWidget {
     required this.onImportFont,
   });
 
+  _FontChoiceSlot get _activeSlot {
+    if (settings.usesSystemFont) return _FontChoiceSlot.system;
+    if (settings.usesBuiltinSerif) return _FontChoiceSlot.serif;
+    if (settings.usesBuiltinKaiti) return _FontChoiceSlot.kaiti;
+    return _FontChoiceSlot.imported;
+  }
+
   @override
   Widget build(BuildContext context) {
     final importedFontName = settings.importedFontName;
@@ -29,64 +37,41 @@ class FontSettingsSection extends StatelessWidget {
       children: [
         _buildLabel('字体'),
         const SizedBox(height: AppSpacing.xs),
-        Row(
-          children: [
-            Expanded(
-              child: _FontChoice(
-                label: '系统',
-                selected: settings.usesSystemFont,
-                colors: colors,
-                onTap: () => onChange(
-                  settings.copyWith(
-                    fontFamily: ReaderSettings.systemFontFamily,
-                  ),
-                ),
-              ),
+        AppSegmentedControl<_FontChoiceSlot>(
+          options: [
+            const AppSegmentOption(
+              value: _FontChoiceSlot.system,
+              label: '系统',
             ),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: _FontChoice(
-                label: '宋体',
-                selected: settings.usesBuiltinSerif,
-                colors: colors,
-                onTap: () => onChange(
-                  settings.copyWith(
-                    fontFamily: ReaderSettings.builtinSerifFamily,
-                  ),
-                ),
-              ),
+            const AppSegmentOption(
+              value: _FontChoiceSlot.serif,
+              label: '宋体',
             ),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: _FontChoice(
-                label: '楷体',
-                selected: settings.usesBuiltinKaiti,
-                colors: colors,
-                onTap: () => onChange(
-                  settings.copyWith(
-                    fontFamily: ReaderSettings.builtinKaitiFamily,
-                  ),
-                ),
-              ),
+            const AppSegmentOption(
+              value: _FontChoiceSlot.kaiti,
+              label: '楷体',
             ),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: _FontChoice(
-                label: '导入',
-                subtitle: importedFontName,
-                selected: !settings.usesSystemFont && !settings.usesBundledFont,
-                enabled: settings.hasImportedFont,
-                colors: colors,
-                onTap: settings.hasImportedFont
-                    ? () => onChange(
-                        settings.copyWith(
-                          fontFamily: settings.importedFontFamily,
-                        ),
-                      )
-                    : null,
-              ),
+            AppSegmentOption(
+              value: _FontChoiceSlot.imported,
+              label: '导入',
+              subtitle: importedFontName,
+              enabled: settings.hasImportedFont,
             ),
           ],
+          value: _activeSlot,
+          colors: colors,
+          variant: AppSegmentedVariant.accent,
+          height: importedFontName != null ? 48 : 42,
+          fontSize: 13,
+          onChanged: (slot) {
+            final nextFamily = switch (slot) {
+              _FontChoiceSlot.system => ReaderSettings.systemFontFamily,
+              _FontChoiceSlot.serif => ReaderSettings.builtinSerifFamily,
+              _FontChoiceSlot.kaiti => ReaderSettings.builtinKaitiFamily,
+              _FontChoiceSlot.imported => settings.importedFontFamily,
+            };
+            onChange(settings.copyWith(fontFamily: nextFamily));
+          },
         ),
         const SizedBox(height: AppSpacing.xs),
         SizedBox(
@@ -122,95 +107,6 @@ class FontSettingsSection extends StatelessWidget {
         fontWeight: FontWeight.w500,
         color: colors.secondary,
         letterSpacing: 0.5,
-      ),
-    );
-  }
-}
-
-class _FontChoice extends StatelessWidget {
-  final String label;
-  final String? subtitle;
-  final bool selected;
-  final bool enabled;
-  final ReaderThemeColors colors;
-  final VoidCallback? onTap;
-
-  const _FontChoice({
-    required this.label,
-    this.subtitle,
-    required this.selected,
-    this.enabled = true,
-    required this.colors,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final foreground = selected
-        ? Colors.white
-        : enabled
-        ? colors.text
-        : colors.secondary.withValues(alpha: 0.55);
-
-    return AnimatedScale(
-      scale: selected ? 1.02 : 1.0,
-      duration: AppMotion.control,
-      curve: AppMotion.controlCurve,
-      child: PressableScale(
-        enabled: enabled,
-        pressedScale: 0.96,
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(AppRadius.sm),
-            overlayColor: const WidgetStatePropertyAll(Colors.transparent),
-            onTap: enabled ? onTap : null,
-            child: AnimatedContainer(
-              duration: AppMotion.control,
-              curve: AppMotion.controlCurve,
-              constraints: const BoxConstraints(minHeight: 42),
-              padding: const EdgeInsets.symmetric(
-                vertical: AppSpacing.sm,
-                horizontal: AppSpacing.sm,
-              ),
-              decoration: BoxDecoration(
-                color: selected ? colors.accent : Colors.transparent,
-                borderRadius: BorderRadius.circular(AppRadius.sm),
-                border: Border.all(
-                  color: selected ? colors.accent : colors.border,
-                  width: selected ? 2 : 1,
-                ),
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    label,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: foreground,
-                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                      fontSize: 13,
-                    ),
-                  ),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle!,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: foreground.withValues(alpha: 0.78),
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }

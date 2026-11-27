@@ -10,6 +10,7 @@ import '../services/book_export_service.dart';
 import '../services/chinese_text.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_choice_pill.dart';
 import 'app_popup_menu.dart';
 import 'app_segmented_control.dart';
 import 'app_sheet.dart';
@@ -281,9 +282,19 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
               _buildFilterStrip(colors, isDark),
             Divider(height: 1, color: colors.border),
             Expanded(
-              child: _tab == _HubTab.bookmarks
-                  ? _buildBookmarksList(colors)
-                  : _buildNotesList(colors),
+              child: AppTabTransition(
+                index: _tab.index,
+                animateSize: false,
+                child: _tab == _HubTab.bookmarks
+                    ? KeyedSubtree(
+                        key: const ValueKey<_HubTab>(_HubTab.bookmarks),
+                        child: _buildBookmarksList(colors),
+                      )
+                    : KeyedSubtree(
+                        key: ValueKey<_HubTab>(_tab),
+                        child: _buildNotesList(colors),
+                      ),
+              ),
             ),
           ],
         ),
@@ -303,24 +314,15 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
       ),
       child: Row(
         children: [
-          PressableScale(
-            pressedScale: 0.95,
-            child: ActionChip(
-              avatar: Icon(
-                _sortByTime
-                    ? Icons.schedule_rounded
-                    : Icons.format_list_numbered_rounded,
-                size: 15,
-                color: colors.accent,
-              ),
-              label: Text(
-                _sortByTime ? '最新修改' : (widget.isPdf ? '页码顺序' : '章节顺序'),
-                style: const TextStyle(fontSize: 12),
-              ),
-              visualDensity: VisualDensity.compact,
-              side: BorderSide(color: colors.border),
-              onPressed: () => setState(() => _sortByTime = !_sortByTime),
-            ),
+          AppChoicePill(
+            icon: _sortByTime
+                ? Icons.schedule_rounded
+                : Icons.format_list_numbered_rounded,
+            label: _sortByTime ? '最新修改' : (widget.isPdf ? '页码顺序' : '章节顺序'),
+            selected: false,
+            compact: true,
+            colors: colors,
+            onTap: () => setState(() => _sortByTime = !_sortByTime),
           ),
           const SizedBox(width: AppSpacing.sm),
           for (final color in NoteColor.values) ...[
@@ -328,17 +330,22 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
               onTap: () => setState(() {
                 _colorFilter = _colorFilter == color ? null : color;
               }),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 140),
-                width: 20,
-                height: 20,
-                margin: const EdgeInsets.symmetric(horizontal: 3),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: color.swatchColor(isDark),
-                  border: _colorFilter == color
-                      ? Border.all(color: colors.text, width: 2)
-                      : null,
+              child: AnimatedScale(
+                scale: _colorFilter == color ? 1.16 : 1.0,
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutBack,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  width: 20,
+                  height: 20,
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: color.swatchColor(isDark),
+                    border: _colorFilter == color
+                        ? Border.all(color: colors.text, width: 2)
+                        : null,
+                  ),
                 ),
               ),
             ),
@@ -347,34 +354,28 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
           for (final cat in NoteCategory.values) ...[
             Padding(
               padding: const EdgeInsets.only(right: 6),
-              child: PressableScale(
-                pressedScale: 0.95,
-                child: FilterChip(
-                  label: Text(cat.label, style: const TextStyle(fontSize: 11.5)),
-                  selected: _categoryFilter == cat,
-                  showCheckmark: false,
-                  visualDensity: VisualDensity.compact,
-                  onSelected: (_) => setState(() {
-                    _categoryFilter = _categoryFilter == cat ? null : cat;
-                  }),
-                ),
+              child: AppChoicePill(
+                label: cat.label,
+                selected: _categoryFilter == cat,
+                compact: true,
+                colors: colors,
+                onTap: () => setState(() {
+                  _categoryFilter = _categoryFilter == cat ? null : cat;
+                }),
               ),
             ),
           ],
           for (final tag in tags)
             Padding(
               padding: const EdgeInsets.only(right: 6),
-              child: PressableScale(
-                pressedScale: 0.95,
-                child: FilterChip(
-                  label: Text('#$tag', style: const TextStyle(fontSize: 11.5)),
-                  selected: _tagFilter == tag,
-                  showCheckmark: false,
-                  visualDensity: VisualDensity.compact,
-                  onSelected: (_) => setState(() {
-                    _tagFilter = _tagFilter == tag ? null : tag;
-                  }),
-                ),
+              child: AppChoicePill(
+                label: '#$tag',
+                selected: _tagFilter == tag,
+                compact: true,
+                colors: colors,
+                onTap: () => setState(() {
+                  _tagFilter = _tagFilter == tag ? null : tag;
+                }),
               ),
             ),
         ],

@@ -11,9 +11,9 @@ import '../theme/app_button_styles.dart';
 import '../theme/app_motion.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_choice_pill.dart';
 import 'app_sheet.dart';
 import 'app_toast.dart';
-import 'pressable_scale.dart';
 
 enum QuoteCardTemplate {
   xuanPaper('宣纸书笺'),
@@ -193,32 +193,39 @@ class _ReaderQuoteCardSheetState extends State<_ReaderQuoteCardSheet> {
                           constraints: const BoxConstraints(maxWidth: 360),
                           child: RepaintBoundary(
                             key: _cardBoundaryKey,
-                            child: _QuoteCardCanvas(
-                              template: _template,
-                              bookTitle: widget.bookTitle,
-                              author: widget.author,
-                              note: widget.note,
-                              includeNote:
-                                  _includeNote && widget.note.hasContent,
-                              includeChapter: _includeChapter,
+                            child: AnimatedSwitcher(
+                              duration: AppMotion.tabSwitch,
+                              switchInCurve: AppMotion.controlCurve,
+                              switchOutCurve: Curves.easeInCubic,
+                              child: KeyedSubtree(
+                                key: ValueKey<String>(
+                                  '${_template.name}_${_includeNote}_$_includeChapter',
+                                ),
+                                child: _QuoteCardCanvas(
+                                  template: _template,
+                                  bookTitle: widget.bookTitle,
+                                  author: widget.author,
+                                  note: widget.note,
+                                  includeNote:
+                                      _includeNote && widget.note.hasContent,
+                                  includeChapter: _includeChapter,
+                                ),
+                              ),
                             ),
                           ),
                         ),
                       ),
                       const SizedBox(height: AppSpacing.lg),
                       Wrap(
-                        spacing: AppSpacing.xs,
+                        spacing: AppSpacing.sm,
                         runSpacing: AppSpacing.xs,
                         children: [
                           for (final tmpl in QuoteCardTemplate.values)
-                            PressableScale(
-                              pressedScale: 0.95,
-                              child: ChoiceChip(
-                                label: Text(tmpl.label),
-                                selected: _template == tmpl,
-                                onSelected: (_) =>
-                                    setState(() => _template = tmpl),
-                              ),
+                            AppChoicePill(
+                              label: tmpl.label,
+                              selected: _template == tmpl,
+                              colors: colors,
+                              onTap: () => setState(() => _template = tmpl),
                             ),
                         ],
                       ),
@@ -227,22 +234,23 @@ class _ReaderQuoteCardSheetState extends State<_ReaderQuoteCardSheet> {
                         spacing: AppSpacing.sm,
                         children: [
                           if (widget.note.hasContent)
-                            PressableScale(
-                              pressedScale: 0.95,
-                              child: FilterChip(
-                                label: const Text('包含想法批注'),
-                                selected: _includeNote,
-                                onSelected: (v) =>
-                                    setState(() => _includeNote = v),
-                              ),
+                            AppChoicePill(
+                              label: '包含想法批注',
+                              selected: _includeNote,
+                              showCheckmark: true,
+                              compact: true,
+                              colors: colors,
+                              onTap: () =>
+                                  setState(() => _includeNote = !_includeNote),
                             ),
-                          PressableScale(
-                            pressedScale: 0.95,
-                            child: FilterChip(
-                              label: Text(widget.note.isPdf ? '显示页码' : '显示章节'),
-                              selected: _includeChapter,
-                              onSelected: (v) =>
-                                  setState(() => _includeChapter = v),
+                          AppChoicePill(
+                            label: widget.note.isPdf ? '显示页码' : '显示章节',
+                            selected: _includeChapter,
+                            showCheckmark: true,
+                            compact: true,
+                            colors: colors,
+                            onTap: () => setState(
+                              () => _includeChapter = !_includeChapter,
                             ),
                           ),
                         ],

@@ -238,10 +238,10 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | 文件 | 作用 |
 |---|---|
 | `app_theme.dart` | 全局设计系统。定义暖米色调色板常量、阅读主题色 `ReaderThemeColors`（背景/正文/次级/头部/边框/强调；浅色、暖色、深色与 OLED 纯黑四套，跟随系统时在暖色与深色之间选择）、`getReaderTheme`（系统主题解析）、`systemUiOverlayStyle`（透明状态栏与导航栏，按背景亮度选择图标亮度），以及接入 `AppButtonStyles`、禁用 Material 水波纹的完整亮/暗两套 `ThemeData`。 |
-| `app_button_styles.dart` | 全应用按钮样式与微动效中心。统一输出 `FilledButton`、`ElevatedButton`、`OutlinedButton`、`TextButton`、`IconButton`、`SegmentedButton`、`Chip`、`Switch` 与 `Checkbox` 主题及覆盖样式（`filledOverride`、`outlinedOverride`、`textOverride`、`iconOverride`、`destructiveFilled`、`destructiveText`），全局禁用灰色/黑色 `InkRipple` 闪烁、采用暖调混合态禁用底色、并在 `foregroundBuilder` 中叠加柔和的 0.96 倍按压缩放与 0.86 不透明度触感反馈。 |
-| `app_motion.dart` | 动效令牌与开书过渡。集中全部时长与曲线令牌，包括非对称按压触感时长 `pressDown` (90ms) / `pressUp` (170ms)、翻页 300ms、开书 680ms 与合书 540ms；`sheetCurve` 是贴边面板与抽屉共用的 iOS 面板曲线 `Cubic(0.32, 0.72, 0, 1)`，`exitOf` 给倒放关闭的路由换上翻转曲线，让退场也从快到慢；抽屉关闭 `drawerClose` 比打开更短；`buildFadeScaleRoute` 实现三阶段书香开页路由：封面快照提起放大、单页绕左缘翻开、阅读面接管，关闭按同一时间线倒放，时长为开书的 0.8 倍。路由本身不透明：开合动画进行时书架照常露出，停稳后书架退出画面、其动画暂停，过渡层也不再绘制暗化层、外阴影、底色与圆角裁剪；内部 `_BookRouteTransition`、`_BookRouteFrame`、`_OpeningPage` 管理阴影、圆角、折页阴影与封面 RawImage。 |
+| `app_button_styles.dart` | 全应用按钮样式与弹性动效中心。统一输出 `FilledButton`、`ElevatedButton`、`OutlinedButton`、`TextButton`、`IconButton`、`SegmentedButton`、`Chip`、`Switch` 与 `Checkbox` 主题及覆盖样式，通过 `backgroundBuilder` 渲染 `_TactileButtonChrome` 实现全按钮（胶囊背景、描边、微光渐变与前景文字图标）整体弹性下压（含 55ms 保底按压脉冲与弹簧回弹），全局彻底消除黑色水波纹闪烁。 |
+| `app_motion.dart` | 动效令牌与开书过渡。集中全部时长与曲线令牌，包括非对称按压触感 `pressDown` (85ms) / `pressUp` (220ms) / `pressImpulseHold` (55ms)、页签高度过渡 `tabSwitch` (300ms)、悬浮弹窗 `sheet` (380ms) / `sheetClose` (250ms)、翻页 300ms、开书 680ms 与合书 540ms；`sheetCurve` 是贴边/悬浮面板与抽屉共用的曲线 `Cubic(0.32, 0.72, 0, 1)`，`exitOf` 给倒放关闭的路由换上翻转曲线，让退场也从快到慢；`buildFadeScaleRoute` 实现三阶段书香开页路由：封面快照提起放大、单页绕左缘翻开、阅读面接管，关闭按同一时间线倒放。 |
 | `app_overlay_theme.dart` | 阅读主题下的界面覆盖层。`AppOverlayTheme` 依据 `ReaderThemeColors` 现场派生整套主题（通过 `AppButtonStyles` 统管全套按钮、分段控件、Chip、Switch、Checkbox，及输入框、对话框、抽屉、菜单、Tooltip、滑条、ListTile），全局置为 `NoSplash` 与全透明覆盖层，保证任何页面上浮出的控件与当前阅读纸色一致且点击不黑闪。 |
-| `app_spacing.dart` | 间距与圆角令牌。`AppSpacing`（4/8/12/16/24/32）与 `AppRadius`（8/12/16/24 胶囊）。 |
+| `app_spacing.dart` | 间距与圆角令牌。`AppSpacing`（4/8/12/16/24/32）与 `AppRadius`（8/12/16/24 胶囊/28 悬浮弹窗）。 |
 
 ### lib/widgets/
 
@@ -249,10 +249,12 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 |---|---|
 | `app_toast.dart` | 应用统一轻提示。基于透明 SnackBar 自绘卡片（信息/成功/错误/加载四种图标与配色的时长），支持阅读纸色注入与宽屏居中限制，加载态 30 秒常驻、点击可消。 |
 | `app_dialog.dart` | 应用统一对话框。`showAppDialog` 捕获主题上下文并控制入场/退场时长与遮罩透明度，`_AppDialogRoute` 在淡入的同时从 96% 尺寸居中放大，退场使用翻转曲线；`AppDialog` 规范内边距与最大宽度；`AppDestructiveButton` 以错误色呈现破坏性操作（填充或描边两态）。 |
-| `app_sheet.dart` | 应用统一底部面板。`showAppSheet` 以 `ModalBottomSheetRoute` 承载可滚动面板并保留禁用动画降级，调用方未指定曲线时补上 `sheetCurve` 入场与其翻转曲线退场；`AppSheetSurface` 定制 24dp 圆角纸面；`AppSheetHeader` 提供标题与关闭钮；`AppActionSheet` 为多子项动作列表；面板不再裁掉底部安全区，改由滚动内容自行留白，纸面一直铺到屏幕底缘。 |
+| `app_sheet.dart` | 应用统一悬浮底部弹窗。`showAppSheet` 通过 `_AppSheetRoute`（继承 `ModalBottomSheetRoute`）叠加随手势同步的 `BackdropFilter` 毛玻璃背景模糊与底部缩放抬升入场，同时完整保留下拉手势关闭；`AppSheetSurface` 默认以 28dp 全圆角悬浮卡片呈现（双层柔光阴影、顶部纸面微光描边、居中拖动胶囊、内置 `AnimatedSize` 平滑高度过渡，软键盘弹出自动贴底并剥离重复底部留白）；`AppSheetHeader` 提供精致排版与圆形柔色关闭键；`AppActionSheet` 承载多子项动作列表。 |
 | `app_popup_menu.dart` | 主题化弹出菜单。`AppPopupMenuButton` 自行计算锚点矩形后调用 `showMenu`，限定宽度并绘制选中态（勾选图标与强调底色）；可选的 `menuRightInset` 把菜单右缘钉在距屏幕右边固定距离处，用于与下方内容列对齐；`AppMenuEntry` 携带值、标签、图标与选中标记。 |
-| `app_segmented_control.dart` | 应用统一平滑滑动分段选择器（`AppSegmentOption`、`AppSegmentedControl`），以 `TweenAnimationBuilder` 平移白色/深色选中胶囊配合 `PressableScale` 触感反馈，全面替代原生 `SegmentedButton` 消除灰色水波纹闪屏。 |
-| `pressable_scale.dart` | 纯视觉按压缩放与不透明度微动效。用 Listener 监听原始指针事件，不注册手势识别器，可包裹 InkWell/按钮/Chip 而不劫持点击；采用非对称按下（90ms）与回弹（170ms `controlCurve`）并尊重系统 `disableAnimations`。 |
+| `app_segmented_control.dart` | 弹簧物理滑块分段控件与切页过渡（`AppSegmentOption`、`AppSegmentedControl`、`AppTabTransition`）。基于 `SpringSimulation` 实现可打断弹簧滑动、按运动速度液态拉伸、图标文字随滑块位置实时渐变着色及轻触感反馈（提供悬浮浅色/深色卡与强调色滑块两套变体）；`AppTabTransition` 提供方向感知横向微滑、淡入淡出与平滑高度形变。 |
+| `app_choice_pill.dart` | 弹性动画胶囊选项组件（`AppChoicePill`）。全面替代原生 `ChoiceChip` / `FilterChip` / `ActionChip`，提供平滑底色/描边/微光阴影过渡、选中弹簧跃动与无跳动宽度切换。 |
+| `app_switch.dart` | 液态拉伸开关组件（`AppSwitch`、`AppSwitchTile`）。全面替代 `SwitchListTile.adaptive`，按压与切换过程中圆钮横向液态拉伸并伴随弹簧滑动与柔和行按压高亮。 |
+| `pressable_scale.dart` | 保底弹簧按压反馈。用 `Listener` 监听原始指针事件并由 `AnimationController` + `SpringSimulation` 驱动，确保即便是极短轻触也能完整压下并弹性回弹，且不劫持内部点击手势。 |
 | `side_drawer.dart` | 左侧滑出抽屉。`showSideDrawer` 推入自绘遮罩的弹出路由：拖动时面板与手指 1:1 同步，遮罩透明度由同一拖动量换算；松手时速度超过 200 像素/秒按方向决定，否则拖过四成宽度才关闭；关闭从松手位置接着滑出，未关闭则以临界阻尼弹簧带着松手速度回位，回位途中可以再次抓住。书架全局设置使用它。 |
 | `book_card.dart` | 书架书卡。封面区域复现背景书脊与渐变遮罩（三明治分层供开书动画采样），显示封面图或首字占位；以章节进度与章内进度折算整体百分比，PDF 显示页数口径；可用性受损时角标提示丢失原因；支持 `selectionMode` 多选状态，在封面叠层边缘描边并在右下角绘制圆点勾选徽标（不改变 `paintedHeight` 高度计算）；语义化拼接无障碍标签。 |
 | `chapter_list.dart` | 全屏目录面板。列表底部按系统手势条高度补白，章节行可滚动至手势条之下。`_TocDirectory` 把章节组织为两级卷目录（卷标题聚合、导语类与卷间散章分区），无卷则退化为平铺列表；卷头为 pinned 固定头可折叠并回传展开状态；行尾显示逐章字数（监听 `chapterWordCounts`）；章节行与卷头都使用固定行高，并随系统字号同步增大。目录行采用较小的字号和收窄的边距，从而给标题留出更多宽度。打开目录或点“回到当前章”时，当前章节会按行高算出精确位置并置顶显示。当前章位于展开的卷内时，置顶位置会让出固定卷头的高度。 |
@@ -265,9 +267,9 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `reader_selection_toolbar.dart` | 自绘选区悬浮工具栏。集五色荧光点选、四类划线样式切换、写笔记、金句卡、复制、翻译、搜索、分享与全选于一体。 |
 | `pdf_page_text_sheet.dart` | PDF 单页文字面板。把文字层或 OCR 结果放入可选区面板，除复制、分享与系统文字动作外新增直达“写笔记”。 |
 | `book_search_sheet.dart` | 书内搜索面板。泛型绑定 `SearchMatch`，防重复提交与过期回包（串号丢弃）；按命中区间绘制加粗高亮片段；结果为空、尚未搜索或出错分态展示，达上限提示缩小关键词。 |
-| `reader_settings_sheet.dart` | 阅读设置面板。字号、行高、字体（组合 `FontSettingsSection`）、粗细、页边距、段距、阅读模式与翻页效果、主题全部用自绘滑块式分段控件（高亮块以 `TweenAnimationBuilder` 平移切换）；`_RollingModeDescription` 用于阅读模式说明的上下滚动切换；仿真模式才显示翻页效果选项。系统省电模式开启且选中仿真翻页时，翻页效果下方提示暂以平滑翻页显示。 |
-| `font_settings_section.dart` | 字体选择区。系统/宋体/楷体/导入四选一卡片加导入按钮，导入卡副标题显示字体名并在无导入字体时禁用，选中卡片微放大并描边强调。 |
-| `global_settings_sheet.dart` | 全局设置侧栏（书架左上角打开），根部使用带圆角与底色的 `Material` 以消除内部 `SwitchListTile.adaptive` 在 Debug 下的水波纹断言与遮挡。集中隐私书架入口、“阅读恢复”冷启动开关、“读书笔记/隐私笔记本”入口（`onOpenNotes`）、“数据安全与备份”入口（`onOpenBackup`）、字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口、存储空间区与开源许可页入口；版本号由书架层传入。同文件的 `StorageUsageSection` 自行异步统计并展示分类占用，提供清理缓存与重新统计；`formatStorageBytes` 负责字节展示。 |
+| `reader_settings_sheet.dart` | 阅读设置面板。字号、行高、字体（组合 `FontSettingsSection`）、粗细、页边距、段距、阅读模式与翻页效果、主题全部接入统一的弹簧物理 `AppSegmentedControl`（强调色滑块变体）；`_RollingModeDescription` 用于阅读模式说明的上下滚动切换；仿真模式才显示翻页效果选项。系统省电模式开启且选中仿真翻页时，翻页效果下方提示暂以平滑翻页显示。 |
+| `font_settings_section.dart` | 字体选择区。基于 `AppSegmentedControl` 的系统/宋体/楷体/导入四选一弹簧滑块加导入按钮，导入槽副标题显示字体名并在无导入字体时禁用。 |
+| `global_settings_sheet.dart` | 全局设置侧栏（书架左上角打开），根部使用带圆角与底色的 `Material` 并接入 `AppSwitchTile` 液态开关。集中隐私书架入口、“阅读恢复”冷启动开关、“读书笔记/隐私笔记本”入口（`onOpenNotes`）、“数据安全与备份”入口（`onOpenBackup`）、字体区、外部应用默认项清除、自动检查更新开关、手动检查更新入口、存储空间区与开源许可页入口；版本号由书架层传入。同文件的 `StorageUsageSection` 自行异步统计并展示分类占用，提供清理缓存与重新统计；`formatStorageBytes` 负责字节展示。 |
 | `library_backup_sheet.dart` | 便携压缩包 (`.zip`) 导出与非破坏性合并恢复交互面板。 |
 | `data_safety_sheet.dart` | 数据安全与备份统一面板。以平滑分段页签整合“防卸载守护目录”（支持系统 SAF 直达 `Documents` 与“应用内自选目录（高级）”双绑定模式、状态看板、配额选择、增量同步、核验清理、解绑清空与一键恢复）与“便携压缩包 (.zip)”。 |
 | `vault_directory_picker_sheet.dart` | 主题化应用内守护目录浏览器（高级模式）。按需引导开启“管理所有文件”权限，提供 `Documents` / `Download` / 内部存储快捷跳转、面包含已有 `ReadVibe_Vault` 备份徽标、安全新建子文件夹及一键选中绑定。 |

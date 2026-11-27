@@ -1,14 +1,19 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 
 import 'app_motion.dart';
 import 'app_spacing.dart';
 import 'app_theme.dart';
 
 /// Shared button, chip, switch, and checkbox styles eliminating default dark
-/// ink splashes and shadow elevation flashes across the entire application.
+/// ink splashes and delivering genuine whole-button elastic tactile motion
+/// across the entire application.
 class AppButtonStyles {
   static const _zeroElevation = WidgetStatePropertyAll<double>(0);
   static const _noColor = WidgetStatePropertyAll<Color>(Colors.transparent);
+  static const _noSide = WidgetStatePropertyAll<BorderSide>(BorderSide.none);
   static const _buttonPadding = EdgeInsets.symmetric(
     horizontal: 18,
     vertical: 12,
@@ -26,7 +31,7 @@ class AppButtonStyles {
   static Color _pressedFill(Color base, {required bool dark}) =>
       Color.alphaBlend(
         (dark ? Colors.white : Colors.black).withValues(
-          alpha: dark ? 0.14 : 0.12,
+          alpha: dark ? 0.14 : 0.11,
         ),
         base,
       );
@@ -36,33 +41,6 @@ class AppButtonStyles {
         (dark ? Colors.white : Colors.black).withValues(alpha: 0.06),
         base,
       );
-
-  static Widget _tactileForeground(
-    BuildContext context,
-    Set<WidgetState> states,
-    Widget? child,
-  ) {
-    final childWidget = child ?? const SizedBox.shrink();
-    final pressed =
-        !states.contains(WidgetState.disabled) &&
-        states.contains(WidgetState.pressed);
-    final reduced = MediaQuery.disableAnimationsOf(context);
-    final duration = reduced
-        ? Duration.zero
-        : (pressed ? AppMotion.pressDown : AppMotion.pressUp);
-    final curve = pressed ? AppMotion.standard : AppMotion.controlCurve;
-    return AnimatedScale(
-      scale: pressed ? 0.96 : 1.0,
-      duration: duration,
-      curve: curve,
-      child: AnimatedOpacity(
-        opacity: pressed ? 0.86 : 1.0,
-        duration: duration,
-        curve: curve,
-        child: childWidget,
-      ),
-    );
-  }
 
   static TextStyle _baseButtonText(ReaderThemeColors colors) => TextStyle(
     fontSize: 14,
@@ -95,23 +73,20 @@ class AppButtonStyles {
       scheme.surface,
     );
     return ButtonStyle(
-      backgroundColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.disabled)) return disabledBg;
-        if (states.contains(WidgetState.pressed)) {
-          return _pressedFill(fill, dark: dark);
-        }
-        if (states.contains(WidgetState.hovered) ||
-            states.contains(WidgetState.focused)) {
-          return _hoveredFill(fill, dark: dark);
-        }
-        return fill;
-      }),
+      backgroundColor: _noColor,
       foregroundColor: WidgetStateProperty.resolveWith((states) {
         if (states.contains(WidgetState.disabled)) {
           return fg.withValues(alpha: 0.85);
         }
         return fg;
       }),
+      iconColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.disabled)) {
+          return fg.withValues(alpha: 0.85);
+        }
+        return fg;
+      }),
+      side: _noSide,
       overlayColor: _noColor,
       splashFactory: NoSplash.splashFactory,
       elevation: _zeroElevation,
@@ -121,7 +96,18 @@ class AppButtonStyles {
       minimumSize: const WidgetStatePropertyAll(Size(64, 48)),
       padding: const WidgetStatePropertyAll(_buttonPadding),
       shape: WidgetStatePropertyAll(_pillShape),
-      foregroundBuilder: _tactileForeground,
+      backgroundBuilder: (context, states, child) => _TactileButtonChrome(
+        states: states,
+        shape: _pillShape,
+        normalFill: fill,
+        pressedFill: _pressedFill(fill, dark: dark),
+        hoveredFill: _hoveredFill(fill, dark: dark),
+        disabledFill: disabledBg,
+        isFilled: true,
+        dark: dark,
+        pressedScale: 0.945,
+        child: child,
+      ),
     );
   }
 
@@ -129,23 +115,20 @@ class AppButtonStyles {
     final dark = scheme.brightness == Brightness.dark;
     final fg = scheme.error;
     return ButtonStyle(
-      backgroundColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.disabled)) return Colors.transparent;
-        if (states.contains(WidgetState.pressed)) {
-          return fg.withValues(alpha: dark ? 0.14 : 0.09);
-        }
-        if (states.contains(WidgetState.hovered) ||
-            states.contains(WidgetState.focused)) {
-          return fg.withValues(alpha: dark ? 0.08 : 0.05);
-        }
-        return Colors.transparent;
-      }),
+      backgroundColor: _noColor,
       foregroundColor: WidgetStateProperty.resolveWith((states) {
         if (states.contains(WidgetState.disabled)) {
           return fg.withValues(alpha: 0.45);
         }
         return fg;
       }),
+      iconColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.disabled)) {
+          return fg.withValues(alpha: 0.45);
+        }
+        return fg;
+      }),
+      side: _noSide,
       overlayColor: _noColor,
       splashFactory: NoSplash.splashFactory,
       elevation: _zeroElevation,
@@ -155,7 +138,18 @@ class AppButtonStyles {
       minimumSize: const WidgetStatePropertyAll(Size(64, 48)),
       padding: const WidgetStatePropertyAll(_buttonPadding),
       shape: WidgetStatePropertyAll(_pillShape),
-      foregroundBuilder: _tactileForeground,
+      backgroundBuilder: (context, states, child) => _TactileButtonChrome(
+        states: states,
+        shape: _pillShape,
+        normalFill: Colors.transparent,
+        pressedFill: fg.withValues(alpha: dark ? 0.16 : 0.10),
+        hoveredFill: fg.withValues(alpha: dark ? 0.08 : 0.05),
+        disabledFill: Colors.transparent,
+        isFilled: false,
+        dark: dark,
+        pressedScale: 0.945,
+        child: child,
+      ),
     );
   }
 
@@ -170,6 +164,7 @@ class AppButtonStyles {
     final dark = _isDark(colors);
     final fill = backgroundColor ?? colors.accent;
     final fg = foregroundColor ?? _onAccent(colors);
+    final effectiveShape = shape ?? _pillShape;
     final disabledBg = Color.alphaBlend(
       fill.withValues(alpha: dark ? 0.36 : 0.42),
       colors.headerBg,
@@ -177,17 +172,7 @@ class AppButtonStyles {
     final disabledFg = fg.withValues(alpha: 0.86);
 
     return ButtonStyle(
-      backgroundColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.disabled)) return disabledBg;
-        if (states.contains(WidgetState.pressed)) {
-          return _pressedFill(fill, dark: dark);
-        }
-        if (states.contains(WidgetState.hovered) ||
-            states.contains(WidgetState.focused)) {
-          return _hoveredFill(fill, dark: dark);
-        }
-        return fill;
-      }),
+      backgroundColor: _noColor,
       foregroundColor: WidgetStateProperty.resolveWith((states) {
         if (states.contains(WidgetState.disabled)) return disabledFg;
         return fg;
@@ -196,6 +181,7 @@ class AppButtonStyles {
         if (states.contains(WidgetState.disabled)) return disabledFg;
         return fg;
       }),
+      side: _noSide,
       overlayColor: _noColor,
       splashFactory: NoSplash.splashFactory,
       elevation: _zeroElevation,
@@ -205,8 +191,19 @@ class AppButtonStyles {
       minimumSize: WidgetStatePropertyAll(minimumSize ?? const Size(64, 48)),
       padding: WidgetStatePropertyAll(padding ?? _buttonPadding),
       textStyle: WidgetStatePropertyAll(_baseButtonText(colors)),
-      shape: WidgetStatePropertyAll(shape ?? _pillShape),
-      foregroundBuilder: _tactileForeground,
+      shape: WidgetStatePropertyAll(effectiveShape),
+      backgroundBuilder: (context, states, child) => _TactileButtonChrome(
+        states: states,
+        shape: effectiveShape,
+        normalFill: fill,
+        pressedFill: _pressedFill(fill, dark: dark),
+        hoveredFill: _hoveredFill(fill, dark: dark),
+        disabledFill: disabledBg,
+        isFilled: true,
+        dark: dark,
+        pressedScale: 0.948,
+        child: child,
+      ),
     );
   }
 
@@ -221,20 +218,13 @@ class AppButtonStyles {
     final dark = _isDark(colors);
     final fg = foregroundColor ?? colors.accent;
     final sideColor = borderColor ?? colors.border;
-    final pressedTint = fg.withValues(alpha: dark ? 0.16 : 0.09);
+    final effectiveShape = shape ?? _pillShape;
+    final pressedTint = fg.withValues(alpha: dark ? 0.18 : 0.11);
     final hoverTint = fg.withValues(alpha: dark ? 0.09 : 0.05);
     final disabledFg = colors.secondary.withValues(alpha: 0.55);
 
     return ButtonStyle(
-      backgroundColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.disabled)) return Colors.transparent;
-        if (states.contains(WidgetState.pressed)) return pressedTint;
-        if (states.contains(WidgetState.hovered) ||
-            states.contains(WidgetState.focused)) {
-          return hoverTint;
-        }
-        return Colors.transparent;
-      }),
+      backgroundColor: _noColor,
       foregroundColor: WidgetStateProperty.resolveWith((states) {
         if (states.contains(WidgetState.disabled)) return disabledFg;
         return fg;
@@ -243,15 +233,7 @@ class AppButtonStyles {
         if (states.contains(WidgetState.disabled)) return disabledFg;
         return fg;
       }),
-      side: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.disabled)) {
-          return BorderSide(color: sideColor.withValues(alpha: 0.55));
-        }
-        if (states.contains(WidgetState.pressed)) {
-          return BorderSide(color: fg.withValues(alpha: 0.55));
-        }
-        return BorderSide(color: sideColor);
-      }),
+      side: _noSide,
       overlayColor: _noColor,
       splashFactory: NoSplash.splashFactory,
       elevation: _zeroElevation,
@@ -261,8 +243,22 @@ class AppButtonStyles {
       minimumSize: WidgetStatePropertyAll(minimumSize ?? const Size(64, 48)),
       padding: WidgetStatePropertyAll(padding ?? _buttonPadding),
       textStyle: WidgetStatePropertyAll(_baseButtonText(colors)),
-      shape: WidgetStatePropertyAll(shape ?? _pillShape),
-      foregroundBuilder: _tactileForeground,
+      shape: WidgetStatePropertyAll(effectiveShape),
+      backgroundBuilder: (context, states, child) => _TactileButtonChrome(
+        states: states,
+        shape: effectiveShape,
+        normalFill: Colors.transparent,
+        pressedFill: pressedTint,
+        hoveredFill: hoverTint,
+        disabledFill: Colors.transparent,
+        normalBorder: BorderSide(color: sideColor),
+        pressedBorder: BorderSide(color: fg.withValues(alpha: 0.65), width: 1.2),
+        disabledBorder: BorderSide(color: sideColor.withValues(alpha: 0.55)),
+        isFilled: false,
+        dark: dark,
+        pressedScale: 0.948,
+        child: child,
+      ),
     );
   }
 
@@ -277,20 +273,12 @@ class AppButtonStyles {
   }) {
     final dark = _isDark(colors);
     final fg = foregroundColor ?? colors.secondary;
-    final pressedTint = fg.withValues(alpha: dark ? 0.14 : 0.09);
+    final pressedTint = fg.withValues(alpha: dark ? 0.16 : 0.10);
     final hoverTint = fg.withValues(alpha: dark ? 0.08 : 0.05);
     final disabledFg = colors.secondary.withValues(alpha: 0.45);
 
     return ButtonStyle(
-      backgroundColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.disabled)) return Colors.transparent;
-        if (states.contains(WidgetState.pressed)) return pressedTint;
-        if (states.contains(WidgetState.hovered) ||
-            states.contains(WidgetState.focused)) {
-          return hoverTint;
-        }
-        return Colors.transparent;
-      }),
+      backgroundColor: _noColor,
       foregroundColor: WidgetStateProperty.resolveWith((states) {
         if (states.contains(WidgetState.disabled)) return disabledFg;
         return fg;
@@ -299,6 +287,7 @@ class AppButtonStyles {
         if (states.contains(WidgetState.disabled)) return disabledFg;
         return fg;
       }),
+      side: _noSide,
       overlayColor: _noColor,
       splashFactory: NoSplash.splashFactory,
       elevation: _zeroElevation,
@@ -311,7 +300,18 @@ class AppButtonStyles {
       shape: WidgetStatePropertyAll(_pillShape),
       visualDensity: visualDensity,
       tapTargetSize: tapTargetSize,
-      foregroundBuilder: _tactileForeground,
+      backgroundBuilder: (context, states, child) => _TactileButtonChrome(
+        states: states,
+        shape: _pillShape,
+        normalFill: Colors.transparent,
+        pressedFill: pressedTint,
+        hoveredFill: hoverTint,
+        disabledFill: Colors.transparent,
+        isFilled: false,
+        dark: dark,
+        pressedScale: 0.945,
+        child: child,
+      ),
     );
   }
 
@@ -322,20 +322,12 @@ class AppButtonStyles {
   }) {
     final dark = _isDark(colors);
     final fg = foregroundColor ?? colors.secondary;
-    final pressedTint = colors.accent.withValues(alpha: dark ? 0.16 : 0.10);
+    final pressedTint = colors.accent.withValues(alpha: dark ? 0.18 : 0.12);
     final hoverTint = colors.text.withValues(alpha: dark ? 0.08 : 0.05);
     final disabledFg = colors.secondary.withValues(alpha: 0.4);
 
     return ButtonStyle(
-      backgroundColor: WidgetStateProperty.resolveWith((states) {
-        if (states.contains(WidgetState.disabled)) return Colors.transparent;
-        if (states.contains(WidgetState.pressed)) return pressedTint;
-        if (states.contains(WidgetState.hovered) ||
-            states.contains(WidgetState.focused)) {
-          return hoverTint;
-        }
-        return Colors.transparent;
-      }),
+      backgroundColor: _noColor,
       foregroundColor: WidgetStateProperty.resolveWith((states) {
         if (states.contains(WidgetState.disabled)) return disabledFg;
         return fg;
@@ -344,6 +336,7 @@ class AppButtonStyles {
         if (states.contains(WidgetState.disabled)) return disabledFg;
         return fg;
       }),
+      side: _noSide,
       overlayColor: _noColor,
       splashFactory: NoSplash.splashFactory,
       elevation: _zeroElevation,
@@ -352,7 +345,18 @@ class AppButtonStyles {
       animationDuration: AppMotion.pressDown,
       minimumSize: WidgetStatePropertyAll(minimumSize ?? const Size(48, 48)),
       shape: WidgetStatePropertyAll(_pillShape),
-      foregroundBuilder: _tactileForeground,
+      backgroundBuilder: (context, states, child) => _TactileButtonChrome(
+        states: states,
+        shape: _pillShape,
+        normalFill: Colors.transparent,
+        pressedFill: pressedTint,
+        hoveredFill: hoverTint,
+        disabledFill: Colors.transparent,
+        isFilled: false,
+        dark: dark,
+        pressedScale: 0.88,
+        child: child,
+      ),
     );
   }
 
@@ -502,6 +506,202 @@ class AppButtonStyles {
         return BorderSide(color: colors.border, width: 1.6);
       }),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
+    );
+  }
+}
+
+/// Whole-button tactile chrome rendered inside [ButtonStyle.backgroundBuilder].
+///
+/// Scales the painted capsule, border, sheen highlight, AND foreground label
+/// together as one cohesive physical object while keeping the outer [InkWell]
+/// hit area rock-steady. A committed press impulse ensures even a brief 25 ms
+/// tap clearly dips and rebounds smoothly.
+class _TactileButtonChrome extends StatefulWidget {
+  const _TactileButtonChrome({
+    required this.states,
+    required this.shape,
+    required this.normalFill,
+    required this.pressedFill,
+    required this.hoveredFill,
+    required this.disabledFill,
+    required this.isFilled,
+    required this.dark,
+    required this.pressedScale,
+    required this.child,
+    this.normalBorder,
+    this.pressedBorder,
+    this.disabledBorder,
+  });
+
+  final Set<WidgetState> states;
+  final OutlinedBorder shape;
+  final Color normalFill;
+  final Color pressedFill;
+  final Color hoveredFill;
+  final Color disabledFill;
+  final BorderSide? normalBorder;
+  final BorderSide? pressedBorder;
+  final BorderSide? disabledBorder;
+  final bool isFilled;
+  final bool dark;
+  final double pressedScale;
+  final Widget? child;
+
+  @override
+  State<_TactileButtonChrome> createState() => _TactileButtonChromeState();
+}
+
+class _TactileButtonChromeState extends State<_TactileButtonChrome>
+    with SingleTickerProviderStateMixin {
+  static const _reboundSpring = SpringDescription(
+    mass: 1.0,
+    stiffness: 500.0,
+    damping: 36.0,
+  );
+
+  late final AnimationController _pressController;
+  bool _isPressed = false;
+  DateTime? _pressedAt;
+  Timer? _releaseTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _pressController = AnimationController.unbounded(vsync: this, value: 0.0);
+    _isPressed = _statesPressed(widget.states);
+  }
+
+  static bool _statesPressed(Set<WidgetState> states) =>
+      !states.contains(WidgetState.disabled) &&
+      states.contains(WidgetState.pressed);
+
+  @override
+  void didUpdateWidget(covariant _TactileButtonChrome oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final nextPressed = _statesPressed(widget.states);
+    final disabled = widget.states.contains(WidgetState.disabled);
+    if (disabled) {
+      _releaseTimer?.cancel();
+      _isPressed = false;
+      if (_pressController.value != 0.0) {
+        _pressController.animateTo(
+          0.0,
+          duration: AppMotion.fast,
+          curve: AppMotion.controlCurve,
+        );
+      }
+      return;
+    }
+    if (nextPressed && !_isPressed) {
+      _isPressed = true;
+      _pressedAt = DateTime.now();
+      _releaseTimer?.cancel();
+      if (MediaQuery.disableAnimationsOf(context)) {
+        _pressController.value = 0.0;
+      } else {
+        _pressController.animateTo(
+          1.0,
+          duration: AppMotion.pressDown,
+          curve: Curves.easeOutCubic,
+        );
+      }
+    } else if (!nextPressed && _isPressed) {
+      _isPressed = false;
+      if (MediaQuery.disableAnimationsOf(context)) {
+        _pressController.value = 0.0;
+      } else {
+        final elapsed = _pressedAt == null
+            ? AppMotion.pressImpulseHold
+            : DateTime.now().difference(_pressedAt!);
+        final remaining = AppMotion.pressImpulseHold - elapsed;
+        if (remaining > Duration.zero) {
+          _releaseTimer?.cancel();
+          _releaseTimer = Timer(remaining, _springBack);
+        } else {
+          _springBack();
+        }
+      }
+    }
+  }
+
+  void _springBack() {
+    if (!mounted || _isPressed) return;
+    final sim = SpringSimulation(
+      _reboundSpring,
+      _pressController.value,
+      0.0,
+      0.0,
+    );
+    _pressController.animateWith(sim);
+  }
+
+  @override
+  void dispose() {
+    _releaseTimer?.cancel();
+    _pressController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = widget.states.contains(WidgetState.disabled);
+    final hovered =
+        !disabled &&
+        (widget.states.contains(WidgetState.hovered) ||
+            widget.states.contains(WidgetState.focused));
+    final baseColor = disabled
+        ? widget.disabledFill
+        : (hovered ? widget.hoveredFill : widget.normalFill);
+    final baseBorder = disabled
+        ? (widget.disabledBorder ?? BorderSide.none)
+        : (widget.normalBorder ?? BorderSide.none);
+    final targetPressedBorder = widget.pressedBorder ?? baseBorder;
+
+    return AnimatedBuilder(
+      animation: _pressController,
+      child: widget.child,
+      builder: (context, child) {
+        final t = _pressController.value.clamp(0.0, 1.0);
+        final scale = 1.0 + (widget.pressedScale - 1.0) * t;
+        final color = Color.lerp(baseColor, widget.pressedFill, t) ?? baseColor;
+        final side = BorderSide.lerp(baseBorder, targetPressedBorder, t);
+        final sheenGradient = widget.isFilled && !disabled
+            ? LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.white.withValues(
+                    alpha: (widget.dark ? 0.12 : 0.16) * (1.0 - t * 0.65),
+                  ),
+                  Colors.transparent,
+                  Colors.black.withValues(
+                    alpha: (widget.dark ? 0.14 : 0.08) * (0.5 + t * 0.5),
+                  ),
+                ],
+                stops: const [0.0, 0.45, 1.0],
+              )
+            : null;
+
+        return Transform.scale(
+          scale: scale,
+          alignment: Alignment.center,
+          child: DecoratedBox(
+            decoration: ShapeDecoration(
+              color: color,
+              shape: widget.shape.copyWith(side: side),
+            ),
+            child: sheenGradient != null
+                ? DecoratedBox(
+                    decoration: ShapeDecoration(
+                      gradient: sheenGradient,
+                      shape: widget.shape,
+                    ),
+                    child: child,
+                  )
+                : child,
+          ),
+        );
+      },
     );
   }
 }

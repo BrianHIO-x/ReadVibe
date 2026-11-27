@@ -9,7 +9,9 @@ import '../theme/app_motion.dart';
 import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_choice_pill.dart';
 import 'app_sheet.dart';
+import 'app_switch.dart';
 import 'app_toast.dart';
 import 'pressable_scale.dart';
 
@@ -801,7 +803,8 @@ class _PrivateShelfSettingsSheetState
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       for (final kind in PrivateShelfBiometric.values)
-                        SwitchListTile.adaptive(
+                        AppSwitchTile(
+                          colors: colors,
                           secondary: Icon(biometricIcon(kind)),
                           title: Text('${kind.label}验证'),
                           subtitle: Text(_hint(kind)),
@@ -833,18 +836,12 @@ class _PrivateShelfSettingsSheetState
                                 children: [
                                   for (final kind
                                       in PrivateShelfBiometric.values)
-                                    PressableScale(
-                                      pressedScale: 0.95,
-                                      child: ChoiceChip(
-                                        avatar: Icon(
-                                          biometricIcon(kind),
-                                          size: 18,
-                                        ),
-                                        label: Text(kind.label),
-                                        selected:
-                                            _config.unlockBiometric == kind,
-                                        onSelected: (_) => _chooseDefault(kind),
-                                      ),
+                                    AppChoicePill(
+                                      icon: biometricIcon(kind),
+                                      label: kind.label,
+                                      selected: _config.unlockBiometric == kind,
+                                      colors: colors,
+                                      onTap: () => _chooseDefault(kind),
                                     ),
                                 ],
                               ),
@@ -880,16 +877,12 @@ class _PrivateShelfSettingsSheetState
                               children: [
                                 for (final delay
                                     in PrivateShelfLockDelay.values)
-                                  PressableScale(
+                                  AppChoicePill(
+                                    label: delay.label,
+                                    selected: _config.lockDelay == delay,
                                     enabled: !_busy,
-                                    pressedScale: 0.95,
-                                    child: ChoiceChip(
-                                      label: Text(delay.label),
-                                      selected: _config.lockDelay == delay,
-                                      onSelected: _busy
-                                          ? null
-                                          : (_) => _chooseLockDelay(delay),
-                                    ),
+                                    colors: colors,
+                                    onTap: () => _chooseLockDelay(delay),
                                   ),
                               ],
                             ),

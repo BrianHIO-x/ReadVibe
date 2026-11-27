@@ -7,6 +7,7 @@ import '../repositories/reader_repositories.dart';
 import '../services/system_text_action_service.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
+import 'app_switch.dart';
 import 'app_toast.dart';
 import 'font_settings_section.dart';
 
@@ -175,9 +176,9 @@ class GlobalSettingsSheet extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: AppSpacing.sm),
-                    SwitchListTile.adaptive(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
+                    AppSwitchTile(
+                      colors: colors,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 4),
                       title: Text(
                         '启动时恢复上次阅读',
                         style: TextStyle(
@@ -241,9 +242,9 @@ class GlobalSettingsSheet extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: AppSpacing.sm),
-                    SwitchListTile.adaptive(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
+                    AppSwitchTile(
+                      colors: colors,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 4),
                       title: Text(
                         '自动检查更新',
                         style: TextStyle(
