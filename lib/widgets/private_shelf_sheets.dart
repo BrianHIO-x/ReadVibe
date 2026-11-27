@@ -186,6 +186,10 @@ class _PinSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            AppSheetDragHandle(
+              colors: colors,
+              padding: const EdgeInsets.only(top: 4, bottom: 2),
+            ),
             Align(
               alignment: Alignment.centerRight,
               child: IconButton(

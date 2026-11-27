@@ -38,18 +38,24 @@ class ReaderSettingsSheet extends StatelessWidget {
         bottom: false,
         child: ConstrainedBox(
           constraints: BoxConstraints(maxHeight: maxHeight),
-          child: SingleChildScrollView(
-            padding: EdgeInsets.fromLTRB(
-              AppSpacing.lg,
-              AppSpacing.sm,
-              AppSpacing.lg,
-              AppSpacing.lg + bottomInset,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // ── Font Size ──────────────────────────────
+          child: Stack(
+            children: [
+              SingleChildScrollView(
+                padding: EdgeInsets.fromLTRB(
+                  AppSpacing.lg,
+                  0,
+                  AppSpacing.lg,
+                  AppSpacing.xl + bottomInset,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    AppSheetDragHandle(
+                      colors: colors,
+                      padding: const EdgeInsets.only(top: 12, bottom: 12),
+                    ),
+                    // ── Font Size ──────────────────────────────
                 _buildLabel('字号'),
                 const SizedBox(height: AppSpacing.xs),
                 _buildSegmentedControl<double>(
@@ -178,6 +184,30 @@ class ReaderSettingsSheet extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 28,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          colors.headerBg,
+                          colors.headerBg,
+                          colors.headerBg.withValues(alpha: 0.0),
+                        ],
+                        stops: const [0.0, 0.25, 1.0],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

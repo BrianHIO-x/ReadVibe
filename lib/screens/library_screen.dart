@@ -1270,7 +1270,12 @@ class _LibraryScreenState extends State<LibraryScreen>
       await _loadData();
       _vaultService.scheduleAutoSync();
       if (mounted && books.length > 1) {
-        _showMessage('已删除 ${books.length} 本书');
+        AppToast.info(
+          context,
+          '已删除 ${books.length} 本书',
+          colors: _feedbackColors,
+          icon: Icons.delete_outline_rounded,
+        );
       }
     } on Object {
       _showError('删除失败，请稍后重试');
@@ -1382,7 +1387,11 @@ class _LibraryScreenState extends State<LibraryScreen>
       );
       if (!mounted) return;
       AppToast.hide(context);
-      _showMessage(saved ? '「${book.title}」已导出' : '已取消导出');
+      if (saved) {
+        _showMessage('「${book.title}」已导出');
+      } else {
+        AppToast.info(context, '已取消导出', colors: _feedbackColors);
+      }
     } on Object catch (error, stackTrace) {
       debugPrint('Book export failed: $error');
       debugPrintStack(stackTrace: stackTrace);

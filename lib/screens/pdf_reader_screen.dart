@@ -281,8 +281,13 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     if (_savingBookmark) return;
     _savingBookmark = true;
     final previous = Set<int>.of(_bookmarks);
+    final added = !_bookmarks.contains(_currentPage);
     setState(() {
-      if (!_bookmarks.add(_currentPage)) _bookmarks.remove(_currentPage);
+      if (added) {
+        _bookmarks.add(_currentPage);
+      } else {
+        _bookmarks.remove(_currentPage);
+      }
     });
     try {
       await _storage.savePdfBookmarks(
@@ -290,11 +295,28 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
         Set<int>.of(_bookmarks),
         _pageCount,
       );
+      if (mounted) {
+        AppToast.show(
+          context,
+          added ? '已添加书签' : '已删除书签',
+          tone: added ? AppToastTone.success : AppToastTone.info,
+          icon: added
+              ? Icons.bookmark_rounded
+              : Icons.bookmark_remove_outlined,
+          bottomOffset: _chromeVisible ? 84.0 : 0.0,
+          colors: _overlayColors,
+        );
+      }
     } on Object catch (error) {
       debugPrint('PDF bookmark save failed: $error');
       if (mounted) {
         setState(() => _bookmarks = previous);
-        AppToast.error(context, '书签保存失败，请重试', colors: _overlayColors);
+        AppToast.error(
+          context,
+          '书签保存失败，请重试',
+          bottomOffset: _chromeVisible ? 84.0 : 0.0,
+          colors: _overlayColors,
+        );
       }
     } finally {
       _savingBookmark = false;
@@ -491,7 +513,12 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     } on Object catch (error) {
       debugPrint('PDF note save failed: $error');
       if (mounted) {
-        AppToast.error(context, '笔记保存失败，请重试', colors: _overlayColors);
+        AppToast.error(
+          context,
+          '笔记保存失败，请重试',
+          bottomOffset: _chromeVisible ? 84.0 : 0.0,
+          colors: _overlayColors,
+        );
       }
       return;
     }

@@ -164,7 +164,14 @@ class _LibraryNotesScreenState extends State<LibraryNotesScreen> {
         .toList();
     await widget.storage.saveNotes(note.bookId, bookNotes);
     await _loadNotes();
-    if (mounted) AppToast.show(context, '已删除笔记', colors: widget.colors);
+    if (mounted) {
+      AppToast.info(
+        context,
+        '已删除笔记',
+        colors: widget.colors,
+        icon: Icons.delete_outline_rounded,
+      );
+    }
   }
 
   @override

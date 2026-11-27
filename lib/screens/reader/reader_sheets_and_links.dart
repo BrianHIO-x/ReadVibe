@@ -405,7 +405,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
         _bookmarks.where((mark) => mark.id != existing.id).toList(),
         currentMarked: false,
       );
-      _showReaderMessage('已删除书签');
+      _showReaderMessage('已删除书签', icon: Icons.bookmark_remove_outlined);
       return;
     }
     if (_bookmarks.length >= maxReaderBookmarksPerBook) {
@@ -416,7 +416,11 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
       ..._bookmarks,
       _buildBookmark(anchor),
     ], currentMarked: true);
-    _showReaderMessage('已添加书签');
+    _showReaderMessage(
+      '已添加书签',
+      tone: AppToastTone.success,
+      icon: Icons.bookmark_rounded,
+    );
   }
 
   Future<void> _quickHighlightSelection(
@@ -454,7 +458,11 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
       updatedAt: now,
     );
     _commitNotes(<ReaderNote>[..._notes, created]);
-    _showReaderMessage('已添加${color.label}${style.label}');
+    final isDark = _readerThemeColors.background.computeLuminance() < 0.35;
+    _showReaderMessage(
+      '已添加${color.label}${style.label}',
+      swatchColor: color.swatchColor(isDark),
+    );
   }
 
   /// Entry point for the selection toolbar. Opens the rich composer anchored
@@ -514,7 +522,12 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
       updatedAt: now,
     );
     _commitNotes(<ReaderNote>[..._notes, note]);
-    _showReaderMessage(note.hasContent ? '已保存阅读笔记' : '已保存划线高亮');
+    final isDark = _readerThemeColors.background.computeLuminance() < 0.35;
+    _showReaderMessage(
+      note.hasContent ? '已保存阅读笔记' : '已保存划线高亮',
+      tone: AppToastTone.success,
+      swatchColor: note.hasContent ? null : draft.color.swatchColor(isDark),
+    );
   }
 
   Future<void> _shareQuoteCardForSelection(ReaderSelectionPayload payload) async {
@@ -599,7 +612,10 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
         }
       case QuickNoteAction.delete:
         _deleteRichNote(activeNote);
-        _showReaderMessage('已删除划线与笔记');
+        _showReaderMessage(
+          '已删除划线与笔记',
+          icon: Icons.delete_outline_rounded,
+        );
     }
   }
 
@@ -630,7 +646,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
     if (draft == null || !mounted) return;
     if (draft.deleted) {
       _deleteRichNote(note);
-      _showReaderMessage('已删除笔记');
+      _showReaderMessage('已删除笔记', icon: Icons.delete_outline_rounded);
       return;
     }
     _commitNotes([
@@ -648,7 +664,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
         else
           entry,
     ]);
-    _showReaderMessage('笔记已更新');
+    _showReaderMessage('笔记已更新', tone: AppToastTone.success);
   }
 
   void _deleteRichNote(ReaderNote note) {
@@ -1072,12 +1088,13 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
                   setSheetState(() => sheetSettings = newSettings);
                   _queueSettingsApply(newSettings);
                   await _storage.saveSettings(newSettings);
-                  _showReaderMessage('字体已导入并应用');
+                  _showReaderMessage('字体已导入并应用', tone: AppToastTone.success);
                 } catch (e) {
                   _showReaderMessage(
                     e is FormatException
                         ? e.message
                         : '字体导入失败，请选择 .ttf 或 .otf 文件',
+                    tone: AppToastTone.error,
                   );
                 }
               },
@@ -1242,7 +1259,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
       }
     }
     if (saved && mounted) {
-      _showReaderMessage('当前章节已保存');
+      _showReaderMessage('当前章节已保存', tone: AppToastTone.success);
     }
   }
 
@@ -1307,11 +1324,20 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
     }
   }
 
-  void _showReaderMessage(String message) {
+  void _showReaderMessage(
+    String message, {
+    AppToastTone tone = AppToastTone.info,
+    IconData? icon,
+    Color? swatchColor,
+  }) {
     if (!mounted) return;
-    AppToast.info(
+    AppToast.show(
       context,
       message,
+      tone: tone,
+      icon: icon,
+      swatchColor: swatchColor,
+      bottomOffset: _showOverlay ? 84.0 : 0.0,
       colors: AppTheme.getReaderTheme(
         _settings.theme,
         systemBrightness: MediaQuery.platformBrightnessOf(context),

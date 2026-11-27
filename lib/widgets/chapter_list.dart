@@ -137,17 +137,17 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
 
     return AppSheetSurface(
       colors: widget.colors,
-      floating: false,
       animateSize: false,
       child: SafeArea(
         top: false,
         bottom: false,
         child: Column(
           children: [
+            AppSheetDragHandle(colors: widget.colors),
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 20,
-                AppSpacing.lg,
+                AppSpacing.sm,
                 AppSpacing.sm,
                 AppSpacing.md,
               ),

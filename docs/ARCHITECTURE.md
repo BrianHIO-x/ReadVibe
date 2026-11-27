@@ -247,9 +247,9 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `app_toast.dart` | 应用统一轻提示。基于透明 SnackBar 自绘卡片（信息/成功/错误/加载四种图标与配色的时长），支持阅读纸色注入与宽屏居中限制，加载态 30 秒常驻、点击可消。 |
+| `app_toast.dart` | 全局悬浮灵动胶囊轻提示（`AppToast`）。基于根 `OverlayEntry` + `RepaintBoundary` 纯合成层驱动（零毛玻璃与零底层重绘），按正文长度自适应紧凑胶囊/圆角卡宽度并适配浅/暖/深/纯黑主题的高对比暖墨配色；支持 `SpringSimulation` 弹簧上浮、连续触发时的原地宽幅形变（`AnimatedSize` + 微弹不闪烁）、语义色徽标/高亮色珠/加载指示与下滑轻触关闭，并始终浮于面板和对话框之上且不拦截外部操作。 |
 | `app_dialog.dart` | 应用统一对话框。`showAppDialog` 捕获主题上下文并控制入场/退场时长与遮罩透明度，`_AppDialogRoute` 在淡入的同时从 96% 尺寸居中放大，退场使用翻转曲线；`AppDialog` 规范内边距与最大宽度；`AppDestructiveButton` 以错误色呈现破坏性操作（填充或描边两态）。 |
-| `app_sheet.dart` | 应用统一悬浮底部弹窗。`showAppSheet` 通过 `_AppSheetRoute`（继承 `ModalBottomSheetRoute`）叠加随手势同步的 `BackdropFilter` 毛玻璃背景模糊与底部缩放抬升入场，同时完整保留下拉手势关闭；`AppSheetSurface` 默认以 28dp 全圆角悬浮卡片呈现（双层柔光阴影、顶部纸面微光描边、居中拖动胶囊、内置 `AnimatedSize` 平滑高度过渡，软键盘弹出自动贴底并剥离重复底部留白）；`AppSheetHeader` 提供精致排版与圆形柔色关闭键；`AppActionSheet` 承载多子项动作列表。 |
+| `app_sheet.dart` | 应用统一全沉浸底部面板。`showAppSheet` 通过轻量 `ModalBottomSheetRoute` 承载可滚动面板（无毛玻璃模糊，保留背景正文可见与低开销）并补齐 `sheetCurve` 入场与翻转退场；`AppSheetSurface` 保持 28dp 顶部圆角、纸面直达屏幕底部全沉浸与平滑 `AnimatedSize` 高度形变；`AppSheetDragHandle` 融入 `AppSheetHeader` 或各无顶栏滚动区顶部，避免遮挡裁切滚动内容。 |
 | `app_popup_menu.dart` | 主题化弹出菜单。`AppPopupMenuButton` 自行计算锚点矩形后调用 `showMenu`，限定宽度并绘制选中态（勾选图标与强调底色）；可选的 `menuRightInset` 把菜单右缘钉在距屏幕右边固定距离处，用于与下方内容列对齐；`AppMenuEntry` 携带值、标签、图标与选中标记。 |
 | `app_segmented_control.dart` | 弹簧物理滑块分段控件与切页过渡（`AppSegmentOption`、`AppSegmentedControl`、`AppTabTransition`）。基于 `SpringSimulation` 实现可打断弹簧滑动、按运动速度液态拉伸、图标文字随滑块位置实时渐变着色及轻触感反馈（提供悬浮浅色/深色卡与强调色滑块两套变体）；`AppTabTransition` 提供方向感知横向微滑、淡入淡出与平滑高度形变。 |
 | `app_choice_pill.dart` | 弹性动画胶囊选项组件（`AppChoicePill`）。全面替代原生 `ChoiceChip` / `FilterChip` / `ActionChip`，提供平滑底色/描边/微光阴影过渡、选中弹簧跃动与无跳动宽度切换。 |

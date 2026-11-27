@@ -80,7 +80,7 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
         child: Padding(
           padding: EdgeInsets.fromLTRB(
             AppSpacing.xl,
-            AppSpacing.md,
+            0,
             AppSpacing.xl,
             AppSpacing.lg + MediaQuery.paddingOf(context).bottom,
           ),
@@ -88,6 +88,10 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              AppSheetDragHandle(
+                colors: colors,
+                padding: const EdgeInsets.only(top: 10, bottom: 10),
+              ),
               Row(
                 children: [
                   Container(
