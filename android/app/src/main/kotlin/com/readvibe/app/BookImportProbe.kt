@@ -11,6 +11,7 @@ import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -31,7 +32,9 @@ object BookImportProbe {
     private const val MAX_FONT_BYTES = 64L * 1024L * 1024L
     private const val MAX_BACKUP_BYTES = 2L * 1024L * 1024L * 1024L
     private const val MAX_CENTRAL_DIRECTORY_BYTES = 2 * 1024 * 1024
-    private const val MAX_ZIP_ENTRIES = 4096
+    private const val MAX_ZIP_ENTRIES = 20000
+    private const val HEADER_SAMPLE_BYTES = 1024L
+    private const val TEXT_SAMPLE_BYTES = 8192L
     private const val EOCD_MIN_SIZE = 22
     private const val MAX_EOCD_COMMENT = 65535
     private const val ZIP64_LOCATOR_SIZE = 20
@@ -44,6 +47,14 @@ object BookImportProbe {
     private val PACKAGE_EXTENSIONS = setOf("apk", "apks", "xapk", "apkm")
     private val BOOK_EXTENSIONS = setOf(
         "txt", "epub", "mobi", "azw", "azw3", "pdf", "doc", "docx",
+    )
+    private val KINDLE_EXTENSIONS = setOf("mobi", "azw", "azw3")
+    private val NON_TXT_BOOK_EXTENSIONS = setOf(
+        "epub", "mobi", "azw", "azw3", "pdf", "doc", "docx",
+    )
+    private val STRIPPABLE_EXTENSIONS = BOOK_EXTENSIONS + PACKAGE_EXTENSIONS + setOf(
+        "ttf", "otf", "zip", "rar", "7z", "html", "htm", "xhtml", "xml",
+        "rtf", "odt", "ods", "odp", "md", "json", "csv", "tmp", "bin", "dat",
     )
     private val FONT_EXTENSIONS = setOf("ttf", "otf")
     private val DEX_ENTRY = Regex("^classes\\d+\\.dex$")
@@ -65,10 +76,16 @@ object BookImportProbe {
         if (isAndroidPackage(meta.names, meta.mimes)) {
             error(ANDROID_PACKAGE_MESSAGE)
         }
-        val kind = peek(context, uri)
+        var kind = peek(context, uri)
         if (kind == Kind.APK) error(ANDROID_PACKAGE_MESSAGE)
+        if (kind == Kind.UNSEEKABLE) {
+            val streamKind = peekStreamPrefix(context, uri)
+            if (streamKind != Kind.UNSEEKABLE && streamKind != Kind.UNKNOWN) {
+                kind = streamKind
+            }
+        }
         if (!shouldCopy(kind, meta.displayName)) error(UNSUPPORTED_MESSAGE)
-        return copyToCache(
+        val copied = copyToCache(
             context = context,
             uri = uri,
             displayName = labeledName(meta.displayName, kind),
@@ -76,6 +93,25 @@ object BookImportProbe {
             maxBytes = MAX_COPY_BYTES,
             onBytesCopied = onBytesCopied,
         )
+        if (kind == Kind.UNSEEKABLE || kind == Kind.UNKNOWN) {
+            val path = copied["path"] ?: ""
+            val localKind = sniffLocalFile(File(path))
+            if (localKind == Kind.APK) {
+                File(path).delete()
+                error(ANDROID_PACKAGE_MESSAGE)
+            }
+            if (!shouldCopy(localKind, meta.displayName) && localKind == Kind.UNKNOWN) {
+                File(path).delete()
+                error(UNSUPPORTED_MESSAGE)
+            }
+            if (localKind != Kind.UNKNOWN && localKind != Kind.UNSEEKABLE) {
+                return mapOf(
+                    "path" to path,
+                    "name" to labeledName(meta.displayName, localKind),
+                )
+            }
+        }
+        return copied
     }
 
     fun copyPickedFont(
@@ -149,8 +185,34 @@ object BookImportProbe {
         return when (kind) {
             Kind.APK -> false
             Kind.EPUB, Kind.DOCX, Kind.PDF, Kind.DOC, Kind.MOBI, Kind.TXT -> true
-            Kind.UNKNOWN, Kind.UNSEEKABLE -> extensionOf(displayName) in BOOK_EXTENSIONS
+            Kind.UNSEEKABLE -> {
+                val ext = extensionOf(displayName)
+                ext in BOOK_EXTENSIONS || ext.isEmpty()
+            }
+            Kind.UNKNOWN -> extensionOf(displayName) in BOOK_EXTENSIONS
         }
+    }
+
+    fun sniffLocalFile(file: File): Kind {
+        if (!file.isFile || file.length() <= 0L) return Kind.UNKNOWN
+        return FileInputStream(file).use { input ->
+            peekChannel(input.channel)
+        }
+    }
+
+    private fun peekStreamPrefix(context: Context, uri: Uri): Kind {
+        val sample = try {
+            readHeaderBytes(context, uri, TEXT_SAMPLE_BYTES.toInt())
+        } catch (_: Exception) {
+            return Kind.UNSEEKABLE
+        }
+        if (sample.isEmpty()) return Kind.UNSEEKABLE
+        if (isPdf(sample)) return Kind.PDF
+        if (isOle(sample)) return Kind.DOC
+        if (isMobi(sample)) return Kind.MOBI
+        if (isZip(sample)) return Kind.UNSEEKABLE
+        if (looksLikePlainText(sample)) return Kind.TXT
+        return Kind.UNKNOWN
     }
 
     private data class Meta(
@@ -211,7 +273,7 @@ object BookImportProbe {
         }
         if (size <= 0L) return Kind.UNSEEKABLE
         val header = try {
-            readAt(channel, 0L, minOf(68L, size).toInt())
+            readAt(channel, 0L, minOf(HEADER_SAMPLE_BYTES, size).toInt())
         } catch (_: Exception) {
             return Kind.UNSEEKABLE
         }
@@ -229,11 +291,11 @@ object BookImportProbe {
             if (isDocxArchive(names)) return Kind.DOCX
             return Kind.UNKNOWN
         }
-        val sample = if (header.size >= minOf(8192L, size).toInt()) {
+        val sample = if (header.size >= minOf(TEXT_SAMPLE_BYTES, size).toInt()) {
             header
         } else {
             try {
-                readAt(channel, 0L, minOf(8192L, size).toInt())
+                readAt(channel, 0L, minOf(TEXT_SAMPLE_BYTES, size).toInt())
             } catch (_: Exception) {
                 header
             }
@@ -326,7 +388,7 @@ object BookImportProbe {
     }
 
     private fun isEpubArchive(names: Set<String>): Boolean {
-        return names.contains("meta-inf/container.xml") || names.contains("mimetype")
+        return names.contains("meta-inf/container.xml")
     }
 
     private fun isDocxArchive(names: Set<String>): Boolean {
@@ -343,11 +405,18 @@ object BookImportProbe {
     }
 
     private fun isPdf(bytes: ByteArray): Boolean {
-        return bytes.size >= 4 &&
-            bytes[0] == 0x25.toByte() &&
-            bytes[1] == 0x50.toByte() &&
-            bytes[2] == 0x44.toByte() &&
-            bytes[3] == 0x46.toByte()
+        val limit = minOf(bytes.size, HEADER_SAMPLE_BYTES.toInt())
+        for (index in 0..(limit - 5)) {
+            if (bytes[index] == 0x25.toByte() &&
+                bytes[index + 1] == 0x50.toByte() &&
+                bytes[index + 2] == 0x44.toByte() &&
+                bytes[index + 3] == 0x46.toByte() &&
+                bytes[index + 4] == 0x2d.toByte()
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun isZip(bytes: ByteArray): Boolean {
@@ -368,7 +437,7 @@ object BookImportProbe {
 
     private fun isMobi(bytes: ByteArray): Boolean {
         if (bytes.size < 68) return false
-        return bytes[60] == 0x42.toByte() &&
+        val isBookMobi = bytes[60] == 0x42.toByte() &&
             bytes[61] == 0x4f.toByte() &&
             bytes[62] == 0x4f.toByte() &&
             bytes[63] == 0x4b.toByte() &&
@@ -376,6 +445,15 @@ object BookImportProbe {
             bytes[65] == 0x4f.toByte() &&
             bytes[66] == 0x42.toByte() &&
             bytes[67] == 0x49.toByte()
+        val isPalmDoc = bytes[60] == 0x54.toByte() &&
+            bytes[61] == 0x45.toByte() &&
+            bytes[62] == 0x58.toByte() &&
+            bytes[63] == 0x74.toByte() &&
+            bytes[64] == 0x52.toByte() &&
+            bytes[65] == 0x45.toByte() &&
+            bytes[66] == 0x41.toByte() &&
+            bytes[67] == 0x64.toByte()
+        return isBookMobi || isPalmDoc
     }
 
     private fun looksLikePlainText(bytes: ByteArray): Boolean {
@@ -393,13 +471,59 @@ object BookImportProbe {
         ) {
             return true
         }
-        if (bytes.any { it == 0.toByte() }) return false
+        for (value in bytes) {
+            val unsigned = value.toInt() and 0xff
+            if (unsigned == 0) return false
+            if (unsigned < 0x20 &&
+                unsigned != 0x09 &&
+                unsigned != 0x0a &&
+                unsigned != 0x0b &&
+                unsigned != 0x0c &&
+                unsigned != 0x0d
+            ) {
+                return false
+            }
+        }
+        val sliceLength = trimmedUtf8SampleLength(bytes)
         val text = try {
-            String(bytes, Charsets.UTF_8)
+            val decoder = Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+            decoder.decode(ByteBuffer.wrap(bytes, 0, sliceLength)).toString()
         } catch (_: Exception) {
             return looksLikeLegacyChinese(bytes)
         }
-        return text.trim().isNotEmpty()
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return false
+        val lowerPrefix = trimmed.take(32).lowercase(Locale.ROOT)
+        if (lowerPrefix.startsWith("{\\rtf") ||
+            lowerPrefix.startsWith("<!doctype html") ||
+            lowerPrefix.startsWith("<html")
+        ) {
+            return false
+        }
+        return true
+    }
+
+    private fun trimmedUtf8SampleLength(bytes: ByteArray): Int {
+        if (bytes.size < TEXT_SAMPLE_BYTES.toInt()) return bytes.size
+        var len = bytes.size
+        var cont = 0
+        while (len > 0 && cont < 3 && (bytes[len - 1].toInt() and 0xc0) == 0x80) {
+            len--
+            cont++
+        }
+        if (len > 0 && (bytes[len - 1].toInt() and 0x80) != 0 && (bytes[len - 1].toInt() and 0xc0) != 0x80) {
+            val lead = bytes[len - 1].toInt() and 0xff
+            val expected = when {
+                (lead and 0xe0) == 0xc0 -> 2
+                (lead and 0xf0) == 0xe0 -> 3
+                (lead and 0xf8) == 0xf0 -> 4
+                else -> 1
+            }
+            if (cont + 1 < expected) return len - 1
+        }
+        return bytes.size
     }
 
     private fun looksLikeLegacyChinese(bytes: ByteArray): Boolean {
@@ -417,11 +541,12 @@ object BookImportProbe {
                 continue
             }
             val isAsciiText =
-                unsigned == 9 || unsigned == 10 || unsigned == 13 || unsigned in 32 until 127
+                unsigned == 9 || unsigned == 10 || unsigned == 11 ||
+                    unsigned == 12 || unsigned == 13 || unsigned in 32 until 127
             if (isAsciiText) continue
             if (unsigned < 32) return false
         }
-        return pairs >= 8
+        return if (bytes.size < 64) pairs >= 1 else pairs >= 4
     }
 
     private fun readHeaderBytes(context: Context, uri: Uri, count: Int): ByteArray {
@@ -476,12 +601,15 @@ object BookImportProbe {
         directory.listFiles()?.forEach { file ->
             if (file.lastModified() < staleBefore) file.delete()
         }
-        val sanitized = displayName.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_")
         val sequence = copySequence.getAndIncrement()
-        val target = File(
-            directory,
-            "${System.currentTimeMillis()}_${sequence}_${sanitized.ifEmpty { "file" }}",
-        )
+        val rawExt = extensionOf(displayName).take(12)
+        val ext = if (rawExt.all { it in 'a'..'z' || it in '0'..'9' }) rawExt else ""
+        val cacheName = if (ext.isEmpty()) {
+            "${System.currentTimeMillis()}_${sequence}_file"
+        } else {
+            "${System.currentTimeMillis()}_${sequence}.$ext"
+        }
+        val target = File(directory, cacheName)
         val input = when (uri.scheme) {
             "file" -> FileInputStream(File(requireNotNull(uri.path)))
             else -> context.contentResolver.openInputStream(uri)
@@ -517,22 +645,24 @@ object BookImportProbe {
     }
 
     private fun labeledName(displayName: String, kind: Kind): String {
-        val extension = when (kind) {
-            Kind.EPUB -> "epub"
-            Kind.DOCX -> "docx"
-            Kind.PDF -> "pdf"
-            Kind.DOC -> "doc"
-            Kind.MOBI -> "mobi"
-            Kind.TXT -> "txt"
-            else -> ""
+        val current = extensionOf(displayName)
+        return when (kind) {
+            Kind.EPUB -> withExtension(displayName, "epub")
+            Kind.DOCX -> withExtension(displayName, "docx")
+            Kind.PDF -> withExtension(displayName, "pdf")
+            Kind.DOC -> if (current == "docx") displayName else withExtension(displayName, "doc")
+            Kind.MOBI -> if (current in KINDLE_EXTENSIONS) displayName else withExtension(displayName, "mobi")
+            Kind.TXT -> if (current in NON_TXT_BOOK_EXTENSIONS) displayName else withExtension(displayName, "txt")
+            else -> displayName
         }
-        return withExtension(displayName, extension)
     }
 
     private fun withExtension(displayName: String, extension: String): String {
         val current = extensionOf(displayName)
         if (extension.isEmpty() || current == extension) return displayName
-        if (current.isEmpty()) return "$displayName.$extension"
+        if (current.isEmpty() || current !in STRIPPABLE_EXTENSIONS) {
+            return "$displayName.$extension"
+        }
         val stem = displayName.substringBeforeLast('.')
         return "$stem.$extension"
     }

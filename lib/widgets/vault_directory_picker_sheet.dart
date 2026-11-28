@@ -300,7 +300,7 @@ class _VaultDirectoryPickerSheetState
   }
 
   Widget _buildUnsupported(ReaderThemeColors colors) {
-    return Padding(
+    return SingleChildScrollView(
       padding: EdgeInsets.fromLTRB(
         AppSpacing.xl,
         AppSpacing.xl,
@@ -331,7 +331,7 @@ class _VaultDirectoryPickerSheetState
   }
 
   Widget _buildPermissionGuide(ReaderThemeColors colors, bool dark) {
-    return Padding(
+    return SingleChildScrollView(
       padding: EdgeInsets.fromLTRB(
         AppSpacing.xl,
         AppSpacing.lg,
@@ -444,14 +444,17 @@ class _VaultDirectoryPickerSheetState
             AppSpacing.lg,
             AppSpacing.xs,
           ),
-          child: Row(
-            children: [
-              quickChip('Documents', docsPath),
-              const SizedBox(width: AppSpacing.xs),
-              quickChip('Download', downloadPath),
-              const SizedBox(width: AppSpacing.xs),
-              quickChip('内部存储', rootPath),
-            ],
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                quickChip('Documents', docsPath),
+                const SizedBox(width: AppSpacing.xs),
+                quickChip('Download', downloadPath),
+                const SizedBox(width: AppSpacing.xs),
+                quickChip('内部存储', rootPath),
+              ],
+            ),
           ),
         ),
         if (listing != null)

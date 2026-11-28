@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../theme/app_spacing.dart';
 import '../models/book_content_revision.dart';
 import '../models/chapter_editor_text.dart';
+import '../theme/app_overlay_theme.dart';
 import '../theme/app_theme.dart';
 import 'app_dialog.dart';
 import 'chapter_editor_input_formatter.dart';
@@ -669,9 +670,12 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
           FilledButton.icon(
             onPressed: _saving ? null : _save,
             icon: _saving
-                ? const SizedBox.square(
+                ? SizedBox.square(
                     dimension: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppOverlayTheme.onAccent(colors),
+                    ),
                   )
                 : const Icon(Icons.save_outlined, size: 18),
             label: Text(_saving ? '保存中' : '保存'),
@@ -932,10 +936,13 @@ class _ChapterEditorSheetState extends State<ChapterEditorSheet>
     );
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: _systemBarStyle,
-      child: Scaffold(
-        backgroundColor: colors.background,
-        resizeToAvoidBottomInset: true,
-        body: editor,
+      child: AppOverlayTheme(
+        colors: colors,
+        child: Scaffold(
+          backgroundColor: colors.background,
+          resizeToAvoidBottomInset: true,
+          body: editor,
+        ),
       ),
     );
   }

@@ -185,7 +185,7 @@ class PrivateShelfLock {
     }
     final random = math.Random.secure();
     final salt = List<int>.generate(16, (_) => random.nextInt(256));
-    final digest = await Isolate.run(() => _derive(pin, salt, _iterations));
+    final digest = await _derivePinKeyInIsolate(pin, salt, _iterations);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kSalt, base64Encode(salt));
     await prefs.setString(_kDigest, base64Encode(digest));
@@ -203,7 +203,7 @@ class PrivateShelfLock {
     final iterations = prefs.getInt(_kIterations) ?? _iterations;
     final saltBytes = base64Decode(salt);
     final digest = isValidPin(pin)
-        ? await Isolate.run(() => _derive(pin, saltBytes, iterations))
+        ? await _derivePinKeyInIsolate(pin, saltBytes, iterations)
         : const <int>[];
     if (_sameBytes(digest, base64Decode(stored))) {
       await _clearFailures(prefs);
@@ -457,3 +457,9 @@ class PrivateShelfLock {
     return output;
   }
 }
+
+Future<List<int>> _derivePinKeyInIsolate(
+  String pin,
+  List<int> salt,
+  int iterations,
+) => Isolate.run(() => PrivateShelfLock._derive(pin, salt, iterations));

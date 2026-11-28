@@ -509,7 +509,10 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       SizedBox(
-                        height: 120,
+                        height: math.max(
+                          120.0,
+                          74.0 + MediaQuery.textScalerOf(context).scale(33.0),
+                        ),
                         child: ListView.separated(
                           scrollDirection: Axis.horizontal,
                           physics: const BouncingScrollPhysics(
@@ -792,36 +795,43 @@ class _ReaderSelectionAreaState extends State<ReaderSelectionArea> {
           12,
     );
     final box = _geometryKey.currentContext?.findRenderObject();
-    var anchor = safe.center;
+    Offset? primary;
+    Offset? secondary;
     if (box is RenderBox && box.attached && box.hasSize) {
       // A lazy child can disappear during teardown/reflow. Never call the
       // framework glyph-height getters, which assert both endpoints exist.
       final geometry = _geometry?.value;
-      for (final point in [
-        geometry?.startSelectionPoint,
-        geometry?.endSelectionPoint,
-      ]) {
-        if (point == null || !point.localPosition.isFinite) continue;
-        final global = box.localToGlobal(point.localPosition);
+      final startPoint = geometry?.startSelectionPoint;
+      final endPoint = geometry?.endSelectionPoint;
+      if (startPoint != null && startPoint.localPosition.isFinite) {
+        final global = box.localToGlobal(startPoint.localPosition);
         if (global.isFinite &&
             global.dy >= safe.top &&
             global.dy <= safe.bottom) {
-          anchor = global - Offset(0, point.lineHeight);
-          break;
+          primary = global - Offset(0, startPoint.lineHeight);
+          secondary = global;
+        }
+      }
+      if (endPoint != null && endPoint.localPosition.isFinite) {
+        final global = box.localToGlobal(endPoint.localPosition);
+        if (global.isFinite &&
+            global.dy >= safe.top &&
+            global.dy <= safe.bottom) {
+          primary ??= global - Offset(0, endPoint.lineHeight);
+          secondary = global;
         }
       }
     }
-    // If a selection spans the whole screen, the platform's "above start /
-    // below end" pair has no room on either side. Use one visible anchor with
-    // space for the toolbar above it, rather than placing it below the screen.
-    final reserve = math.min(72.0, math.max(0.0, safe.height / 2));
+    final anchor = primary ?? safe.center;
+    final secondaryAnchor = secondary ?? anchor;
     return TextSelectionToolbarAnchors(
       primaryAnchor: Offset(
         anchor.dx.clamp(safe.left, math.max(safe.left, safe.right)),
-        anchor.dy.clamp(
-          safe.top + reserve,
-          math.max(safe.top + reserve, safe.bottom),
-        ),
+        anchor.dy.clamp(safe.top, math.max(safe.top, safe.bottom)),
+      ),
+      secondaryAnchor: Offset(
+        secondaryAnchor.dx.clamp(safe.left, math.max(safe.left, safe.right)),
+        secondaryAnchor.dy.clamp(safe.top, math.max(safe.top, safe.bottom)),
       ),
     );
   }

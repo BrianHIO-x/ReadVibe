@@ -4,12 +4,18 @@ class _EpubFontStore {
   _EpubFontStore({
     required this.archiveLookup,
     required this.encryptedPaths,
+    required this.idpfObfuscatedFonts,
+    required this.adobeObfuscatedFonts,
+    required this.packageIdentifiers,
     required this.outputDirectory,
     required this.bookId,
   });
 
   final _ArchiveLookup archiveLookup;
   final Set<String> encryptedPaths;
+  final Set<String> idpfObfuscatedFonts;
+  final Set<String> adobeObfuscatedFonts;
+  final List<String> packageIdentifiers;
   final Directory outputDirectory;
   final String bookId;
   final Map<String, String> _declaredFamilies = <String, String>{};
@@ -59,6 +65,32 @@ class _EpubFontStore {
             source.size > 64 * 1024 * 1024) {
           continue;
         }
+        var fontBytes = Uint8List.fromList(_bytesOf(source));
+        if (_isEncryptedPath(
+          archivePath,
+          archiveLookup,
+          idpfObfuscatedFonts,
+        )) {
+          final restored = _deobfuscateFont(
+            fontBytes,
+            packageIdentifiers,
+            adobe: false,
+          );
+          if (restored == null) continue;
+          fontBytes = restored;
+        } else if (_isEncryptedPath(
+          archivePath,
+          archiveLookup,
+          adobeObfuscatedFonts,
+        )) {
+          final restored = _deobfuscateFont(
+            fontBytes,
+            packageIdentifiers,
+            adobe: true,
+          );
+          if (restored == null) continue;
+          fontBytes = restored;
+        }
         final safeToken = base64Url
             .encode(utf8.encode('$bookId:$normalizedFamily'))
             .replaceAll('=', '')
@@ -72,7 +104,7 @@ class _EpubFontStore {
           ),
         );
         try {
-          target.writeAsBytesSync(_bytesOf(source), flush: true);
+          target.writeAsBytesSync(fontBytes, flush: true);
           _declaredFamilies[normalizedFamily] = family;
           _embeddedFonts[family] = target.path;
           break;
@@ -90,6 +122,54 @@ class _EpubFontStore {
     }
     return null;
   }
+}
+
+Uint8List? _deobfuscateFont(
+  Uint8List source,
+  List<String> identifiers, {
+  required bool adobe,
+}) {
+  if (_looksLikeFontBytes(source)) return source;
+  for (final id in identifiers) {
+    final trimmed = id.trim();
+    if (trimmed.isEmpty) continue;
+    final List<int> key;
+    if (adobe) {
+      final hex = trimmed
+          .replaceFirst(RegExp(r'^urn:uuid:', caseSensitive: false), '')
+          .replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+      if (hex.length == 32) {
+        key = <int>[
+          for (var i = 0; i < 32; i += 2)
+            int.parse(hex.substring(i, i + 2), radix: 16),
+        ];
+      } else {
+        key = md5.convert(utf8.encode(trimmed)).bytes;
+      }
+    } else {
+      final normalized = trimmed.replaceAll(RegExp(r'\s+'), '');
+      key = sha1.convert(utf8.encode(normalized)).bytes;
+    }
+    if (key.isEmpty) continue;
+    final limit = math.min(adobe ? 1024 : 1040, source.length);
+    final candidate = Uint8List.fromList(source);
+    for (var i = 0; i < limit; i++) {
+      candidate[i] ^= key[i % key.length];
+    }
+    if (_looksLikeFontBytes(candidate)) return candidate;
+  }
+  return null;
+}
+
+bool _looksLikeFontBytes(Uint8List bytes) {
+  if (bytes.length < 4) return false;
+  return (bytes[0] == 0x00 &&
+          bytes[1] == 0x01 &&
+          bytes[2] == 0x00 &&
+          bytes[3] == 0x00) ||
+      _hasAscii(bytes, 0, 'OTTO') ||
+      _hasAscii(bytes, 0, 'true') ||
+      _hasAscii(bytes, 0, 'ttcf');
 }
 
 String _normalizeFontFamilyName(String value) => value
@@ -156,9 +236,7 @@ class _EpubImageStore {
         final bytes = Uint8List.fromList(_bytesOf(file));
         final extension = _safeImageExtension(archivePath, bytes);
         if (extension == null) return null;
-        final encodedName = base64Url
-            .encode(utf8.encode(archivePath))
-            .replaceAll('=', '');
+        final encodedName = sha256.convert(utf8.encode(archivePath)).toString();
         final target = File(
           p.join(outputDirectory.path, '$encodedName$extension'),
         );
@@ -315,22 +393,40 @@ String? _safeImageExtension(String pathOrMime, Uint8List bytes) {
     }
     if (extension == '.jpg') {
       var offset = 2;
-      while (offset + 9 < bytes.length) {
+      while (offset + 1 < bytes.length) {
         if (bytes[offset] != 0xff) {
           offset++;
           continue;
         }
-        final marker = bytes[offset + 1];
-        if (marker >= 0xc0 && marker <= 0xc3) {
-          return (
-            width: data.getUint16(offset + 7, Endian.big).toDouble(),
-            height: data.getUint16(offset + 5, Endian.big).toDouble(),
-          );
+        while (offset < bytes.length && bytes[offset] == 0xff) {
+          offset++;
         }
-        if (offset + 4 > bytes.length) break;
-        final length = data.getUint16(offset + 2, Endian.big);
-        if (length < 2) break;
-        offset += 2 + length;
+        if (offset >= bytes.length) break;
+        final marker = bytes[offset];
+        offset++;
+        if (marker == 0x00 ||
+            marker == 0x01 ||
+            (marker >= 0xd0 && marker <= 0xd9)) {
+          continue;
+        }
+        if (offset + 2 > bytes.length) break;
+        final length = data.getUint16(offset, Endian.big);
+        if (length < 2 || offset + length > bytes.length) break;
+        final isSof =
+            (marker >= 0xc0 && marker <= 0xc3) ||
+            (marker >= 0xc5 && marker <= 0xc7) ||
+            (marker >= 0xc9 && marker <= 0xcb) ||
+            (marker >= 0xcd && marker <= 0xcf);
+        if (isSof && length >= 7 && offset + 7 <= bytes.length) {
+          final height = data.getUint16(offset + 3, Endian.big).toDouble();
+          final width = data.getUint16(offset + 5, Endian.big).toDouble();
+          if (width > 0 && height > 0) {
+            return (width: width, height: height);
+          }
+          break;
+        }
+        if (marker == 0xda) break;
+        offset += length;
       }
     }
     if (extension == '.webp' && bytes.length >= 30) {

@@ -1,4 +1,5 @@
 import '../../models/book.dart';
+import '../../models/reader_settings.dart';
 import '../../models/reading_paragraph.dart';
 import 'reader_pagination_support.dart';
 
@@ -12,16 +13,16 @@ import 'reader_pagination_support.dart';
 /// reader calls [clear] whenever either of those changes.
 class ReaderLayoutCache {
   ReaderLayoutCache({
-    this.maxChapters = 5,
+    this.maxChapters = 12,
     this.maxCharacters = 12 * 1024 * 1024,
   });
 
   final int maxChapters;
   final int maxCharacters;
   final _paragraphs = <int, List<String>>{};
-  final _extents = <int, ChapterItemExtents>{};
+  final _extentsByMode = <ReaderReadingMode, Map<int, ChapterItemExtents>>{};
+  final _signaturesByMode = <ReaderReadingMode, SimulationLayoutSignature>{};
   var _characters = 0;
-  SimulationLayoutSignature? _extentSignature;
   SimulationLayoutSignature? _lineSignature;
   double? _lineExtent;
 
@@ -56,7 +57,13 @@ class ReaderLayoutCache {
     if (cached != null &&
         cached.isFinite &&
         cached > 0 &&
-        _lineSignature?.matches(signature) == true) {
+        _lineSignature?.fontSize == signature.fontSize &&
+        _lineSignature?.lineHeight == signature.lineHeight &&
+        _lineSignature?.fontFamily == signature.fontFamily &&
+        _lineSignature?.importedFontFamily == signature.importedFontFamily &&
+        _lineSignature?.importedFontPath == signature.importedFontPath &&
+        _lineSignature?.fontWeight == signature.fontWeight &&
+        _lineSignature?.locale == signature.locale) {
       return cached;
     }
     final measured = measure();
@@ -70,20 +77,25 @@ class ReaderLayoutCache {
     SimulationLayoutSignature signature,
     ChapterItemExtents Function() measure,
   ) {
-    if (_extentSignature?.matches(signature) != true) {
-      _extents.clear();
-      _extentSignature = signature;
+    final mode = signature.mode;
+    final extents = _extentsByMode.putIfAbsent(
+      mode,
+      () => <int, ChapterItemExtents>{},
+    );
+    if (_signaturesByMode[mode]?.matches(signature) != true) {
+      extents.clear();
+      _signaturesByMode[mode] = signature;
     }
     final key = chapter.index;
-    final cached = _extents.remove(key);
+    final cached = extents.remove(key);
     if (cached != null) {
-      _extents[key] = cached;
+      extents[key] = cached;
       return cached;
     }
     final measured = measure();
-    _extents[key] = measured;
-    while (_extents.length > maxChapters) {
-      _extents.remove(_extents.keys.first);
+    extents[key] = measured;
+    while (extents.length > maxChapters) {
+      extents.remove(extents.keys.first);
     }
     return measured;
   }
@@ -91,8 +103,8 @@ class ReaderLayoutCache {
   void clear() {
     _paragraphs.clear();
     _characters = 0;
-    _extents.clear();
-    _extentSignature = null;
+    _extentsByMode.clear();
+    _signaturesByMode.clear();
     _lineSignature = null;
     _lineExtent = null;
   }

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../controllers/private_shelf_controller.dart';
 import '../services/android_book_picker.dart';
 import '../services/library_backup_service.dart';
+import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import 'app_segmented_control.dart';
@@ -404,11 +405,14 @@ class _LibraryBackupSheetState extends State<_LibraryBackupSheet> {
           width: double.infinity,
           child: FilledButton.icon(
             onPressed: _exporting ? null : _runExport,
-            icon: _exporting
-                ? const SizedBox(
+              icon: _exporting
+                ? SizedBox(
                     width: 16,
                     height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppOverlayTheme.onAccent(widget.colors),
+                    ),
                   )
                 : const Icon(Icons.archive_outlined, size: 18),
             label: Text(_exporting ? '正在打包备份…' : '导出本地备份 (.zip)'),
@@ -502,10 +506,13 @@ class _LibraryBackupSheetState extends State<_LibraryBackupSheet> {
             child: FilledButton.icon(
               onPressed: _restoring ? null : _runRestore,
               icon: _restoring
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: AppOverlayTheme.onAccent(widget.colors),
+                      ),
                     )
                   : const Icon(Icons.restore_rounded, size: 18),
               label: Text(_restoring ? '正在合并恢复…' : '合并恢复到本地书架'),

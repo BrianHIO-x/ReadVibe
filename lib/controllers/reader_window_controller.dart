@@ -12,6 +12,13 @@ class ReaderWindowController extends ChangeNotifier
   static Future<void> _commands = Future<void>.value();
   static final Set<Object> _secureTokens = <Object>{};
   static final Set<Object> _keepScreenOnTokens = <Object>{};
+
+  @visibleForTesting
+  static void resetForTesting() {
+    _commands = Future<void>.value();
+    _secureTokens.clear();
+    _keepScreenOnTokens.clear();
+  }
   EdgeInsets? _cutout;
   EdgeInsets? _bars;
   bool _visible = true;

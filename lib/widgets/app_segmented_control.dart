@@ -159,13 +159,29 @@ class _AppSegmentedControlState<T> extends State<AppSegmentedControl<T>>
         const inset = 3.5;
         final innerWidth = (totalWidth - inset * 2).clamp(1.0, double.infinity);
         final slotWidth = innerWidth / count;
+        final scaler = MediaQuery.textScalerOf(context);
+        final hasSubtitle = widget.options.any(
+          (option) => option.subtitle != null,
+        );
+        final scaledTextHeight = hasSubtitle
+            ? scaler.scale(widget.fontSize) * 1.15 +
+                  1 +
+                  scaler.scale(9.5) * 1.1
+            : scaler.scale(widget.fontSize) * 1.25;
+        final minScaledHeight = scaledTextHeight + inset * 2 + 12;
+        final effectiveHeight = widget.height >= minScaledHeight
+            ? widget.height
+            : minScaledHeight;
+        final horizontalPad = count >= 5 ? 3.0 : 6.0;
+        final effectiveFontSize =
+            count >= 5 && widget.fontSize > 12.5 ? 12.5 : widget.fontSize;
 
         return AnimatedOpacity(
           opacity: widget.enabled ? 1.0 : 0.62,
           duration: AppMotion.fast,
           child: SizedBox(
             width: totalWidth,
-            height: widget.height,
+            height: effectiveHeight,
             child: DecoratedBox(
               decoration: BoxDecoration(
                 color: trackColor,
@@ -253,7 +269,8 @@ class _AppSegmentedControlState<T> extends State<AppSegmentedControl<T>>
                                   disabledFg: colors.secondary.withValues(
                                     alpha: 0.45,
                                   ),
-                                  fontSize: widget.fontSize,
+                                  fontSize: effectiveFontSize,
+                                  horizontalPadding: horizontalPad,
                                   borderRadius: innerRadius,
                                   onTap: () {
                                     final item = widget.options[i];
@@ -290,6 +307,7 @@ class _SegmentSlot<T> extends StatelessWidget {
     required this.inactiveFg,
     required this.disabledFg,
     required this.fontSize,
+    this.horizontalPadding = 6,
     required this.borderRadius,
     required this.onTap,
   });
@@ -302,6 +320,7 @@ class _SegmentSlot<T> extends StatelessWidget {
   final Color inactiveFg;
   final Color disabledFg;
   final double fontSize;
+  final double horizontalPadding;
   final double borderRadius;
   final VoidCallback onTap;
 
@@ -328,7 +347,7 @@ class _SegmentSlot<T> extends StatelessWidget {
             borderRadius: BorderRadius.circular(borderRadius),
             overlayColor: const WidgetStatePropertyAll(Colors.transparent),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6),
+              padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
               child: Center(
                 child: option.subtitle != null
                     ? Column(

@@ -10,10 +10,10 @@ const unsupportedBookFormatMessage =
 
 const androidPackageImportMessage = '这是 Android 安装包，不是书籍';
 
-const _headerSampleBytes = 68;
+const _headerSampleBytes = 1024;
 const _textSampleBytes = 8192;
 const _maxCentralDirectoryBytes = 2 * 1024 * 1024;
-const _maxZipEntries = 4096;
+const _maxZipEntries = 20000;
 const _eocdMinSize = 22;
 const _maxEocdComment = 65535;
 const _zip64LocatorSize = 20;
@@ -24,6 +24,37 @@ const _zip64LocatorSignature = 0x07064b50;
 const _zip64EocdSignature = 0x06064b50;
 const _centralDirectorySignature = 0x02014b50;
 final _dexEntryPattern = RegExp(r'^classes\d+\.dex$');
+const _strippableExtensions = <String>{
+  'txt',
+  'epub',
+  'mobi',
+  'azw',
+  'azw3',
+  'pdf',
+  'doc',
+  'docx',
+  'apk',
+  'apks',
+  'xapk',
+  'apkm',
+  'zip',
+  'rar',
+  '7z',
+  'html',
+  'htm',
+  'xhtml',
+  'xml',
+  'rtf',
+  'odt',
+  'ods',
+  'odp',
+  'md',
+  'json',
+  'csv',
+  'tmp',
+  'bin',
+  'dat',
+};
 
 /// Turns a failed system file picker into a short Chinese message.
 String describeFilePickerFailure(Object error) {
@@ -45,7 +76,8 @@ String describeFilePickerFailure(Object error) {
   return '无法选择文件';
 }
 
-/// Resolves a supported book format from names first, then file contents.
+/// Resolves a supported book format from file contents first, falling back to
+/// names when disambiguating variants or when bytes are unavailable.
 ///
 /// Throws [FormatException] for an Android package or an unrecognized file.
 BookFormat detectBookImportFormat({
@@ -54,10 +86,13 @@ BookFormat detectBookImportFormat({
   List<int>? bytes,
 }) {
   final named = _formatFromNames(path, fileName);
-  if (named != null) return _bookFormat(named);
+  if (named == _DetectedImport.apk) {
+    throw const FormatException(androidPackageImportMessage);
+  }
 
   final header = _sample(path, bytes, _headerSampleBytes);
   if (header.isEmpty) {
+    if (named != null) return _bookFormat(named);
     throw const FormatException(unsupportedBookFormatMessage);
   }
   if (_isPdfHeader(header)) return BookFormat.pdf;
@@ -66,11 +101,21 @@ BookFormat detectBookImportFormat({
     if (zipFormat != null) return _bookFormat(zipFormat);
     throw const FormatException(unsupportedBookFormatMessage);
   }
-  if (_isOleHeader(header)) return BookFormat.doc;
-  if (_isMobiHeader(header)) return BookFormat.mobi;
-  if (_looksLikePlainText(_sample(path, bytes, _textSampleBytes))) {
-    return BookFormat.txt;
+  if (_isOleHeader(header)) {
+    return named == _DetectedImport.docx ? BookFormat.docx : BookFormat.doc;
   }
+  if (_isMobiHeader(header)) {
+    return switch (named) {
+      _DetectedImport.azw3 => BookFormat.azw3,
+      _DetectedImport.azw => BookFormat.azw,
+      _ => BookFormat.mobi,
+    };
+  }
+  if (_looksLikePlainText(_sample(path, bytes, _textSampleBytes))) {
+    if (named == _DetectedImport.doc) return BookFormat.doc;
+    if (named == null || named == _DetectedImport.txt) return BookFormat.txt;
+  }
+  if (named == _DetectedImport.txt) return BookFormat.txt;
   throw const FormatException(unsupportedBookFormatMessage);
 }
 
@@ -80,7 +125,9 @@ String labeledImportFileName(String path, String fileName, BookFormat format) {
   final extension = _extensionFor(format);
   final current = fileExtension(raw);
   if (current == extension) return raw;
-  if (current.isEmpty) return '$raw.$extension';
+  if (current.isEmpty || !_strippableExtensions.contains(current)) {
+    return '$raw.$extension';
+  }
   final dot = raw.lastIndexOf('.');
   final stem = dot <= 0 ? raw : raw.substring(0, dot);
   return '$stem.$extension';
@@ -182,12 +229,21 @@ List<int> _sample(String path, List<int>? bytes, int maxLength) {
   }
 }
 
-bool _isPdfHeader(List<int> bytes) =>
-    bytes.length >= 4 &&
-    bytes[0] == 0x25 &&
-    bytes[1] == 0x50 &&
-    bytes[2] == 0x44 &&
-    bytes[3] == 0x46;
+bool _isPdfHeader(List<int> bytes) {
+  final limit = bytes.length < _headerSampleBytes
+      ? bytes.length
+      : _headerSampleBytes;
+  for (var i = 0; i <= limit - 5; i++) {
+    if (bytes[i] == 0x25 &&
+        bytes[i + 1] == 0x50 &&
+        bytes[i + 2] == 0x44 &&
+        bytes[i + 3] == 0x46 &&
+        bytes[i + 4] == 0x2d) {
+      return true;
+    }
+  }
+  return false;
+}
 
 bool _isZipHeader(List<int> bytes) =>
     bytes.length >= 4 &&
@@ -205,7 +261,8 @@ bool _isOleHeader(List<int> bytes) =>
 
 bool _isMobiHeader(List<int> bytes) {
   if (bytes.length < 68) return false;
-  return bytes[60] == 0x42 &&
+  final isBookMobi =
+      bytes[60] == 0x42 &&
       bytes[61] == 0x4f &&
       bytes[62] == 0x4f &&
       bytes[63] == 0x4b &&
@@ -213,6 +270,16 @@ bool _isMobiHeader(List<int> bytes) {
       bytes[65] == 0x4f &&
       bytes[66] == 0x42 &&
       bytes[67] == 0x49;
+  final isPalmDoc =
+      bytes[60] == 0x54 &&
+      bytes[61] == 0x45 &&
+      bytes[62] == 0x58 &&
+      bytes[63] == 0x74 &&
+      bytes[64] == 0x52 &&
+      bytes[65] == 0x45 &&
+      bytes[66] == 0x41 &&
+      bytes[67] == 0x64;
+  return isBookMobi || isPalmDoc;
 }
 
 _DetectedImport? _formatFromZip(String path, List<int>? bytes) {
@@ -226,7 +293,7 @@ _DetectedImport? _formatFromZip(String path, List<int>? bytes) {
   final hasResources = names.contains('resources.arsc');
   if (hasManifest && (hasDex || hasResources)) return _DetectedImport.apk;
 
-  if (names.contains('meta-inf/container.xml') || names.contains('mimetype')) {
+  if (names.contains('meta-inf/container.xml')) {
     return _DetectedImport.epub;
   }
   final hasContentTypes = names.contains('[content_types].xml');
@@ -393,12 +460,49 @@ bool _looksLikePlainText(List<int> bytes) {
           (bytes[0] == 0xfe && bytes[1] == 0xff))) {
     return true;
   }
+  for (final value in bytes) {
+    if (value == 0) return false;
+    if (value < 32 &&
+        value != 9 &&
+        value != 10 &&
+        value != 11 &&
+        value != 12 &&
+        value != 13) {
+      return false;
+    }
+  }
+  final sliceEnd = _trimmedUtf8SampleLength(bytes);
   try {
-    final text = utf8.decode(bytes, allowMalformed: false);
-    return text.trim().isNotEmpty && !text.contains('\u0000');
+    final text = utf8.decode(
+      sliceEnd == bytes.length ? bytes : bytes.sublist(0, sliceEnd),
+      allowMalformed: false,
+    );
+    return text.trim().isNotEmpty;
   } on FormatException {
     return _looksLikeLegacyChinese(bytes);
   }
+}
+
+int _trimmedUtf8SampleLength(List<int> bytes) {
+  if (bytes.length < _textSampleBytes) return bytes.length;
+  var len = bytes.length;
+  var cont = 0;
+  while (len > 0 && cont < 3 && (bytes[len - 1] & 0xc0) == 0x80) {
+    len--;
+    cont++;
+  }
+  if (len > 0 && (bytes[len - 1] & 0x80) != 0 && (bytes[len - 1] & 0xc0) != 0x80) {
+    final lead = bytes[len - 1];
+    final expected = (lead & 0xe0) == 0xc0
+        ? 2
+        : (lead & 0xf0) == 0xe0
+        ? 3
+        : (lead & 0xf8) == 0xf0
+        ? 4
+        : 1;
+    if (cont + 1 < expected) return len - 1;
+  }
+  return bytes.length;
 }
 
 bool _looksLikeLegacyChinese(List<int> bytes) {
@@ -417,12 +521,14 @@ bool _looksLikeLegacyChinese(List<int> bytes) {
     final isAsciiText =
         value == 9 ||
         value == 10 ||
+        value == 11 ||
+        value == 12 ||
         value == 13 ||
         (value >= 32 && value < 127);
     if (isAsciiText) continue;
     if (value < 32) return false;
   }
-  return pairs >= 8;
+  return bytes.length < 64 ? pairs >= 1 : pairs >= 4;
 }
 
 class _Zip64Directory {

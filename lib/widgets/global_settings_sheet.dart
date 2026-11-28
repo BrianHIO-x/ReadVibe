@@ -49,11 +49,19 @@ class GlobalSettingsSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = colors.background.computeLuminance() < 0.35;
     return Material(
       color: colors.headerBg,
       surfaceTintColor: Colors.transparent,
-      borderRadius: const BorderRadius.horizontal(
-        right: Radius.circular(AppRadius.pill),
+      shape: RoundedRectangleBorder(
+        borderRadius: const BorderRadius.horizontal(
+          right: Radius.circular(AppRadius.pill),
+        ),
+        side: BorderSide(
+          color: isDark
+              ? Colors.white.withValues(alpha: 0.10)
+              : colors.border.withValues(alpha: 0.45),
+        ),
       ),
       clipBehavior: Clip.antiAlias,
       // The trailing gap lives on the scroll view instead of the panel, so the
@@ -489,7 +497,10 @@ class _StorageUsageSectionState extends State<StorageUsageSection> {
           _row('可清理缓存', report.cacheBytes, emphasized: true),
         ],
         const SizedBox(height: AppSpacing.sm),
-        Row(
+        Wrap(
+          spacing: AppSpacing.sm,
+          runSpacing: AppSpacing.xs,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             OutlinedButton.icon(
               onPressed: _clearing || _measuring ? null : _clear,
@@ -501,7 +512,6 @@ class _StorageUsageSectionState extends State<StorageUsageSection> {
                   : const Icon(Icons.cleaning_services_outlined, size: 18),
               label: Text(_clearing ? '清理中…' : '清理缓存'),
             ),
-            const SizedBox(width: AppSpacing.sm),
             TextButton(
               onPressed: _measuring || _clearing ? null : _measure,
               child: Text(_measuring ? '统计中…' : '重新统计'),

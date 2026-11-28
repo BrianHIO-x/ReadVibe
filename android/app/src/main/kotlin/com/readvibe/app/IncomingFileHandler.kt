@@ -12,6 +12,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Receives Android ACTION_VIEW / ACTION_SEND files and stages them for Flutter. */
 class IncomingFileHandler(
@@ -22,6 +23,7 @@ class IncomingFileHandler(
     private val channel = MethodChannel(messenger, "com.readvibe.app/incoming_file")
     private val executor = Executors.newSingleThreadExecutor()
     private val intents = ArrayDeque<Intent>()
+    private val copySequence = AtomicInteger(0)
     @Volatile private var disposed = false
 
     init {
@@ -147,30 +149,28 @@ class IncomingFileHandler(
             fallbackName
         }
         val sanitizedName = withExtension.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_")
-        val safeExtension = File(sanitizedName).extension.take(12)
-        val safeBaseName = File(sanitizedName).nameWithoutExtension
-            .take(if (safeExtension.isEmpty()) 160 else 147)
-            .ifEmpty { "外部文件" }
-        val safeName = if (safeExtension.isEmpty()) {
-            safeBaseName
-        } else {
-            "$safeBaseName.$safeExtension"
-        }
+        val rawExtension = File(sanitizedName).extension.lowercase()
+        val asciiExtension = rawExtension.take(12).takeIf { ext ->
+            ext.isNotEmpty() && ext.all { it in 'a'..'z' || it in '0'..'9' }
+        } ?: ""
+        val displayResultName = sanitizedName.ifEmpty { "外部文件" }
         BookImportProbe.rejectAndroidPackage(
             context = activity,
             uri = uri,
             extraNames = listOf(
                 fallbackName,
                 sanitizedName,
-                safeName,
                 uri.lastPathSegment.orEmpty(),
             ),
             extraMimes = listOf(mimeType, resolverType),
         )
-        val target = File(
-            incomingDirectory,
-            "${System.currentTimeMillis()}_${safeName.ifEmpty { "外部文件" }}",
-        )
+        val seq = copySequence.getAndIncrement()
+        val cacheName = if (asciiExtension.isEmpty()) {
+            "${System.currentTimeMillis()}_${seq}_incoming"
+        } else {
+            "${System.currentTimeMillis()}_${seq}.$asciiExtension"
+        }
+        val target = File(incomingDirectory, cacheName)
         val input = when (uri.scheme) {
             "file" -> FileInputStream(File(requireNotNull(uri.path)))
             else -> resolver.openInputStream(uri)
@@ -193,17 +193,23 @@ class IncomingFileHandler(
                 }
             }
             require(copiedBytes > 0) { "外部文件为空" }
+            val sniffedKind = BookImportProbe.sniffLocalFile(target)
+            if (sniffedKind == BookImportProbe.Kind.APK) {
+                error(BookImportProbe.ANDROID_PACKAGE_MESSAGE)
+            }
             var finalTarget = target
-            var finalName = safeName
-            if (File(safeName).extension.isEmpty()) {
-                val sniffed = sniffImportedExtension(target)
+            var finalName = displayResultName
+            if (asciiExtension.isEmpty()) {
+                val sniffed = extensionForKind(sniffedKind)
                 if (sniffed.isNotEmpty()) {
                     val renamed = File(target.parentFile, "${target.name}.$sniffed")
                     if (target.renameTo(renamed)) {
                         finalTarget = renamed
-                        finalName = "$safeName.$sniffed"
+                        finalName = "$displayResultName.$sniffed"
                     }
                 }
+            } else if (sniffedKind == BookImportProbe.Kind.DOCX && rawExtension == "doc") {
+                finalName = "${displayResultName.substringBeforeLast('.')}.docx"
             }
             return mapOf(
                 "path" to finalTarget.absolutePath,
@@ -216,40 +222,14 @@ class IncomingFileHandler(
         }
     }
 
-    private fun sniffImportedExtension(file: File): String {
-        FileInputStream(file).use { input ->
-            val header = ByteArray(68)
-            val count = input.read(header)
-            if (count >= 4 &&
-                header[0] == 0x25.toByte() &&
-                header[1] == 0x50.toByte() &&
-                header[2] == 0x44.toByte() &&
-                header[3] == 0x46.toByte()
-            ) {
-                return "pdf"
-            }
-            if (count >= 4 &&
-                header[0] == 0xD0.toByte() &&
-                header[1] == 0xCF.toByte() &&
-                header[2] == 0x11.toByte() &&
-                header[3] == 0xE0.toByte()
-            ) {
-                return "doc"
-            }
-            if (count >= 68 &&
-                header[60] == 0x42.toByte() &&
-                header[61] == 0x4F.toByte() &&
-                header[62] == 0x4F.toByte() &&
-                header[63] == 0x4B.toByte() &&
-                header[64] == 0x4D.toByte() &&
-                header[65] == 0x4F.toByte() &&
-                header[66] == 0x42.toByte() &&
-                header[67] == 0x49.toByte()
-            ) {
-                return "mobi"
-            }
-        }
-        return ""
+    private fun extensionForKind(kind: BookImportProbe.Kind): String = when (kind) {
+        BookImportProbe.Kind.PDF -> "pdf"
+        BookImportProbe.Kind.DOC -> "doc"
+        BookImportProbe.Kind.DOCX -> "docx"
+        BookImportProbe.Kind.EPUB -> "epub"
+        BookImportProbe.Kind.MOBI -> "mobi"
+        BookImportProbe.Kind.TXT -> "txt"
+        else -> ""
     }
 
     fun dispose() {

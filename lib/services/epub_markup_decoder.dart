@@ -43,10 +43,11 @@ String decodeEpubMarkup(List<int> bytes) {
 String? _decodeDeclared(List<int> bytes, String rawLabel) {
   switch (_normalizeCharset(rawLabel)) {
     case 'utf-8':
-      // An explicitly UTF-8 document with one damaged byte should stay UTF-8;
-      // guessing a Chinese legacy codec would turn the whole chapter into
-      // mojibake. The tolerant decoder replaces only the broken sequence.
-      return _tryUtf8(bytes) ?? utf8.decode(bytes, allowMalformed: true);
+      final strict = _tryUtf8(bytes);
+      if (strict != null) return strict;
+      final tolerant = utf8.decode(bytes, allowMalformed: true);
+      if (_replacementCount(tolerant) <= 2) return tolerant;
+      return _decodeUndeclared(bytes);
     case 'gbk':
       final strict = _tryGbk(bytes);
       if (strict != null) return strict;
@@ -86,7 +87,7 @@ String _decodeUndeclared(List<int> bytes) {
     return big5Text;
   }
 
-  if (_hasWindows1252Punctuation(bytes)) {
+  if (_hasExtendedLatinByte(bytes)) {
     return _decodeWindows1252(bytes);
   }
   return utf8.decode(bytes, allowMalformed: true);
@@ -223,9 +224,9 @@ String _decodeWindows1252(List<int> bytes) {
   return String.fromCharCodes(codeUnits);
 }
 
-bool _hasWindows1252Punctuation(List<int> bytes) {
+bool _hasExtendedLatinByte(List<int> bytes) {
   for (final byte in bytes) {
-    if (byte >= 0x80 && byte <= 0x9f) return true;
+    if (byte >= 0x80) return true;
   }
   return false;
 }

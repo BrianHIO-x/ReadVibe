@@ -54,7 +54,8 @@ class BookCard extends StatefulWidget {
         AppSpacing.xs +
         math.max(lineHeight, _iconSize) +
         AppSpacing.xs +
-        _progressHeight;
+        _progressHeight +
+        _inset;
   }
 
   const BookCard({
@@ -297,42 +298,60 @@ class _BookCardState extends State<BookCard> {
                             //    the old text face, which also carries the
                             //    title the reader route samples when opening.
                             else
-                              Positioned(
-                                left: 0,
-                                right: 0,
-                                bottom: 0,
+                              Positioned.fill(
+                                top: 26,
                                 child: Padding(
-                                  padding: const EdgeInsets.all(AppSpacing.md),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        book.title,
-                                        style: TextStyle(
-                                          fontFamily: 'Georgia',
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w600,
-                                          color: palette.text,
-                                          height: 1.25,
-                                        ),
-                                        maxLines: 3,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      if (book.author.isNotEmpty) ...[
-                                        const SizedBox(height: AppSpacing.xs),
-                                        Text(
-                                          book.author,
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: palette.secondary,
+                                  padding: const EdgeInsets.fromLTRB(
+                                    AppSpacing.md,
+                                    0,
+                                    AppSpacing.md,
+                                    AppSpacing.md,
+                                  ),
+                                  child: LayoutBuilder(
+                                    builder: (context, constraints) => Align(
+                                      alignment: Alignment.bottomLeft,
+                                      child: FittedBox(
+                                        fit: BoxFit.scaleDown,
+                                        alignment: Alignment.bottomLeft,
+                                        child: SizedBox(
+                                          width: constraints.maxWidth,
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                book.title,
+                                                style: TextStyle(
+                                                  fontFamily: 'Georgia',
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w600,
+                                                  color: palette.text,
+                                                  height: 1.25,
+                                                ),
+                                                maxLines: 3,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              if (book.author.isNotEmpty) ...[
+                                                const SizedBox(
+                                                  height: AppSpacing.xs,
+                                                ),
+                                                Text(
+                                                  book.author,
+                                                  style: TextStyle(
+                                                    fontSize: 11,
+                                                    color: palette.secondary,
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                              ],
+                                            ],
                                           ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
                                         ),
-                                      ],
-                                    ],
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ),
@@ -383,10 +402,13 @@ class _BookCardState extends State<BookCard> {
                                 ),
                                 child: Text(
                                   book.format.name.toUpperCase(),
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontSize: 9,
                                     fontWeight: FontWeight.w600,
-                                    color: Colors.white,
+                                    color: palette.accent.computeLuminance() >
+                                            0.35
+                                        ? palette.background
+                                        : Colors.white,
                                   ),
                                 ),
                               ),
@@ -414,17 +436,27 @@ class _BookCardState extends State<BookCard> {
                                     alignment: Alignment.bottomRight,
                                     child: Padding(
                                       padding: const EdgeInsets.all(6),
-                                      child: Icon(
-                                        widget.selected
-                                            ? Icons.check_circle_rounded
-                                            : Icons
-                                                  .radio_button_unchecked_rounded,
-                                        size: 20,
-                                        color: widget.selected
-                                            ? palette.accent
-                                            : Colors.white.withValues(
-                                                alpha: 0.9,
+                                      child: Container(
+                                        decoration: widget.selected
+                                            ? null
+                                            : BoxDecoration(
+                                                shape: BoxShape.circle,
+                                                color: Colors.black.withValues(
+                                                  alpha: 0.34,
+                                                ),
                                               ),
+                                        child: Icon(
+                                          widget.selected
+                                              ? Icons.check_circle_rounded
+                                              : Icons
+                                                    .radio_button_unchecked_rounded,
+                                          size: 20,
+                                          color: widget.selected
+                                              ? palette.accent
+                                              : Colors.white.withValues(
+                                                  alpha: 0.94,
+                                                ),
+                                        ),
                                       ),
                                     ),
                                   ),

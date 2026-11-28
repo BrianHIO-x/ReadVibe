@@ -33,16 +33,14 @@ class StorageUsageService {
     final root = (await _getAppDataDirectory()).absolute.path;
     final caches = await cacheDirectoryPaths();
     final bookCount = (await _readBookMetadata()).length;
-    final sizes = await Isolate.run(
-      () => _measureDirectories(<String>[
-        p.join(root, 'books'),
-        p.join(root, 'epub'),
-        p.join(root, 'word'),
-        p.join(root, 'pdf'),
-        p.join(root, 'fonts'),
-        ...caches,
-      ]),
-    );
+    final sizes = await _measureDirectoriesInIsolate(<String>[
+      p.join(root, 'books'),
+      p.join(root, 'epub'),
+      p.join(root, 'word'),
+      p.join(root, 'pdf'),
+      p.join(root, 'fonts'),
+      ...caches,
+    ]);
     return StorageUsageReport(
       bookPayloadBytes: sizes[0],
       epubResourceBytes: sizes[1],
@@ -56,20 +54,7 @@ class StorageUsageService {
 
   Future<int> clearTemporaryCaches() async {
     final caches = await cacheDirectoryPaths();
-    return Isolate.run(() {
-      var freed = 0;
-      for (final path in caches) {
-        final directory = Directory(path);
-        if (!directory.existsSync()) continue;
-        freed += _measureDirectory(directory);
-        try {
-          directory.deleteSync(recursive: true);
-        } on FileSystemException {
-          // A file the platform still holds open is retried by a later sweep.
-        }
-      }
-      return freed;
-    });
+    return _clearCachesInIsolate(caches);
   }
 
   Future<List<String>> cacheDirectoryPaths() async {
@@ -302,6 +287,24 @@ bool _pathsContain(Set<String> paths, String candidate) =>
 List<int> _measureDirectories(List<String> paths) => <int>[
   for (final path in paths) _measureDirectory(Directory(path)),
 ];
+
+Future<List<int>> _measureDirectoriesInIsolate(List<String> paths) =>
+    Isolate.run(() => _measureDirectories(paths));
+
+Future<int> _clearCachesInIsolate(List<String> caches) => Isolate.run(() {
+  var freed = 0;
+  for (final path in caches) {
+    final directory = Directory(path);
+    if (!directory.existsSync()) continue;
+    freed += _measureDirectory(directory);
+    try {
+      directory.deleteSync(recursive: true);
+    } on FileSystemException {
+      // A file the platform still holds open is retried by a later sweep.
+    }
+  }
+  return freed;
+});
 
 int _measureDirectory(Directory directory) {
   if (!directory.existsSync()) return 0;

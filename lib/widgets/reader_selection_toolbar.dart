@@ -45,14 +45,19 @@ class ReaderSelectionToolbar extends StatelessWidget {
     final isDark = colors.background.computeLuminance() < 0.35;
     final media = MediaQuery.of(context);
     final screen = media.size;
+    final textScale = media.textScaler.scale(1.0).clamp(1.0, 2.0);
     final safeTop = media.padding.top + 8;
+    final safeLeft = media.padding.left + 12.0;
+    final safeRight = screen.width - media.padding.right - 12.0;
     final safeBottom =
         screen.height - math.max(media.padding.bottom, media.viewInsets.bottom) - 8;
-    final toolbarWidth = math.min(screen.width - 24, 344.0);
-    const estimatedHeight = 104.0;
+    final availableWidth = math.max(120.0, safeRight - safeLeft);
+    final toolbarWidth = math.min(availableWidth, 344.0);
+    final estimatedHeight = 76.0 + 28.0 * textScale;
     final primary = anchors.primaryAnchor;
+    final maxLeft = math.max(safeLeft, safeRight - toolbarWidth);
     final left = (primary.dx - toolbarWidth / 2)
-        .clamp(12.0, math.max(12.0, screen.width - toolbarWidth - 12))
+        .clamp(safeLeft, maxLeft)
         .toDouble();
     var top = primary.dy - estimatedHeight - 10;
     if (top < safeTop) {

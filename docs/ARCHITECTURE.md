@@ -13,6 +13,7 @@ lib/
   widgets/             可复用界面组件
   services/            解析、存储、备份、平台通道等业务服务
   services/epub/       EPUB 解包、CSS、导航与媒体存储子模块
+  services/mobi/       Kindle（MOBI/AZW/AZW3/PalmDOC）二进制与压缩解析子模块
   services/storage/    存储层的独立子模块
   repositories/        持久化接口契约
   models/              纯数据模型
@@ -211,23 +212,24 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 | `book_export_service.dart` | 书籍导出。PDF 直接复制当前副本；文字书在 isolate 中按章节顺序写出 UTF-8 TXT（卷标题、富文本标题块、图片替代文本俱到，分块写入避免代理对截断），先落私有暂存再经 `BookExportDestination`（Android SAF 通道）由用户选择保存位置，完成后清理暂存。文件名净化并截 60 字符。 |
 | `book_search_service.dart` | 书内全文搜索。一次会话把书籍与其规范化段落一次性送入 isolate worker，后续关键词只传查询串；规范化折叠大小写与空白，命中区间映射回原始 UTF-16 偏移保证高亮精确；LPM 缓存约 12MB 章节段落，单次扫描上限 500 条。`removeObsoleteData` 清理旧版搜索遗留目录。 |
 | `epub_parser.dart` | EPUB 解析器库入口，通过 `part` 组织 `lib/services/epub/` 下的五个专职子模块（解包与工具、CSS 样式解析、文档/NCX/OPF 解析、媒体落地及目录/锚点链接解析）。在 isolate 中运行，处理清单资源与站点锚点引用；资源限额（输入 256MB、条目 2 万、展开 512MB、单图 64MB）可注入，失败时清理已落地资源目录。 |
-| `epub/epub_archive_utils.dart` | EPUB 归档流式读取、路径规范化及大小/条目安全校验助手。 |
-| `epub/epub_css_resolver.dart` | 出版商安全 CSS 子集解析（字号/行高/对齐/缩进/粗斜/颜色/背景图/字库规则），映射为 `EpubContentStyle`。 |
-| `epub/epub_document_parser.dart` | XHTML 内容文档遍历、富文本块构建与图片/脚注元素采集。 |
-| `epub/epub_media_store.dart` | EPUB 内嵌封面、插图与 `@font-face` 字库落地存储与清理。 |
-| `epub/epub_navigation.dart` | OPF spine/manifest 读取、NCX/Nav 目录生成以及跨章节锚点与站内 `<a href>` 链接解析。 |
-| `mobi_parser.dart` | Kindle 解析入口。支持无 DRM 的 MOBI 7、AZW、AZW3/KF8；扩展元数据取标题作者，按 MobiEncoding 解码 HTML 压制为纯文本后复用 `buildBookFromText` 章节规则；加密书籍显式报错且不会写入空书架条目。 |
+| `epub/epub_archive_utils.dart` | EPUB 归档流式读取、GBK/Big5 条目名兼容、IDPF/Adobe 字体混淆识别、XHTML 自闭合标签规整及大小/条目安全校验助手。 |
+| `epub/epub_css_resolver.dart` | 出版商安全 CSS 子集解析（带注释/字符串/括号平衡分词、`@media` 筛选、伪类/属性精准匹配及有序样式覆盖），映射为 `EpubContentStyle`。 |
+| `epub/epub_document_parser.dart` | XHTML 内容文档遍历（块级后代拆分与行内连续 Span 缓冲）、富文本块构建与图片/SVG/脚注元素采集。 |
+| `epub/epub_media_store.dart` | EPUB 内嵌封面、插图（SHA-256 落盘）与 `@font-face`（含 IDPF/Adobe 解混淆还原）落地存储与清理。 |
+| `epub/epub_navigation.dart` | OPF spine/manifest 读取、NCX/Nav 目录生成（含无锚点首段拆分）以及跨章节锚点与站内 `<a href>` 链接解析。 |
+| `mobi_parser.dart` | Kindle 解析入口，基于纯 Dart `KindleBinaryReader` 解析无 DRM 的 PalmDOC、MOBI 7、AZW 与 AZW3/KF8，提取 EXTH 元数据、剔除样式与脚本标签后复用 `buildBookFromText` 章节规则，DRM 与固定版式显式报错且不写脏书架。 |
+| `mobi/kindle_binary_reader.dart` | 纯 Dart Kindle 容器与压缩引擎。支持 `<264B` 短头、PalmDOC LZ77、HUFF/CDIC 递归解压、多记录 `INDX`/`TAGX`、KF8 `FDST`/`SKEL`/`FRAG` 拼接与 `TEXtREAd`。 |
 | `pdf_import_service.dart` | PDF 导入。校验文件后存入私有 pdf 目录，经渲染网关获取页数；仅权限加密（空用户密码）自动本地解锁，真密码保护时抛出 `PdfPasswordRequiredException` 由上层索取密码；失败清理副本。 |
 | `pdf_renderer_service.dart` | PDF 平台网关。上半部定义 `PdfRendererGateway` 抽象与数据类（搜索结果、大纲项、批注），`PlatformPdfRendererGateway` 注入到阅读页；下半部 `PdfRendererService` 静态封装 `com.readvibe.app/pdf_renderer` 通道的页数、渲染、搜索、大纲、批注、解锁、OCR、单页文字层提取与缓存清理调用。 |
-| `txt_parser.dart` | TXT 解析与章节识别。探测 UTF-8/UTF-16/GBK/Big5 编码：先按 NUL 填充的奇偶结构判定无 BOM 的 UTF-16（拉丁文两种读法都能解码，仅靠内容评分会误选落在 CJK 区的那一种），其余交给常用汉字评分——评分只在开头 192KB 的字节上做，胜出的编码才读整本，因此候选编码的数量不再乘进一次导入的耗时；Big5 交给 `dart3_big5` 时按 2KB 分片并在双字节边界切开，该包逐字符拼接字符串，整本交给它的代价随字数平方增长，百万字的旧编码小说会一直卡在解析正文；256MB 上限；四组章节标题正则（`第X章/卷X/Chapter N/番外` 等）仅去除 Markdown 装饰后判定，以句读等散文特征排除伪标题；`buildBookFromText` 供 DOC/DOCX、Kindle 复用同一章节规则；`upgradeLegacyTxtBook` 用旧版本号驱动重解析。 |
-| `word_parser.dart` | Word 文档导入。DOCX 经 `InputFileStream` 按需读包，正文 `document.xml` 解压落盘后以 `xml_events` 逐标记流式读取，`_DocxBodyReader` 只持有当前段落或表格，内存与书的长度无关；提取标题、元数据、样式段落、表格、脚注与内容控件包裹的正文并落地图片；正文上限 192MB，解压写入受 `_BoundedFileOutput` 限额保护；旧版二进制 DOC 委托 POI 通道在 Android 后台提取纯文本；两条路径统一走 `buildBookFromText`，正文不出设备。 |
+| `txt_parser.dart` | TXT 解析与章节识别。探测 UTF-8/UTF-16/Windows-1252/GBK/Big5 编码（含 ASCII 占比护栏、拉丁可读性评分与繁体章节规则）；2KB 分片安全解码 Big5；以句读等散文特征排除伪标题；`buildBookFromText` 供 DOC/DOCX、Kindle 复用；`upgradeLegacyTxtBook` 用旧版本号驱动重解析。 |
+| `word_parser.dart` | Word 文档导入。DOCX 经 `_rels/.rels` 主文档发现、`InputFileStream` 按需读包、`styles.xml`（含 `outlineLvl`）与 `endnotes.xml` 解析，跳过修订/隐藏域并去重 `mc:AlternateContent`，提取多嵌套与内容控件表格；旧版 `.doc`（含 RTF/MHTML/Word6 兼容）委托 Apache POI 在 Android 后台提取纯文本，`PK` 误命名 `.doc` 自动切回 DOCX。 |
 | `word_count_service.dart` | 字数统计服务。按 Unicode scalar 计数（代理对不重复计，排除空白），isolate 后台执行；结果按 `书ID:大小:解析版本:章节数` 缓存并去重在途请求，编辑章后以代数失效；含千分位格式的全文与逐章展示函数。 |
 | `font_service.dart` | 字体导入与加载。直接复用原生 `AndroidBookPicker.pickFont()` 选入 `.ttf`/`.otf`（已移除 `file_picker`），经 `ImportedFontStore` 保存并以时间戳命名家族注册到 Flutter 引擎，加载失败自动回退系统字体且不丢其他设置；静态去重防止重复注册与并发重复加载。 |
 | `incoming_file_service.dart` | 外部 ACTION_VIEW 文件接收。原生复制到缓存后经通道通知，静态处理器串行消费避免两个文件管理器启动竞态；单个文件解析失败只跳过该文件，队列中其余文件继续导入，通道本身不可用才停止本轮；结构化错误经回调上报。 |
 | `system_text_action_service.dart` | 系统文字动作服务。经 PackageManager 查询可接收翻译/搜索的应用，产品白名单圈定六个 AI 应用与 Edge/Chrome/系统浏览器；支持记住默认目标、清除默认与显式启动校验。 |
 | `update_service.dart` | 更新检查。通过原生 `app_update` 通道 `appVersion` 查询本机版本（已移除 `package_info_plus`），同时请求国内镜像线路（`feedMirrorHosts`）与 GitHub Releases 接口，第一条取到正式版 JSON 后再给其余线路 800 毫秒，在全部答复里取最新版本，避免镜像缓存的旧版本盖过新版本；三轮段比较版本号，解析 arm64 APK 资产并校验下载地址确实指向本仓库的发布路径，安装包摘要优先取资产自带的 `digest`，缺失时回退发布说明里的 `SHA-256：` 行（兼容反引号与加粗包裹）；给出“有新版/已最新/检查失败”三态结果，同一时刻只保留一次在途检查。 |
 | `update_download_service.dart` | 安装包下载与安装。线路依次为国内镜像（`mirrorHosts`）与 GitHub 直连，默认优先沿用 `SharedPreferences` 中记住的上一次成功下载线路（首次下载或旧线路失效时选用主国内镜像），不提前测速直接开始取包。仅当当前线路不可用，或连续 `slowWindow`（6 秒）低于 `lowSpeedThreshold`（512 KB/s）时，才在当前续传偏移处并发向其余备用线路各取至多 1 MB 样本测速（3 秒超时，首条完成后再等 800 毫秒，GitHub 直连速度先除以 1.5 再比对），并切换到最快路线，测速样本与已落盘字节直接通过 `Range` 续传接续；已测速阶段持续落后于下一条备选一半速度达六秒也会继续切换，接近完成时不再换线。字节先写入会话目录内的 `.part` 文件，长度、ZIP 魔数与 SHA-256 全部通过后改名为正式 APK 并记住本次完成下载的线路；跨线路续传只在存在摘要时启用，失败即删除本次会话目录，两天前的旧会话在开始时清理；支持取消与进度回调，安装经 `app_update` 通道转交原生层。 |
-| `storage/chapter_disk_store.dart` | 章节分块存储引擎。实现 `LazyChapterStore`/`LazyChapter` 按需解码、分批在 worker isolate 同步编码/校验/落盘、30 秒 IO 超时、LRU 章节缓存及损坏/写半截载荷识别，随书创建/替换原子目录。 |
+| `storage/chapter_disk_store.dart` | 章节分块存储引擎。实现 `LazyChapterStore`/`LazyChapter` 按需解码、12 章 LRU 缓存、`Isolate.run` 去重后台预取（`prefetch`）、分批在 worker isolate 同步编码/校验/落盘、30 秒 IO 超时及损坏/写半截载荷识别。 |
 | `storage/storage_usage_service.dart` | 存储占用测算、临时缓存目录枚举清理（PDF 渲染与 OCR 缓存、下载更新、选中字体临时文件、`readvibe_backup_import` 临时目录等）与孤儿资源回收。 |
 | `storage/obsolete_search_cleanup.dart` | 独立小模块。删除旧版全文搜索在应用数据目录遗留的 `search/` 目录，含路径越界防护。 |
 | `storage/chapter_payload_codec.dart` | 章节载荷编解码。`encodeChapterPayload` 写入章节 JSON（富文本块含全部可见文本时不重复写纯文本），`decodeChapterPayload` 还原章节数据并为损坏的富文本重建兜底纯文本；禁止依赖 IO 与 Flutter。 |
@@ -294,7 +296,7 @@ docs/、design/、assets/  文档、图标源文件与静态资源
 
 | 文件 | 作用 |
 |---|---|
-| `reader_mode_views.dart` | 文字阅读页三种阅读模式（分章、滚动、仿真）视图构建与布局对齐实现。 |
+| `reader_mode_views.dart` | 文字阅读页三种阅读模式（分章、有界滑动窗口连续滚动、仿真）视图构建、`SliverVariedExtentList.builder` 布局与零漂移锚点对齐实现。 |
 | `reader_overlay_bars.dart` | 文字阅读页顶部/底部浮动菜单栏及按行界自动计算内边距的展开逻辑。 |
 | `reader_page_turn.dart` | 仿真/平滑翻页手势拖拽处理、页角跟随、弹簧惯性收尾及邻页预热渲染。 |
 | `reader_sheets_and_links.dart` | 文字阅读页目录/搜索/书签/编辑/设置五面板协调、EPUB 站内引用跳转与脚注弹窗。 |

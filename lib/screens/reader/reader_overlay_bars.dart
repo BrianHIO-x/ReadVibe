@@ -336,8 +336,8 @@ extension _ReaderScreenOverlayBars on _ReaderScreenState {
                 padding: EdgeInsets.only(
                   bottom: viewPadding.bottom,
                   top: AppSpacing.sm,
-                  left: AppSpacing.xl + contentInsets.left,
-                  right: AppSpacing.xl + contentInsets.right,
+                  left: AppSpacing.sm + contentInsets.left,
+                  right: AppSpacing.sm + contentInsets.right,
                 ),
                 decoration: BoxDecoration(
                   color: themeColors.headerBg,
@@ -354,46 +354,55 @@ extension _ReaderScreenOverlayBars on _ReaderScreenState {
                     SizedBox(height: _footerTextGap),
                     Row(
                       key: _footerRowKey,
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
-                        _bottomBarButton(
-                          icon: Icons.list,
-                          label: '目录',
-                          subtitle:
-                              '${_chapterIndex + 1}/${_book.chapters.length}',
-                          onTap: _showChapterList,
-                          color: themeColors.secondary,
-                        ),
-                        _bottomBarButton(
-                          icon: Icons.search_rounded,
-                          label: '搜索',
-                          subtitle: '全文',
-                          onTap: _showSearch,
-                          color: themeColors.secondary,
-                        ),
-                        _bottomBarButton(
-                          icon: Icons.sticky_note_2_outlined,
-                          label: '笔记',
-                          subtitle: (_notes.length + _bookmarks.length) == 0
-                              ? '未添加'
-                              : '${_notes.length + _bookmarks.length}',
-                          onTap: _showBookmarks,
-                          color: themeColors.secondary,
-                        ),
-                        if (_settings.readingMode == ReaderReadingMode.chapter)
-                          _bottomBarButton(
-                            icon: Icons.edit_note_rounded,
-                            label: '编辑',
-                            subtitle: '当前章',
-                            onTap: _showChapterEditor,
+                        Expanded(
+                          child: _bottomBarButton(
+                            icon: Icons.list,
+                            label: '目录',
+                            subtitle:
+                                '${_chapterIndex + 1}/${_book.chapters.length}',
+                            onTap: _showChapterList,
                             color: themeColors.secondary,
                           ),
-                        _bottomBarButton(
-                          icon: Icons.text_fields,
-                          label: '设置',
-                          subtitle: '${_settings.fontSize.toInt()}pt',
-                          onTap: _showSettings,
-                          color: themeColors.secondary,
+                        ),
+                        Expanded(
+                          child: _bottomBarButton(
+                            icon: Icons.search_rounded,
+                            label: '搜索',
+                            subtitle: '全文',
+                            onTap: _showSearch,
+                            color: themeColors.secondary,
+                          ),
+                        ),
+                        Expanded(
+                          child: _bottomBarButton(
+                            icon: Icons.sticky_note_2_outlined,
+                            label: '笔记',
+                            subtitle: (_notes.length + _bookmarks.length) == 0
+                                ? '未添加'
+                                : '${_notes.length + _bookmarks.length}',
+                            onTap: _showBookmarks,
+                            color: themeColors.secondary,
+                          ),
+                        ),
+                        if (_settings.readingMode == ReaderReadingMode.chapter)
+                          Expanded(
+                            child: _bottomBarButton(
+                              icon: Icons.edit_note_rounded,
+                              label: '编辑',
+                              subtitle: '当前章',
+                              onTap: _showChapterEditor,
+                              color: themeColors.secondary,
+                            ),
+                          ),
+                        Expanded(
+                          child: _bottomBarButton(
+                            icon: Icons.text_fields,
+                            label: '设置',
+                            subtitle: '${_settings.fontSize.toInt()}pt',
+                            onTap: _showSettings,
+                            color: themeColors.secondary,
+                          ),
                         ),
                       ],
                     ),
@@ -425,7 +434,7 @@ extension _ReaderScreenOverlayBars on _ReaderScreenState {
           child: Padding(
             padding: const EdgeInsets.symmetric(
               vertical: 2,
-              horizontal: AppSpacing.md,
+              horizontal: 4,
             ),
             child: ExcludeSemantics(
               child: Column(
@@ -435,6 +444,8 @@ extension _ReaderScreenOverlayBars on _ReaderScreenState {
                   const SizedBox(height: 4),
                   Text(
                     label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 13,
                       color: color,
@@ -443,6 +454,8 @@ extension _ReaderScreenOverlayBars on _ReaderScreenState {
                   ),
                   Text(
                     subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 11,
                       color: color.withValues(alpha: 0.7),

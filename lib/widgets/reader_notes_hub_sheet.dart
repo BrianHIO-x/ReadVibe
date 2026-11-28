@@ -164,6 +164,7 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
 
     return AppSheetSurface(
       colors: colors,
+      animateSize: false,
       child: SafeArea(
         top: false,
         bottom: false,
@@ -391,47 +392,66 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
           _categoryFilter != null ||
           _tagFilter != null ||
           _searchController.text.trim().isNotEmpty;
-      return Center(
-        child: Padding(
+      return LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
+          controller: widget.scrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(AppSpacing.xl),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.sticky_note_2_outlined,
-                size: 46,
-                color: colors.secondary.withValues(alpha: 0.55),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: (constraints.maxHeight - AppSpacing.xl * 2).clamp(
+                0.0,
+                double.infinity,
               ),
-              const SizedBox(height: AppSpacing.md),
-              Text(
-                hasFilter ? '没有符合筛选条件的笔记' : '还没有笔记与划线',
-                style: TextStyle(color: colors.text, fontWeight: FontWeight.w600),
+            ),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.sticky_note_2_outlined,
+                    size: 46,
+                    color: colors.secondary.withValues(alpha: 0.55),
+                  ),
+                  const SizedBox(height: AppSpacing.md),
+                  Text(
+                    hasFilter ? '没有符合筛选条件的笔记' : '还没有笔记与划线',
+                    style: TextStyle(
+                      color: colors.text,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: AppSpacing.xs),
+                  Text(
+                    hasFilter
+                        ? '尝试调整颜色、分类或搜索关键词'
+                        : (widget.isPdf
+                              ? '点击工具栏「添加笔记」或在页面文字面板长按选句即可记下想法。'
+                              : '阅读时长按正文选中一段文字，点击彩色高亮或「写笔记」即可记下想法。'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: colors.secondary,
+                      fontSize: 12.5,
+                      height: 1.5,
+                    ),
+                  ),
+                  if (hasFilter) ...[
+                    const SizedBox(height: AppSpacing.md),
+                    OutlinedButton(
+                      onPressed: () {
+                        _searchController.clear();
+                        setState(() {
+                          _colorFilter = null;
+                          _categoryFilter = null;
+                          _tagFilter = null;
+                        });
+                      },
+                      child: const Text('清除全部筛选'),
+                    ),
+                  ],
+                ],
               ),
-              const SizedBox(height: AppSpacing.xs),
-              Text(
-                hasFilter
-                    ? '尝试调整颜色、分类或搜索关键词'
-                    : (widget.isPdf
-                          ? '点击工具栏「添加笔记」或在页面文字面板长按选句即可记下想法。'
-                          : '阅读时长按正文选中一段文字，点击彩色高亮或「写笔记」即可记下想法。'),
-                textAlign: TextAlign.center,
-                style: TextStyle(color: colors.secondary, fontSize: 12.5, height: 1.5),
-              ),
-              if (hasFilter) ...[
-                const SizedBox(height: AppSpacing.md),
-                OutlinedButton(
-                  onPressed: () {
-                    _searchController.clear();
-                    setState(() {
-                      _colorFilter = null;
-                      _categoryFilter = null;
-                      _tagFilter = null;
-                    });
-                  },
-                  child: const Text('清除全部筛选'),
-                ),
-              ],
-            ],
+            ),
           ),
         ),
       );
@@ -480,29 +500,48 @@ class _ReaderNotesHubSheetState extends State<ReaderNotesHubSheet> {
   Widget _buildBookmarksList(ReaderThemeColors colors) {
     final bookmarks = widget.bookmarks;
     if (bookmarks.isEmpty) {
-      return Center(
-        child: Padding(
+      return LayoutBuilder(
+        builder: (context, constraints) => SingleChildScrollView(
+          controller: widget.scrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(AppSpacing.xl),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.bookmark_border_rounded,
-                size: 46,
-                color: colors.secondary.withValues(alpha: 0.55),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: (constraints.maxHeight - AppSpacing.xl * 2).clamp(
+                0.0,
+                double.infinity,
               ),
-              const SizedBox(height: AppSpacing.md),
-              Text(
-                '这本书还没有书签',
-                style: TextStyle(color: colors.text, fontWeight: FontWeight.w600),
+            ),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.bookmark_border_rounded,
+                    size: 46,
+                    color: colors.secondary.withValues(alpha: 0.55),
+                  ),
+                  const SizedBox(height: AppSpacing.md),
+                  Text(
+                    '这本书还没有书签',
+                    style: TextStyle(
+                      color: colors.text,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: AppSpacing.xs),
+                  Text(
+                    '阅读时点击顶栏的书签图标即可记下当前位置。',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: colors.secondary,
+                      fontSize: 12.5,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: AppSpacing.xs),
-              Text(
-                '阅读时点击顶栏的书签图标即可记下当前位置。',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: colors.secondary, fontSize: 12.5, height: 1.5),
-              ),
-            ],
+            ),
           ),
         ),
       );

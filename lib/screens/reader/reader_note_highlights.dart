@@ -164,49 +164,55 @@ class RenderNoteHighlights extends RenderProxyBox {
     return null;
   }
 
-  RenderParagraph? _findDescendantParagraph(RenderObject node) {
-    if (node is RenderOffstage && node.offstage) return null;
-    if (node is RenderParagraph) return node;
-    RenderParagraph? match;
+  void _collectDescendantParagraphs(
+    RenderObject node,
+    List<RenderParagraph> out,
+  ) {
+    if (node is RenderOffstage && node.offstage) return;
+    if (node is RenderParagraph) {
+      out.add(node);
+      return;
+    }
     node.visitChildren((child) {
-      match ??= _findDescendantParagraph(child);
+      _collectDescendantParagraphs(child, out);
     });
-    return match;
   }
 
   @override
   void paint(PaintingContext context, Offset offset) {
     _hitRegions.clear();
-    final paragraph = child == null ? null : _findDescendantParagraph(child!);
-    if (paragraph == null || !paragraph.hasSize || _spans.isEmpty) {
+    final paragraphs = <RenderParagraph>[];
+    if (child != null) _collectDescendantParagraphs(child!, paragraphs);
+    if (paragraphs.isEmpty || _spans.isEmpty) {
       super.paint(context, offset);
       return;
     }
 
-    final plainText = paragraph.text.toPlainText(includeSemanticsLabels: false);
-    if (plainText.isEmpty) {
-      super.paint(context, offset);
-      return;
-    }
-
-    final transform = paragraph.getTransformTo(this);
     final items = <_ResolvedPaintItem>[];
-
-    for (final span in _spans) {
-      final range = _resolveOffsetRange(plainText, span);
-      if (range == null) continue;
-      final boxes = paragraph.getBoxesForSelection(
-        TextSelection(baseOffset: range.$1, extentOffset: range.$2),
-        boxHeightStyle: ui.BoxHeightStyle.tight,
+    for (final paragraph in paragraphs) {
+      if (!paragraph.hasSize) continue;
+      final plainText = paragraph.text.toPlainText(
+        includeSemanticsLabels: false,
       );
-      if (boxes.isEmpty) continue;
-      final lineRects = _mergeLineBands([
-        for (final box in boxes) MatrixUtils.transformRect(transform, box.toRect()),
-      ]);
-      if (lineRects.isEmpty) continue;
-      items.add(_ResolvedPaintItem(span.note, lineRects));
-      for (final rect in lineRects) {
-        _hitRegions.add(_HitRegion(span.note, rect));
+      if (plainText.isEmpty) continue;
+      final transform = paragraph.getTransformTo(this);
+      for (final span in _spans) {
+        final range = _resolveOffsetRange(plainText, span);
+        if (range == null) continue;
+        final boxes = paragraph.getBoxesForSelection(
+          TextSelection(baseOffset: range.$1, extentOffset: range.$2),
+          boxHeightStyle: ui.BoxHeightStyle.tight,
+        );
+        if (boxes.isEmpty) continue;
+        final lineRects = _mergeLineBands([
+          for (final box in boxes)
+            MatrixUtils.transformRect(transform, box.toRect()),
+        ]);
+        if (lineRects.isEmpty) continue;
+        items.add(_ResolvedPaintItem(span.note, lineRects));
+        for (final rect in lineRects) {
+          _hitRegions.add(_HitRegion(span.note, rect));
+        }
       }
     }
 
@@ -300,11 +306,14 @@ class RenderNoteHighlights extends RenderProxyBox {
 
       if (item.note.hasContent && item.rects.isNotEmpty) {
         final last = item.rects.last.shift(offset);
-        final cx = last.right + 4.5;
-        final cy = last.top + 4.0;
+        final cx = (last.right - 3.0).clamp(
+          offset.dx + 3.0,
+          offset.dx + math.max(3.0, size.width - 3.0),
+        );
+        final cy = last.bottom + 3.2;
         context.canvas.drawCircle(
           Offset(cx, cy),
-          3.4,
+          2.4,
           Paint()..color = swatch,
         );
       }

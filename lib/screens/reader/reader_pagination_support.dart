@@ -14,6 +14,7 @@ const _simulationPageExtentTolerance = 0.01;
 
 class SimulationLayoutSignature {
   final double contentWidth;
+  final ReaderReadingMode mode;
   final double fontSize;
   final double lineHeight;
   final String fontFamily;
@@ -21,11 +22,15 @@ class SimulationLayoutSignature {
   final String? importedFontPath;
   final FontWeight fontWeight;
   final ReaderParagraphSpacing paragraphSpacing;
+  final Locale? locale;
 
   SimulationLayoutSignature({
     required this.contentWidth,
     required ReaderSettings settings,
-  }) : fontSize = settings.fontSize,
+    ReaderReadingMode? mode,
+    this.locale,
+  }) : mode = mode ?? settings.readingMode,
+       fontSize = settings.fontSize,
        lineHeight = settings.lineHeight,
        fontFamily = settings.fontFamily,
        importedFontFamily = settings.importedFontFamily,
@@ -35,13 +40,15 @@ class SimulationLayoutSignature {
 
   bool matches(SimulationLayoutSignature other) {
     return contentWidth == other.contentWidth &&
+        mode == other.mode &&
         fontSize == other.fontSize &&
         lineHeight == other.lineHeight &&
         fontFamily == other.fontFamily &&
         importedFontFamily == other.importedFontFamily &&
         importedFontPath == other.importedFontPath &&
         fontWeight == other.fontWeight &&
-        paragraphSpacing == other.paragraphSpacing;
+        paragraphSpacing == other.paragraphSpacing &&
+        locale == other.locale;
   }
 }
 
@@ -372,12 +379,31 @@ class ReadingTextAnchor {
   final int chapterIndex;
   final int paragraphIndex;
   final int characterOffset;
+  final bool isChapterTop;
 
   const ReadingTextAnchor({
     required this.chapterIndex,
     required this.paragraphIndex,
     required this.characterOffset,
+    this.isChapterTop = false,
   });
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ReadingTextAnchor &&
+          chapterIndex == other.chapterIndex &&
+          paragraphIndex == other.paragraphIndex &&
+          characterOffset == other.characterOffset &&
+          isChapterTop == other.isChapterTop;
+
+  @override
+  int get hashCode =>
+      Object.hash(chapterIndex, paragraphIndex, characterOffset, isChapterTop);
+
+  @override
+  String toString() =>
+      'ReadingTextAnchor(chapter: $chapterIndex, paragraph: $paragraphIndex, offset: $characterOffset, top: $isChapterTop)';
 }
 
 class ScrollSnapshot {

@@ -33,7 +33,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
           child: DraggableScrollableSheet(
             initialChildSize: 0.95,
             maxChildSize: 0.95,
-            minChildSize: 0.3,
+            minChildSize: 0.38,
             builder: (_, scrollController) => ChapterListSheet(
               chapters: _book.chapters,
               currentChapter: _chapterIndex,
@@ -204,56 +204,15 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
     return result;
   }
 
-  List<ReaderNoteHighlightSpan> _continuousChapterNoteSpans(
-    int chapterIndex,
-    List<String> paragraphs,
-    String separator,
-  ) {
-    final chapterMap = _notesByChapterParagraph[chapterIndex];
-    if (chapterMap == null || chapterMap.isEmpty) {
-      return const <ReaderNoteHighlightSpan>[];
-    }
-    final paragraphStarts = List<int>.filled(paragraphs.length, 0);
-    var cursor = 0;
-    for (var i = 0; i < paragraphs.length; i++) {
-      paragraphStarts[i] = cursor;
-      cursor += paragraphs[i].length;
-      if (i < paragraphs.length - 1) cursor += separator.length;
-    }
-    final spans = <ReaderNoteHighlightSpan>[];
-    for (final entry in chapterMap.entries) {
-      final pIdx = entry.key;
-      if (pIdx < 0 || pIdx >= paragraphStarts.length) continue;
-      final base = paragraphStarts[pIdx];
-      for (final note in entry.value) {
-        if (note.endOffset > note.startOffset) {
-          spans.add(
-            ReaderNoteHighlightSpan(
-              note: note,
-              startOffset: base + note.startOffset,
-              endOffset: base + note.endOffset,
-            ),
-          );
-        } else {
-          spans.add(
-            ReaderNoteHighlightSpan(
-              note: note,
-              startOffset: base,
-              endOffset: base + paragraphs[pIdx].length,
-            ),
-          );
-        }
-      }
-    }
-    return spans;
-  }
-
   void _commitNotes(List<ReaderNote> updated) {
     final sorted = sortedReaderNotes(updated);
+    _discardPageTurnSnapshot();
+    _discardReversePageTurnSnapshot();
     _setReaderState(() {
       _notes = sorted;
       _rebuildNotesIndex(sorted);
     });
+    _scheduleSimulationSnapshotWarmup();
     unawaited(
       _storage.saveNotes(_book.id, sorted).catchError((
         Object error,
@@ -704,11 +663,15 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
           duration: AppMotion.sheet,
           reverseDuration: AppMotion.normal,
         ),
-        builder: (sheetContext) => DraggableScrollableSheet(
-          initialChildSize: 0.78,
-          maxChildSize: 0.95,
-          minChildSize: 0.3,
-          builder: (_, scrollController) => StatefulBuilder(
+        builder: (sheetContext) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+          ),
+          child: DraggableScrollableSheet(
+            initialChildSize: 0.78,
+            maxChildSize: 0.95,
+            minChildSize: 0.38,
+            builder: (_, scrollController) => StatefulBuilder(
             builder: (_, setSheetState) => ReaderNotesHubSheet(
               bookTitle: _book.title,
               author: _book.author,
@@ -781,6 +744,27 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
                   initialQuote: mark.excerpt,
                 );
                 if (draft == null || draft.deleted || !mounted) return;
+                var startOffset = math.max(0, mark.characterOffset);
+                var endOffset = startOffset;
+                if (mark.chapterIndex >= 0 &&
+                    mark.chapterIndex < _book.chapters.length &&
+                    draft.quote.trim().isNotEmpty) {
+                  final paragraphs = _paragraphsFor(
+                    _book.chapters[mark.chapterIndex],
+                  );
+                  if (mark.paragraphIndex >= 0 &&
+                      mark.paragraphIndex < paragraphs.length) {
+                    final hit = _bestMatchOffset(
+                      paragraphs[mark.paragraphIndex],
+                      draft.quote.trim(),
+                      nearOffset: startOffset,
+                    );
+                    if (hit != null) {
+                      startOffset = hit.$1;
+                      endOffset = hit.$2;
+                    }
+                  }
+                }
                 final now = DateTime.now();
                 final created = ReaderNote(
                   id: '${_book.id}:${mark.chapterIndex}:${mark.paragraphIndex}:${now.microsecondsSinceEpoch}',
@@ -788,8 +772,8 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
                   chapterIndex: mark.chapterIndex,
                   chapterTitle: mark.chapterTitle,
                   paragraphIndex: mark.paragraphIndex,
-                  startOffset: 0,
-                  endOffset: 0,
+                  startOffset: startOffset,
+                  endOffset: endOffset,
                   quote: draft.quote,
                   content: draft.content,
                   color: draft.color,
@@ -805,6 +789,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
               },
             ),
           ),
+        ),
         ),
       );
     } finally {
@@ -832,14 +817,13 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
       _showReaderMessage('这条笔记指向的章节已不存在');
       return;
     }
+    _pinnedReadingAnchor = null;
     final anchor = ReadingTextAnchor(
       chapterIndex: note.chapterIndex,
       paragraphIndex: math.max(0, note.paragraphIndex),
       characterOffset: math.max(0, note.startOffset),
     );
-    if (!_readingModeReloading) {
-      _setReaderState(() => _readingModeReloading = true);
-    }
+    _beginReadingModeReload();
     if (_settings.readingMode == ReaderReadingMode.continuous) {
       _switchContinuousChapter(note.chapterIndex, startAtTop: true);
       _requestContinuousRestore(0, textAnchor: anchor);
@@ -859,14 +843,13 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
       _showReaderMessage('这条书签指向的章节已不存在');
       return;
     }
+    _pinnedReadingAnchor = null;
     final anchor = ReadingTextAnchor(
       chapterIndex: mark.chapterIndex,
       paragraphIndex: mark.paragraphIndex,
       characterOffset: mark.characterOffset,
     );
-    if (!_readingModeReloading) {
-      _setReaderState(() => _readingModeReloading = true);
-    }
+    _beginReadingModeReload();
     if (_settings.readingMode == ReaderReadingMode.continuous) {
       _switchContinuousChapter(mark.chapterIndex, startAtTop: true);
       _requestContinuousRestore(0, textAnchor: anchor);
@@ -891,8 +874,18 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
   void _handleEpubLink(EpubLinkTarget target) =>
       unawaited(_openEpubLink(target));
 
-  Future<void> _openEpubLink(EpubLinkTarget target) async {
+  Future<void> _openEpubLink(
+    EpubLinkTarget target, {
+    bool fromPointerUp = false,
+  }) async {
     if (!mounted || _readerModalOpen) return;
+    final now = DateTime.now();
+    if (!fromPointerUp &&
+        _lastEpubLinkOpenedAt != null &&
+        now.difference(_lastEpubLinkOpenedAt!).inMilliseconds < 500) {
+      return;
+    }
+    _lastEpubLinkOpenedAt = now;
     if (target.chapterIndex < 0 ||
         target.chapterIndex >= _book.chapters.length) {
       _showReaderMessage('这个链接指向的位置不在本书内');
@@ -999,6 +992,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
   }
 
   void _jumpToEpubLink(EpubLinkTarget target) {
+    _pinnedReadingAnchor = null;
     final anchor = target.hasBlock
         ? ReadingTextAnchor(
             chapterIndex: target.chapterIndex,
@@ -1009,13 +1003,14 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
             characterOffset: 0,
           )
         : null;
-    if (!_readingModeReloading) {
-      _setReaderState(() => _readingModeReloading = true);
-    }
     if (_settings.readingMode == ReaderReadingMode.continuous) {
+      _beginReadingModeReload();
       _switchContinuousChapter(target.chapterIndex, startAtTop: true);
       if (anchor != null) _requestContinuousRestore(0, textAnchor: anchor);
     } else {
+      if (target.chapterIndex != _chapterIndex || anchor != null) {
+        _beginReadingModeReload();
+      }
       _switchChapter(target.chapterIndex, startAtTop: true);
       if (anchor != null) {
         _requestScrollRestore(
@@ -1050,6 +1045,10 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
 
   Future<void> _presentSettings() async {
     if (!mounted || _readerModalOpen) return;
+    _pinnedReadingAnchor ??=
+        _pendingScrollTextAnchor ??
+        _pendingContinuousTextAnchor ??
+        _captureReadingTextAnchor(_currentScrollSnapshot());
     var sheetSettings = _settings;
     _beginReaderModal();
     try {
@@ -1103,6 +1102,10 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
         ),
       );
     } finally {
+      if (_settingsApplyTimer?.isActive == true &&
+          _pendingSettingsApply != null) {
+        _flushPendingSettingsApply();
+      }
       _endReaderModal();
     }
   }
@@ -1160,6 +1163,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
         result.chapterIndex >= _book.chapters.length) {
       return;
     }
+    _pinnedReadingAnchor = null;
     final anchor = ReadingTextAnchor(
       chapterIndex: result.chapterIndex,
       paragraphIndex: result.paragraphIndex,
@@ -1170,9 +1174,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
             result.paragraphIndex,
           ),
     );
-    if (!_readingModeReloading) {
-      _setReaderState(() => _readingModeReloading = true);
-    }
+    _beginReadingModeReload();
     if (_settings.readingMode == ReaderReadingMode.continuous) {
       _switchContinuousChapter(result.chapterIndex, startAtTop: true);
       _requestContinuousRestore(0, textAnchor: anchor);
@@ -1283,6 +1285,7 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
       existingChapterWordCounts: _wordCountController.chapterWordCounts.value,
     );
     if (!mounted) return;
+    _pinnedReadingAnchor = null;
 
     _layoutCache.clear();
     _discardPageTurnSnapshot();
@@ -1293,13 +1296,14 @@ extension _ReaderScreenSheetsAndLinks on _ReaderScreenState {
     final adjacentControllers = _adjacentScrollControllers.values.toSet();
     _adjacentScrollControllers.clear();
     _adjacentScrollRestoreSerials.clear();
+    _resetContinuousWindowAround(_chapterIndex, recreateView: true);
     _resetContinuousMetrics();
+    _beginReadingModeReload();
     _setReaderState(() {
       _book = result.book;
       _scrollController = nextController;
       _warmAdjacentPages = false;
       _pageDragTargetIndex = null;
-      _readingModeReloading = true;
       _showOverlay = false;
     });
     _wordCountController.apply(

@@ -259,14 +259,19 @@ class _ReaderQuoteCardSheetState extends State<_ReaderQuoteCardSheet> {
                       Row(
                         children: [
                           Expanded(
+                            flex: 3,
                             child: OutlinedButton.icon(
                               onPressed: _saving ? null : _copyText,
                               icon: const Icon(Icons.copy_rounded, size: 18),
-                              label: const Text('复制文本', maxLines: 1),
+                              label: const Text(
+                                '复制文本',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                               style: AppButtonStyles.outlinedOverride(
                                 colors,
                                 padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
+                                  horizontal: 8,
                                   vertical: 12,
                                 ),
                               ),
@@ -274,23 +279,30 @@ class _ReaderQuoteCardSheetState extends State<_ReaderQuoteCardSheet> {
                           ),
                           const SizedBox(width: AppSpacing.md),
                           Expanded(
-                            flex: 2,
+                            flex: 4,
                             child: FilledButton.icon(
                               onPressed: _saving ? null : _saveImage,
                               icon: _saving
-                                  ? const SizedBox(
+                                  ? SizedBox(
                                       width: 16,
                                       height: 16,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 2,
-                                        color: Colors.white,
+                                        color: colors.accent.computeLuminance() >
+                                                0.35
+                                            ? colors.background
+                                            : Colors.white,
                                       ),
                                     )
                                   : const Icon(
                                       Icons.download_rounded,
                                       size: 18,
                                     ),
-                              label: Text(_saving ? '正在生成…' : '保存图片 (.png)'),
+                              label: Text(
+                                _saving ? '正在生成…' : '保存图片 (.png)',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           ),
                         ],
@@ -455,7 +467,8 @@ class _QuoteCardCanvas extends StatelessWidget {
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      if (author.trim().isNotEmpty || includeChapter) ...[
+                      if (author.trim().isNotEmpty ||
+                          (includeChapter && note.chapterTitle.isNotEmpty)) ...[
                         const SizedBox(height: 3),
                         Text(
                           [

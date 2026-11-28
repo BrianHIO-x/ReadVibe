@@ -38,23 +38,30 @@ class ReaderSettingsSheet extends StatelessWidget {
         bottom: false,
         child: ConstrainedBox(
           constraints: BoxConstraints(maxHeight: maxHeight),
-          child: Stack(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              SingleChildScrollView(
-                padding: EdgeInsets.fromLTRB(
-                  AppSpacing.lg,
-                  0,
-                  AppSpacing.lg,
-                  AppSpacing.xl + bottomInset,
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+                child: AppSheetDragHandle(
+                  colors: colors,
+                  padding: const EdgeInsets.only(top: 12, bottom: 8),
                 ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              ),
+              Flexible(
+                child: Stack(
                   children: [
-                    AppSheetDragHandle(
-                      colors: colors,
-                      padding: const EdgeInsets.only(top: 12, bottom: 12),
-                    ),
+                    SingleChildScrollView(
+                      padding: EdgeInsets.fromLTRB(
+                        AppSpacing.lg,
+                        4,
+                        AppSpacing.lg,
+                        AppSpacing.xl + bottomInset,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
                     // ── Font Size ──────────────────────────────
                 _buildLabel('字号'),
                 const SizedBox(height: AppSpacing.xs),
@@ -189,7 +196,7 @@ class ReaderSettingsSheet extends StatelessWidget {
                 top: 0,
                 left: 0,
                 right: 0,
-                height: 28,
+                height: 16,
                 child: IgnorePointer(
                   child: DecoratedBox(
                     decoration: BoxDecoration(
@@ -198,14 +205,15 @@ class ReaderSettingsSheet extends StatelessWidget {
                         end: Alignment.bottomCenter,
                         colors: [
                           colors.headerBg,
-                          colors.headerBg,
                           colors.headerBg.withValues(alpha: 0.0),
                         ],
-                        stops: const [0.0, 0.25, 1.0],
                       ),
                     ),
                   ),
                 ),
+              ),
+            ],
+          ),
               ),
             ],
           ),
@@ -345,8 +353,11 @@ class _RollingModeDescriptionState extends State<_RollingModeDescription>
 
   @override
   Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final scaledHeight = scaler.scale(12) * 1.35 + 3.0;
+    final lineHeight = scaledHeight > _lineHeight ? scaledHeight : _lineHeight;
     return SizedBox(
-      height: _lineHeight,
+      height: lineHeight,
       width: double.infinity,
       child: ClipRect(
         child: AnimatedBuilder(
@@ -360,11 +371,11 @@ class _RollingModeDescriptionState extends State<_RollingModeDescription>
               children: [
                 if (_previousMode case final previous?)
                   Transform.translate(
-                    offset: Offset(0, -_direction * _lineHeight * progress),
+                    offset: Offset(0, -_direction * lineHeight * progress),
                     child: _buildText(previous),
                   ),
                 Transform.translate(
-                  offset: Offset(0, _direction * _lineHeight * (1 - progress)),
+                  offset: Offset(0, _direction * lineHeight * (1 - progress)),
                   child: _buildText(_currentMode),
                 ),
               ],

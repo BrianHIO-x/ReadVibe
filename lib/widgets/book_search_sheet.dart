@@ -89,10 +89,10 @@ class _BookSearchSheetState<T extends SearchMatch>
       if (matchEnd < snippet.length)
         TextSpan(text: snippet.substring(matchEnd)),
     ];
-    return RichText(
+    return Text.rich(
+      TextSpan(style: baseStyle, children: spans),
       maxLines: 2,
       overflow: TextOverflow.ellipsis,
-      text: TextSpan(style: baseStyle, children: spans),
     );
   }
 

@@ -99,29 +99,151 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
     required EdgeInsets viewPadding,
     required double horizontalPadding,
   }) {
-    _scheduleContinuousMetricsUpdate();
     final isDarkTheme = themeColors.background.computeLuminance() < 0.35;
+    final contentWidth = math.max(
+      1.0,
+      _readerViewportWidth - horizontalPadding * 2,
+    );
+    final paragraphGap =
+        _settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
+        ? _settings.fontSize * _settings.lineHeight
+        : 0.0;
+    final bodyStyle = TextStyle(
+      fontFamily: fontFamily,
+      fontSize: _settings.fontSize,
+      fontWeight: _settings.effectiveFontWeight,
+      shadows: _settings.effectiveFontShadows(themeColors.text),
+      height: _settings.lineHeight,
+      color: themeColors.text,
+      letterSpacing: 0.2,
+    );
     final slivers = <Widget>[];
+    final windowStart = _book.chapters.isEmpty
+        ? 0
+        : _continuousWindowStart.clamp(0, _book.chapters.length - 1);
+    final windowEnd = _book.chapters.isEmpty
+        ? -1
+        : _continuousWindowEnd.clamp(windowStart, _book.chapters.length - 1);
     for (
-      var chapterIndex = 0;
-      chapterIndex < _book.chapters.length;
+      var chapterIndex = windowStart;
+      chapterIndex <= windowEnd;
       chapterIndex++
     ) {
       final chapter = _book.chapters[chapterIndex];
       final hasNotes = _notesByChapterParagraph[chapterIndex]?.isNotEmpty == true;
-      final epubParagraphs = chapter.hasRichEpubContent && hasNotes
+      final bool useCachedEpubBlocks =
+          chapter.hasRichEpubContent &&
+          (chapterIndex == _chapterIndex ||
+              chapter is! LazyChapter ||
+              chapter.store.isCached(chapterIndex));
+      final epubBlocks = useCachedEpubBlocks
+          ? chapter.epubBlocks
+          : const <EpubContentBlock>[];
+      final epubParagraphs = useCachedEpubBlocks && hasNotes
           ? _epubParagraphIndexByBlock(chapter)
           : null;
       final hasEmbeddedHeading = _epubLayout.hasEmbeddedHeading(
         chapter,
-        avoidLazyLoad: true,
+        avoidLazyLoad: !useCachedEpubBlocks,
       );
       final chapterTop = chapterIndex == _continuousAnchorChapterIndex
           ? viewPadding.top + AppSpacing.lg
           : AppSpacing.xxl;
+
+      Widget buildChapterBodySliver() {
+        if (chapter is LazyChapter &&
+            chapterIndex != _chapterIndex &&
+            !chapter.store.isCached(chapterIndex)) {
+          _prefetchChapters([chapterIndex]);
+          return SliverToBoxAdapter(
+            child: SizedBox(
+              height: math.max(360.0, _readerViewportHeight * 0.65),
+            ),
+          );
+        }
+
+        if (chapter.hasRichEpubContent) {
+          final bodyExtents = epubBlocks.length <= 2500
+              ? _continuousBodyExtents(
+                  chapter: chapter,
+                  paragraphs: const <String>[],
+                  richBlocks: epubBlocks,
+                  contentWidth: contentWidth,
+                )
+              : null;
+          Widget buildEpubItem(BuildContext context, int itemIndex) {
+            final mappedParagraph =
+                epubParagraphs != null && itemIndex < epubParagraphs.length
+                ? epubParagraphs[itemIndex]
+                : null;
+            return ReaderSelectableBlock(
+              child: _epubLayout.buildBlock(
+                settings: _settings,
+                block: epubBlocks[itemIndex],
+                themeColors: themeColors,
+                width: contentWidth,
+                simulationPage: false,
+                noteSpans: mappedParagraph != null
+                    ? _noteSpansForParagraph(chapterIndex, mappedParagraph)
+                    : const <ReaderNoteHighlightSpan>[],
+                noteHighlightRegistry: _noteHighlightRegistry,
+              ),
+            );
+          }
+
+          if (bodyExtents != null &&
+              bodyExtents.length == epubBlocks.length &&
+              epubBlocks.isNotEmpty) {
+            return SliverVariedExtentList.builder(
+              itemCount: epubBlocks.length,
+              itemExtentBuilder: (index, _) => bodyExtents[index],
+              itemBuilder: buildEpubItem,
+            );
+          }
+          return SliverList.builder(
+            itemCount: epubBlocks.length,
+            itemBuilder: buildEpubItem,
+          );
+        }
+
+        final paragraphs = _paragraphsFor(chapter);
+        final bodyExtents = paragraphs.length <= 2500
+            ? _continuousBodyExtents(
+                chapter: chapter,
+                paragraphs: paragraphs,
+                richBlocks: const <EpubContentBlock>[],
+                contentWidth: contentWidth,
+              )
+            : null;
+        Widget buildPlainItem(BuildContext context, int pIdx) =>
+            _buildContinuousPlainParagraph(
+              chapterIndex: chapterIndex,
+              paragraphIndex: pIdx,
+              paragraphCount: paragraphs.length,
+              text: paragraphs[pIdx],
+              bodyStyle: bodyStyle,
+              paragraphGap: paragraphGap,
+              hasNotes: hasNotes,
+              isDarkTheme: isDarkTheme,
+            );
+        if (bodyExtents != null &&
+            bodyExtents.length == paragraphs.length &&
+            paragraphs.isNotEmpty) {
+          return SliverVariedExtentList.builder(
+            itemCount: paragraphs.length,
+            itemExtentBuilder: (index, _) => bodyExtents[index],
+            itemBuilder: buildPlainItem,
+          );
+        }
+        return SliverList.builder(
+          itemCount: paragraphs.length,
+          itemBuilder: buildPlainItem,
+        );
+      }
+
       slivers.add(
         SliverMainAxisGroup(
-          key: _continuousChapterKeys[chapterIndex],
+          key: _continuousKeyFor(chapterIndex),
           slivers: [
             if (!hasEmbeddedHeading)
               SliverToBoxAdapter(
@@ -151,107 +273,7 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
                 horizontalPadding,
                 0,
               ),
-              sliver: SliverList.builder(
-                itemCount: chapter.hasRichEpubContent
-                    ? (chapter.hasKnownEpubBlockCount
-                          ? chapter.epubBlockCount
-                          : 1)
-                    : 1,
-                itemBuilder: (context, itemIndex) => ReaderSelectableBlock(
-                  child: Builder(
-                    builder: (context) {
-                      if (chapter.hasRichEpubContent) {
-                        final contentWidth = math.max(
-                          1.0,
-                          _readerViewportWidth - horizontalPadding * 2,
-                        );
-                        if (!chapter.hasKnownEpubBlockCount) {
-                          final blocks = chapter.epubBlocks;
-                          final resolvedMap = hasNotes
-                              ? _epubParagraphIndexByBlock(chapter)
-                              : null;
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              for (var b = 0; b < blocks.length; b++)
-                                _epubLayout.buildBlock(
-                                  settings: _settings,
-                                  block: blocks[b],
-                                  themeColors: themeColors,
-                                  width: contentWidth,
-                                  simulationPage: false,
-                                  noteSpans:
-                                      resolvedMap != null &&
-                                          b < resolvedMap.length &&
-                                          resolvedMap[b] != null
-                                      ? _noteSpansForParagraph(
-                                          chapterIndex,
-                                          resolvedMap[b]!,
-                                        )
-                                      : const <ReaderNoteHighlightSpan>[],
-                                  noteHighlightRegistry: _noteHighlightRegistry,
-                                ),
-                            ],
-                          );
-                        }
-                        final mappedParagraph =
-                            epubParagraphs != null &&
-                                itemIndex < epubParagraphs.length
-                            ? epubParagraphs[itemIndex]
-                            : null;
-                        return _epubLayout.buildBlock(
-                          settings: _settings,
-                          block: chapter.epubBlocks[itemIndex],
-                          themeColors: themeColors,
-                          width: contentWidth,
-                          simulationPage: false,
-                          noteSpans: mappedParagraph != null
-                              ? _noteSpansForParagraph(
-                                  chapterIndex,
-                                  mappedParagraph,
-                                )
-                              : const <ReaderNoteHighlightSpan>[],
-                          noteHighlightRegistry: _noteHighlightRegistry,
-                        );
-                      }
-                      final separator =
-                          _settings.paragraphSpacing ==
-                              ReaderParagraphSpacing.blankLine
-                          ? '\n\n'
-                          : '\n';
-                      final paragraphs = _paragraphsFor(chapter);
-                      final justified = ReaderJustifiedText(
-                        TextSpan(text: paragraphs.join(separator)),
-                        style: TextStyle(
-                          fontFamily: fontFamily,
-                          fontSize: _settings.fontSize,
-                          fontWeight: _settings.effectiveFontWeight,
-                          shadows: _settings.effectiveFontShadows(
-                            themeColors.text,
-                          ),
-                          height: _settings.lineHeight,
-                          color: themeColors.text,
-                          letterSpacing: 0.2,
-                        ),
-                        nearby: (chapterIndex - _chapterIndex).abs() <= 1,
-                      );
-                      if (!hasNotes) return justified;
-                      final spans = _continuousChapterNoteSpans(
-                        chapterIndex,
-                        paragraphs,
-                        separator,
-                      );
-                      if (spans.isEmpty) return justified;
-                      return ReaderAnnotatedParagraph(
-                        spans: spans,
-                        isDarkTheme: isDarkTheme,
-                        registry: _noteHighlightRegistry,
-                        child: justified,
-                      );
-                    },
-                  ),
-                ),
-              ),
+              sliver: buildChapterBodySliver(),
             ),
             SliverToBoxAdapter(
               child: SizedBox(
@@ -281,16 +303,52 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
           edgeScrollController: _scrollController,
           edgeScrollEnabled: !_readerModalOpen,
           child: CustomScrollView(
-            key: ValueKey(
-              'continuous-$_continuousAnchorChapterIndex-${_settings.fontSize}-${_settings.lineHeight}',
-            ),
+            key: ValueKey('continuous-$_continuousViewGeneration'),
             controller: _scrollController,
             primary: false,
-            center: _continuousChapterKeys[_continuousAnchorChapterIndex],
-            scrollCacheExtent: const ScrollCacheExtent.pixels(1200),
+            center: _book.chapters.isEmpty
+                ? null
+                : _continuousKeyFor(_continuousAnchorChapterIndex),
+            scrollCacheExtent: const ScrollCacheExtent.pixels(600),
             slivers: slivers,
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildContinuousPlainParagraph({
+    required int chapterIndex,
+    required int paragraphIndex,
+    required int paragraphCount,
+    required String text,
+    required TextStyle bodyStyle,
+    required double paragraphGap,
+    required bool hasNotes,
+    required bool isDarkTheme,
+  }) {
+    final justified = ReaderJustifiedText(
+      TextSpan(text: text),
+      style: bodyStyle,
+      nearby: (chapterIndex - _chapterIndex).abs() <= 1,
+    );
+    final noteSpans = hasNotes
+        ? _noteSpansForParagraph(chapterIndex, paragraphIndex)
+        : const <ReaderNoteHighlightSpan>[];
+    final decorated = noteSpans.isEmpty
+        ? justified
+        : ReaderAnnotatedParagraph(
+            spans: noteSpans,
+            isDarkTheme: isDarkTheme,
+            registry: _noteHighlightRegistry,
+            child: justified,
+          );
+    return ReaderSelectableBlock(
+      child: Padding(
+        padding: EdgeInsets.only(
+          bottom: paragraphIndex == paragraphCount - 1 ? 0 : paragraphGap,
+        ),
+        child: decorated,
       ),
     );
   }
@@ -318,38 +376,42 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
     if (width <= 0 || height <= 0) return currentPage;
 
     final target = _simulationPageTarget;
-    Widget? previousBoundaryPage;
-    Widget? nextBoundaryPage;
-    if (_chapterIndex > 0) {
-      previousBoundaryPage = _buildChapterPage(
-        chapter: _book.chapters[_chapterIndex - 1],
-        themeColors: themeColors,
-        fontFamily: fontFamily,
-        viewPadding: viewPadding,
-        horizontalPadding: horizontalPadding,
-        controller: _controllerForAdjacentChapter(
-          _chapterIndex - 1,
-          overrideProgress: 1,
-        ),
-        physics: pagePhysics,
-        simulationPage: true,
-      );
-    }
-    if (_chapterIndex < _book.chapters.length - 1) {
-      nextBoundaryPage = _buildChapterPage(
-        chapter: _book.chapters[_chapterIndex + 1],
-        themeColors: themeColors,
-        fontFamily: fontFamily,
-        viewPadding: viewPadding,
-        horizontalPadding: horizontalPadding,
-        controller: _controllerForAdjacentChapter(
-          _chapterIndex + 1,
-          overrideProgress: 0,
-        ),
-        physics: pagePhysics,
-        simulationPage: true,
-      );
-    }
+    final buildPrevious =
+        _chapterIndex > 0 &&
+        (_warmAdjacentPages || target?.chapterIndex == _chapterIndex - 1);
+    final buildNext =
+        _chapterIndex < _book.chapters.length - 1 &&
+        (_warmAdjacentPages || target?.chapterIndex == _chapterIndex + 1);
+    final previousBoundaryPage = buildPrevious
+        ? _buildChapterPage(
+            chapter: _book.chapters[_chapterIndex - 1],
+            themeColors: themeColors,
+            fontFamily: fontFamily,
+            viewPadding: viewPadding,
+            horizontalPadding: horizontalPadding,
+            controller: _controllerForAdjacentChapter(
+              _chapterIndex - 1,
+              overrideProgress: 1,
+            ),
+            physics: pagePhysics,
+            simulationPage: true,
+          )
+        : null;
+    final nextBoundaryPage = buildNext
+        ? _buildChapterPage(
+            chapter: _book.chapters[_chapterIndex + 1],
+            themeColors: themeColors,
+            fontFamily: fontFamily,
+            viewPadding: viewPadding,
+            horizontalPadding: horizontalPadding,
+            controller: _controllerForAdjacentChapter(
+              _chapterIndex + 1,
+              overrideProgress: 0,
+            ),
+            physics: pagePhysics,
+            simulationPage: true,
+          )
+        : null;
 
     Widget? targetPage;
     if (target != null) {
@@ -437,61 +499,104 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
     required List<String> paragraphs,
     required List<EpubContentBlock> richBlocks,
     required double contentWidth,
-  }) => _simulationChapterExtents(
+  }) => _chapterExtents(
     chapter: chapter,
     paragraphs: paragraphs,
     richBlocks: richBlocks,
     contentWidth: contentWidth,
+    mode: ReaderReadingMode.simulation,
   ).total;
 
-  ChapterItemExtents _simulationChapterExtents({
+  List<double> _continuousBodyExtents({
     required Chapter chapter,
     required List<String> paragraphs,
     required List<EpubContentBlock> richBlocks,
     required double contentWidth,
+  }) => _chapterExtents(
+    chapter: chapter,
+    paragraphs: paragraphs,
+    richBlocks: richBlocks,
+    contentWidth: contentWidth,
+    mode: ReaderReadingMode.continuous,
+  ).items;
+
+  ChapterItemExtents _chapterExtents({
+    required Chapter chapter,
+    required List<String> paragraphs,
+    required List<EpubContentBlock> richBlocks,
+    required double contentWidth,
+    required ReaderReadingMode mode,
   }) {
     return _layoutCache.chapterExtents(
       chapter,
       SimulationLayoutSignature(
         contentWidth: contentWidth,
         settings: _settings,
+        mode: mode,
+        locale: _readerLocale,
       ),
-      () => _measureSimulationChapterExtents(
+      () => _measureChapterExtents(
         chapter: chapter,
         paragraphs: paragraphs,
         richBlocks: richBlocks,
         contentWidth: contentWidth,
+        mode: mode,
       ),
     );
   }
 
-  /// The page-mode list's items as [_buildChapterPage] lays them out: the
-  /// standalone title, each body block with the gap below it, and the empty
-  /// closing item.
-  ChapterItemExtents _measureSimulationChapterExtents({
+  /// Measures every item's extent for the target [mode].
+  /// In [ReaderReadingMode.continuous], items represent body items only so the
+  /// standalone title height can vary independently when anchored vs scrolled.
+  ChapterItemExtents _measureChapterExtents({
     required Chapter chapter,
     required List<String> paragraphs,
     required List<EpubContentBlock> richBlocks,
     required double contentWidth,
+    required ReaderReadingMode mode,
   }) {
-    final titleExtent = _bodyStartOffset(
-      chapter,
-      settings: _settings,
-      mode: ReaderReadingMode.simulation,
-      width: contentWidth,
-    );
-    final items = <double>[
-      if (!_epubLayout.hasEmbeddedHeading(chapter)) titleExtent,
-    ];
+    final simulation = mode == ReaderReadingMode.simulation;
+    final continuous = mode == ReaderReadingMode.continuous;
+    final items = <double>[];
+    var titleTotal = 0.0;
+    if (!continuous && !_epubLayout.hasEmbeddedHeading(chapter)) {
+      if (simulation) {
+        titleTotal = _bodyStartOffset(
+          chapter,
+          settings: _settings,
+          mode: mode,
+          width: contentWidth,
+        );
+        items.add(titleTotal);
+      } else {
+        final titlePainter = TextPainter(
+          text: TextSpan(
+            text: _epubLayout.formatChapterTitle(chapter.title),
+            style: TextStyle(
+              fontFamily: _settings.effectiveFontFamily,
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+              height: 1.5,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+          textScaler: _readerTextScaler,
+          locale: _readerLocale,
+        )..layout(maxWidth: contentWidth);
+        try {
+          titleTotal = titlePainter.height + AppSpacing.xl;
+          items.add(titleTotal);
+        } finally {
+          titlePainter.dispose();
+        }
+      }
+    }
     var bodyExtent = 0.0;
     if (chapter.hasRichEpubContent) {
-      // One painter for the whole body: a fresh one per paragraph spent most
-      // of the measurement in setup, and page mode cannot draw its first page
-      // until every item is known.
       final extents = _epubLayout.blockExtents(
         richBlocks,
         settings: _settings,
-        mode: ReaderReadingMode.simulation,
+        mode: mode,
         width: contentWidth,
       );
       for (final extent in extents) {
@@ -499,7 +604,9 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
         bodyExtent += extent;
       }
     } else {
-      final lineExtent = _resolvedSimulationLineExtent(_settings);
+      final lineExtent = simulation
+          ? _resolvedSimulationLineExtent(_settings)
+          : _settings.fontSize * _settings.lineHeight;
       final paragraphGap =
           _settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
           ? lineExtent
@@ -514,19 +621,24 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
       final painter = TextPainter(
         textDirection: TextDirection.ltr,
         textScaler: _readerTextScaler,
-        strutStyle: StrutStyle(
-          fontFamily: _settings.effectiveFontFamily,
-          fontSize: _settings.fontSize,
-          height: _settings.lineHeight,
-          fontWeight: _settings.effectiveFontWeight,
-          forceStrutHeight: true,
-        ),
+        locale: _readerLocale,
+        strutStyle: simulation
+            ? StrutStyle(
+                fontFamily: _settings.effectiveFontFamily,
+                fontSize: _settings.fontSize,
+                height: _settings.lineHeight,
+                fontWeight: _settings.effectiveFontWeight,
+                forceStrutHeight: true,
+              )
+            : null,
       );
       try {
         for (var index = 0; index < paragraphs.length; index++) {
           painter.text = TextSpan(text: paragraphs[index], style: bodyStyle);
           painter.layout(maxWidth: contentWidth);
-          var extent = painter.computeLineMetrics().length * lineExtent;
+          var extent = simulation
+              ? painter.computeLineMetrics().length * lineExtent
+              : painter.height;
           if (index < paragraphs.length - 1) extent += paragraphGap;
           items.add(extent);
           bodyExtent += extent;
@@ -535,8 +647,12 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
         painter.dispose();
       }
     }
-    items.add(0);
-    return ChapterItemExtents(items: items, total: titleExtent + bodyExtent);
+    if (!continuous) {
+      final tailExtent = simulation ? 0.0 : AppSpacing.xxl;
+      items.add(tailExtent);
+      bodyExtent += tailExtent;
+    }
+    return ChapterItemExtents(items: items, total: titleTotal + bodyExtent);
   }
 
   Widget _buildChapterPage({
@@ -588,20 +704,20 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
       horizontalPadding,
       simulationPage ? 0 : viewPadding.bottom + 80,
     );
-    // Page mode measures its items before building them. The body builder can
-    // reuse those heights, so a visible paragraph is not laid out once to size
-    // its slot and again to draw itself.
-    final simulationExtents = simulationPage
-        ? _simulationChapterExtents(
+    final measuredExtents = (simulationPage || bodyItemCount <= 2500)
+        ? _chapterExtents(
             chapter: chapter,
             paragraphs: paragraphs,
             richBlocks: richBlocks,
             contentWidth: contentWidth,
+            mode: simulationPage
+                ? ReaderReadingMode.simulation
+                : ReaderReadingMode.chapter,
           )
         : null;
     final itemExtents =
-        simulationExtents != null && simulationExtents.items.length == itemCount
-        ? simulationExtents.items
+        measuredExtents != null && measuredExtents.items.length == itemCount
+        ? measuredExtents.items
         : null;
     final isDarkTheme = themeColors.background.computeLuminance() < 0.35;
     final chapterHasNotes =
@@ -620,7 +736,7 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
         );
         final titleText = Text(
           _epubLayout.formatChapterTitle(chapter.title),
-          style: simulationPage ? titleStyle : null,
+          style: titleStyle,
           strutStyle: simulationPage
               ? StrutStyle(
                   fontFamily: fontFamily,
@@ -643,12 +759,7 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
         }
         return Padding(
           padding: const EdgeInsets.only(bottom: AppSpacing.xl),
-          child: AnimatedDefaultTextStyle(
-            duration: AppMotion.normal,
-            curve: AppMotion.standard,
-            style: titleStyle,
-            child: titleText,
-          ),
+          child: titleText,
         );
       }
       if (index == itemCount - 1) {
@@ -670,7 +781,9 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
           themeColors: themeColors,
           width: contentWidth,
           simulationPage: simulationPage,
-          itemExtent: itemExtents?[index],
+          itemExtent: simulationPage && itemExtents != null
+              ? itemExtents[index]
+              : null,
           noteSpans: mappedParagraph != null
               ? _noteSpansForParagraph(chapter.index, mappedParagraph)
               : const <ReaderNoteHighlightSpan>[],
@@ -688,7 +801,7 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
       );
       final bodyText = ReaderJustifiedText(
         TextSpan(text: paragraphs[paragraphIndex]),
-        style: simulationPage ? bodyStyle : null,
+        style: bodyStyle,
         strutStyle: simulationPage
             ? StrutStyle(
                 fontFamily: fontFamily,
@@ -698,7 +811,6 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
                 forceStrutHeight: true,
               )
             : null,
-        settledStyle: simulationPage ? null : bodyStyle,
       );
       final noteSpans = chapterHasNotes
           ? _noteSpansForParagraph(chapter.index, paragraphIndex)
@@ -715,41 +827,35 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
         padding: EdgeInsets.only(
           bottom: paragraphIndex == paragraphs.length - 1 ? 0 : paragraphGap,
         ),
-        child: simulationPage
-            ? decoratedBody
-            : AnimatedDefaultTextStyle(
-                duration: AppMotion.normal,
-                curve: AppMotion.standard,
-                style: bodyStyle,
-                child: decoratedBody,
-              ),
+        child: decoratedBody,
       );
     }
 
     final Widget scrollView;
-    if (simulationPage) {
-      final extents = simulationExtents!;
+    if (measuredExtents != null) {
       scrollView = ListView.custom(
         key: scrollViewKey,
         controller: controller,
         primary: false,
         physics: physics,
-        scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+        scrollCacheExtent: simulationPage
+            ? const ScrollCacheExtent.pixels(0)
+            : const ScrollCacheExtent.pixels(900),
         padding: scrollViewPadding,
         semanticChildCount: itemCount,
-        // Every item's height is measured already, so a list born at a page
-        // deep in the chapter lays out only the items on that page.
+        // Every item's height is measured already, so a list jumping deep into
+        // the chapter lays out only the visible page items on frame 1.
         itemExtentBuilder: itemExtents == null
             ? null
             : (index, _) =>
                   index < itemExtents.length ? itemExtents[index] : null,
         childrenDelegate: ExactScrollExtentSliverChildBuilderDelegate(
           (context, index) => ReaderSelectableBlock(
-            retainSelection: false,
+            retainSelection: !simulationPage,
             child: buildItem(context, index),
           ),
           childCount: itemCount,
-          exactScrollExtent: extents.total,
+          exactScrollExtent: measuredExtents.total,
         ),
       );
     } else {
@@ -787,6 +893,8 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
       final headerFontSize = (_settings.fontSize * 0.58)
           .clamp(10.0, 13.0)
           .toDouble();
+      final headerHeight = headerFontSize * 1.25;
+      final minHeaderReserve = AppSpacing.sm + headerHeight + 6.0;
       final selectableContent = readingContent;
       readingContent = LayoutBuilder(
         builder: (context, constraints) {
@@ -799,8 +907,11 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
             (safePageHeight / lineExtent).floor(),
           );
           final minimumBodyLineCount = maxBodyLineCount >= 2 ? 2 : 1;
-          final desiredBodyLineCount =
-              ((safePageHeight - lineExtent * 2) / lineExtent).floor();
+          final availableWithHeader = math.max(
+            0.0,
+            safePageHeight - math.max(lineExtent * 2, minHeaderReserve * 2),
+          );
+          final desiredBodyLineCount = (availableWithHeader / lineExtent).floor();
           final bodyLineCount = desiredBodyLineCount.clamp(
             minimumBodyLineCount,
             maxBodyLineCount,
@@ -813,6 +924,7 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
             0.0,
             (safePageHeight - bodyHeight) / 2,
           );
+          final showHeader = effectiveReserve >= minHeaderReserve;
           return Stack(
             fit: StackFit.expand,
             children: [
@@ -821,26 +933,27 @@ extension _ReaderScreenModeViews on _ReaderScreenState {
                 bottom: viewPadding.bottom + effectiveReserve,
                 child: selectableContent,
               ),
-              Positioned(
-                top: viewPadding.top + AppSpacing.sm,
-                left: horizontalPadding,
-                right: horizontalPadding,
-                child: IgnorePointer(
-                  child: Text(
-                    '章节 ${chapter.index + 1}/${_book.chapters.length} · ${_epubLayout.formatChapterTitle(chapter.title)}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: fontFamily,
-                      fontSize: headerFontSize,
-                      fontWeight: FontWeight.w400,
-                      height: 1.25,
-                      letterSpacing: 0.2,
-                      color: themeColors.secondary,
+              if (showHeader)
+                Positioned(
+                  top: viewPadding.top + AppSpacing.sm,
+                  left: horizontalPadding,
+                  right: horizontalPadding,
+                  child: IgnorePointer(
+                    child: Text(
+                      '章节 ${chapter.index + 1}/${_book.chapters.length} · ${_epubLayout.formatChapterTitle(chapter.title)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: fontFamily,
+                        fontSize: headerFontSize,
+                        fontWeight: FontWeight.w400,
+                        height: 1.25,
+                        letterSpacing: 0.2,
+                        color: themeColors.secondary,
+                      ),
                     ),
                   ),
                 ),
-              ),
             ],
           );
         },

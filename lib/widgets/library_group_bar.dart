@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
@@ -30,8 +32,10 @@ class LibraryGroupBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final barHeight = math.max(36.0, scaler.scale(13.0) + 22.0);
     return SizedBox(
-      height: 36,
+      height: barHeight,
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
@@ -318,27 +322,38 @@ class _ShelfGroupManagerSheetState extends State<_ShelfGroupManagerSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final maxHeight = MediaQuery.sizeOf(context).height * 0.72;
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxHeight: maxHeight),
-      child: AppSheetSurface(
-        colors: widget.colors,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AppSheetHeader(
-              title: widget.private ? '管理隐私分组' : '管理书架分组',
-              subtitle: '普通书架与隐私书架的分组相互隔离，每本书最多加入 12 个分组',
-            ),
-            Flexible(
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  AppSpacing.xl,
-                  0,
-                  AppSpacing.xl,
-                  AppSpacing.lg + MediaQuery.viewInsetsOf(context).bottom,
-                ),
+    final mq = MediaQuery.of(context);
+    final viewInsetsBottom = mq.viewInsets.bottom;
+    final availableHeight = math.max(
+      240.0,
+      math.min(
+        mq.size.height * 0.72,
+        mq.size.height - mq.viewPadding.top - viewInsetsBottom - 16,
+      ),
+    );
+    final bottomPad = AppSpacing.lg + (viewInsetsBottom > 0 ? 0.0 : mq.padding.bottom);
+    return Padding(
+      padding: EdgeInsets.only(bottom: viewInsetsBottom),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: availableHeight),
+        child: AppSheetSurface(
+          colors: widget.colors,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AppSheetHeader(
+                title: widget.private ? '管理隐私分组' : '管理书架分组',
+                subtitle: '普通书架与隐私书架的分组相互隔离，每本书最多加入 12 个分组',
+              ),
+              Flexible(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    AppSpacing.xl,
+                    0,
+                    AppSpacing.xl,
+                    bottomPad,
+                  ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -441,6 +456,7 @@ class _ShelfGroupManagerSheetState extends State<_ShelfGroupManagerSheet> {
               ),
             ),
           ],
+        ),
         ),
       ),
     );
@@ -597,29 +613,40 @@ class _AssignBookGroupsSheetState extends State<_AssignBookGroupsSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final maxHeight = MediaQuery.sizeOf(context).height * 0.72;
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxHeight: maxHeight),
-      child: AppSheetSurface(
-        colors: widget.colors,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AppSheetHeader(
-              title: _isBatch
-                  ? '为已选 ${widget.targets.length} 本书设置分组'
-                  : '设置分组 · ${widget.targets.first.title}',
-              subtitle: _isBatch ? '半选状态将保留每本书原有的分组归属' : null,
-            ),
-            Flexible(
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  AppSpacing.xl,
-                  0,
-                  AppSpacing.xl,
-                  AppSpacing.lg + MediaQuery.viewInsetsOf(context).bottom,
-                ),
+    final mq = MediaQuery.of(context);
+    final viewInsetsBottom = mq.viewInsets.bottom;
+    final availableHeight = math.max(
+      240.0,
+      math.min(
+        mq.size.height * 0.72,
+        mq.size.height - mq.viewPadding.top - viewInsetsBottom - 16,
+      ),
+    );
+    final bottomPad = AppSpacing.lg + (viewInsetsBottom > 0 ? 0.0 : mq.padding.bottom);
+    return Padding(
+      padding: EdgeInsets.only(bottom: viewInsetsBottom),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: availableHeight),
+        child: AppSheetSurface(
+          colors: widget.colors,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AppSheetHeader(
+                title: _isBatch
+                    ? '为已选 ${widget.targets.length} 本书设置分组'
+                    : '设置分组 · ${widget.targets.first.title}',
+                subtitle: _isBatch ? '半选状态将保留每本书原有的分组归属' : null,
+              ),
+              Flexible(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    AppSpacing.xl,
+                    0,
+                    AppSpacing.xl,
+                    bottomPad,
+                  ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -717,6 +744,7 @@ class _AssignBookGroupsSheetState extends State<_AssignBookGroupsSheet> {
               ),
             ),
           ],
+        ),
         ),
       ),
     );

@@ -76,18 +76,21 @@ class _AppSwitchState extends State<AppSwitch> {
               : Colors.white);
     final isWide = !reduced && (_pressed || _stretching);
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: enabled ? (_) => setState(() => _pressed = true) : null,
-      onTapUp: enabled ? (_) => setState(() => _pressed = false) : null,
-      onTapCancel: enabled ? () => setState(() => _pressed = false) : null,
-      onTap: enabled
-          ? () {
-              HapticFeedback.selectionClick();
-              widget.onChanged!(!widget.value);
-            }
-          : null,
-      child: AnimatedOpacity(
+    return Semantics(
+      toggled: widget.value,
+      enabled: enabled,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: enabled ? (_) => setState(() => _pressed = true) : null,
+        onTapUp: enabled ? (_) => setState(() => _pressed = false) : null,
+        onTapCancel: enabled ? () => setState(() => _pressed = false) : null,
+        onTap: enabled
+            ? () {
+                HapticFeedback.selectionClick();
+                widget.onChanged!(!widget.value);
+              }
+            : null,
+        child: AnimatedOpacity(
         opacity: enabled ? 1.0 : 0.45,
         duration: AppMotion.fast,
         child: AnimatedContainer(
@@ -144,6 +147,7 @@ class _AppSwitchState extends State<AppSwitch> {
             ),
           ),
         ),
+      ),
       ),
     );
   }
@@ -249,10 +253,14 @@ class _AppSwitchTileState extends State<AppSwitchTile> {
                 ),
               ),
               const SizedBox(width: AppSpacing.md),
-              AppSwitch(
-                value: widget.value,
-                onChanged: widget.onChanged,
-                colors: colors,
+              IgnorePointer(
+                child: ExcludeSemantics(
+                  child: AppSwitch(
+                    value: widget.value,
+                    onChanged: widget.onChanged,
+                    colors: colors,
+                  ),
+                ),
               ),
             ],
           ),

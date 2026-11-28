@@ -11,6 +11,32 @@ double _rubberBand(double travel, double width) {
   return travel.sign * limit * (1 - 1 / (travel.abs() * 0.2 / limit + 1));
 }
 
+bool _isRepaintBoundaryReady(
+  RenderObject? renderObject, {
+  required int attempt,
+}) {
+  if (renderObject is! RenderRepaintBoundary ||
+      !renderObject.attached ||
+      !renderObject.hasSize ||
+      renderObject.size.isEmpty) {
+    return false;
+  }
+  // RenderObject.debugNeedsPaint reads a late local only initialized inside an
+  // assert(), so calling it directly throws LateInitializationError in release.
+  var debugNeedsPaint = false;
+  assert(() {
+    debugNeedsPaint = renderObject.debugNeedsPaint;
+    return true;
+  }());
+  if (debugNeedsPaint) return false;
+  if (attempt == 0 &&
+      (WidgetsBinding.instance.schedulerPhase != SchedulerPhase.idle ||
+          WidgetsBinding.instance.hasScheduledFrame)) {
+    return false;
+  }
+  return true;
+}
+
 extension _ReaderScreenPageTurn on _ReaderScreenState {
   void _holdPageMotion() {
     if (_pageDragOffsetNotifier.value == 0) {
@@ -69,48 +95,55 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
     return operation;
   }
 
+  Future<ui.Image?> _captureBoundaryImageWithRetry({
+    required GlobalKey boundaryKey,
+    required double pixelRatio,
+    required bool Function() isValid,
+  }) async {
+    for (var attempt = 0; attempt < 8; attempt++) {
+      if (!isValid()) return null;
+      final renderObject = boundaryKey.currentContext?.findRenderObject();
+      if (_isRepaintBoundaryReady(renderObject, attempt: attempt)) {
+        try {
+          final image = await (renderObject! as RenderRepaintBoundary).toImage(
+            pixelRatio: pixelRatio,
+          );
+          if (!isValid()) {
+            image.dispose();
+            return null;
+          }
+          return image;
+        } on Object {
+          // A newly mounted boundary may need one more frame before its
+          // OffsetLayer exists in release mode; wait and retry.
+          if (attempt == 7) return null;
+        }
+      }
+      WidgetsBinding.instance.scheduleFrame();
+      await WidgetsBinding.instance.endOfFrame;
+    }
+    return null;
+  }
+
   Future<bool> _performPageTurnSnapshotCapture(
     int serial,
     int chapterIndex,
   ) async {
     try {
       final pixelRatio = math.min(MediaQuery.devicePixelRatioOf(context), 1.5);
-      RenderRepaintBoundary? boundary;
-      // A setting or menu rebuild may leave the repaint boundary dirty for one
-      // frame. Wait for paint instead of permanently blocking every drag.
-      for (var attempt = 0; attempt < 8; attempt++) {
-        if (!mounted ||
-            _readerModalOpen ||
-            _selectionController.active.value ||
-            serial != _pageTurnSnapshotSerial ||
-            chapterIndex != _chapterIndex ||
-            _settings.readingMode != ReaderReadingMode.simulation ||
-            _pageTurnEffect != SimulationPageTurnEffect.simulation) {
-          return false;
-        }
-        final renderObject = _currentPageBoundaryKey.currentContext
-            ?.findRenderObject();
-        if (renderObject is RenderRepaintBoundary &&
-            !renderObject.debugNeedsPaint) {
-          boundary = renderObject;
-          break;
-        }
-        WidgetsBinding.instance.scheduleFrame();
-        await WidgetsBinding.instance.endOfFrame;
-      }
-      if (boundary == null) return false;
-
-      final image = await boundary.toImage(pixelRatio: pixelRatio);
-      if (!mounted ||
-          _readerModalOpen ||
-          _selectionController.active.value ||
-          serial != _pageTurnSnapshotSerial ||
-          chapterIndex != _chapterIndex ||
-          _settings.readingMode != ReaderReadingMode.simulation ||
-          _pageTurnEffect != SimulationPageTurnEffect.simulation) {
-        image.dispose();
-        return false;
-      }
+      final image = await _captureBoundaryImageWithRetry(
+        boundaryKey: _currentPageBoundaryKey,
+        pixelRatio: pixelRatio,
+        isValid: () =>
+            mounted &&
+            !_readerModalOpen &&
+            !_selectionController.active.value &&
+            serial == _pageTurnSnapshotSerial &&
+            chapterIndex == _chapterIndex &&
+            _settings.readingMode == ReaderReadingMode.simulation &&
+            _pageTurnEffect == SimulationPageTurnEffect.simulation,
+      );
+      if (image == null) return false;
 
       final previousImage = _pageTurnSnapshot;
       _pageTurnSnapshot = image;
@@ -187,42 +220,21 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
   ) async {
     try {
       final pixelRatio = math.min(MediaQuery.devicePixelRatioOf(context), 1.5);
-      RenderRepaintBoundary? boundary;
-      for (var attempt = 0; attempt < 8; attempt++) {
-        final currentTarget = _simulationPageTarget;
-        if (!mounted ||
-            _readerModalOpen ||
-            _selectionController.active.value ||
-            serial != _reversePageTurnSnapshotSerial ||
-            currentTarget == null ||
-            currentTarget.goingNext ||
-            !currentTarget.matches(target)) {
-          return false;
-        }
-        final renderObject = _reversePageBoundaryKey.currentContext
-            ?.findRenderObject();
-        if (renderObject is RenderRepaintBoundary &&
-            !renderObject.debugNeedsPaint) {
-          boundary = renderObject;
-          break;
-        }
-        WidgetsBinding.instance.scheduleFrame();
-        await WidgetsBinding.instance.endOfFrame;
-      }
-      if (boundary == null) return false;
-
-      final image = await boundary.toImage(pixelRatio: pixelRatio);
-      final currentTarget = _simulationPageTarget;
-      if (!mounted ||
-          _readerModalOpen ||
-          _selectionController.active.value ||
-          serial != _reversePageTurnSnapshotSerial ||
-          currentTarget == null ||
-          currentTarget.goingNext ||
-          !currentTarget.matches(target)) {
-        image.dispose();
-        return false;
-      }
+      final image = await _captureBoundaryImageWithRetry(
+        boundaryKey: _reversePageBoundaryKey,
+        pixelRatio: pixelRatio,
+        isValid: () {
+          final currentTarget = _simulationPageTarget;
+          return mounted &&
+              !_readerModalOpen &&
+              !_selectionController.active.value &&
+              serial == _reversePageTurnSnapshotSerial &&
+              currentTarget != null &&
+              !currentTarget.goingNext &&
+              currentTarget.matches(target);
+        },
+      );
+      if (image == null) return false;
       final previousImage = _reversePageTurnSnapshot;
       _reversePageTurnSnapshot = image;
       previousImage?.dispose();
@@ -361,103 +373,112 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
     widget.onSettingsChanged?.call(newSettings);
     _pendingSettingsApply = newSettings;
     _settingsApplyTimer?.cancel();
-    _settingsApplyTimer = Timer(AppMotion.settingApplyDelay, () {
-      if (!mounted) return;
-      final pending = _pendingSettingsApply;
-      _pendingSettingsApply = null;
-      _settingsApplyTimer = null;
-      if (pending == null) return;
-      final snapshot = _currentScrollSnapshot();
-      final previousMode = _settings.readingMode;
-      final modeChanged = previousMode != pending.readingMode;
-      final textLayoutChanged = _changesTextLayout(_settings, pending);
-      final textAnchor = textLayoutChanged
-          ? _captureReadingTextAnchor(snapshot)
-          : null;
-      final rebuildsContinuous =
-          previousMode == ReaderReadingMode.continuous ||
-          pending.readingMode == ReaderReadingMode.continuous;
-      final rebuildsSimulation =
-          textLayoutChanged &&
-          (previousMode == ReaderReadingMode.simulation ||
-              pending.readingMode == ReaderReadingMode.simulation);
-      final rebuildsReadingController =
-          rebuildsContinuous || rebuildsSimulation;
-      final progress = _recordCurrentChapterPosition(snapshot);
-      _enqueueProgressSave(progress);
-      _resetPageDrag(rebuild: false);
+    _settingsApplyTimer = Timer(
+      AppMotion.settingApplyDelay,
+      _flushPendingSettingsApply,
+    );
+  }
 
-      if (rebuildsReadingController) {
-        final previousController = _scrollController;
-        previousController.removeListener(_scheduleProgressSave);
-        // Simulation owns a fixed page grid whose viewport is derived from
-        // the current font metrics. Reusing its ScrollPosition across either
-        // a mode switch or an in-place typography change makes Flutter
-        // reinterpret old pixels against the new grid and can expose a frame
-        // whose clipping window and glyph metrics disagree. Build a fresh
-        // controller at zero so the new reading subtree starts directly at
-        // the final metrics, then restore the captured text anchor after the
-        // target layout reports its own dimensions.
-        final nextController = _createScrollController(
-          rebuildsSimulation ? 0 : snapshot.offset,
-          pending.readingMode == ReaderReadingMode.simulation,
-        );
+  void _flushPendingSettingsApply() {
+    _settingsApplyTimer?.cancel();
+    _settingsApplyTimer = null;
+    if (!mounted) return;
+    final pending = _pendingSettingsApply;
+    _pendingSettingsApply = null;
+    if (pending == null) return;
+    final snapshot = _currentScrollSnapshot();
+    final previousMode = _settings.readingMode;
+    final modeChanged = previousMode != pending.readingMode;
+    final textLayoutChanged = _changesTextLayout(_settings, pending);
+    ReadingTextAnchor? textAnchor;
+    if (textLayoutChanged) {
+      final pinned = _pinnedReadingAnchor;
+      if (pinned != null && pinned.chapterIndex == _chapterIndex) {
+        textAnchor = pinned;
+      } else {
+        textAnchor = _captureReadingTextAnchor(snapshot);
+        _pinnedReadingAnchor = textAnchor;
+      }
+    }
+    final rebuildsContinuous =
+        previousMode == ReaderReadingMode.continuous ||
+        pending.readingMode == ReaderReadingMode.continuous;
+    final rebuildsSimulation =
+        textLayoutChanged &&
+        (previousMode == ReaderReadingMode.simulation ||
+            pending.readingMode == ReaderReadingMode.simulation);
+    final rebuildsReadingController = rebuildsContinuous || rebuildsSimulation;
+    final progress = _recordCurrentChapterPosition(snapshot);
+    _enqueueProgressSave(progress);
+    _resetPageDrag(rebuild: false);
+
+    if (rebuildsReadingController) {
+      final previousController = _scrollController;
+      previousController.removeListener(_scheduleProgressSave);
+      final nextController = _createScrollController(
+        rebuildsSimulation ? 0 : snapshot.offset,
+        pending.readingMode == ReaderReadingMode.simulation,
+      );
+      final adjacentControllers = _adjacentScrollControllers.values.toSet();
+      _adjacentScrollControllers.clear();
+      _adjacentScrollRestoreSerials.clear();
+      _resetContinuousWindowAround(_chapterIndex, recreateView: true);
+      _resetContinuousMetrics();
+      _beginReadingModeReload();
+      _setReaderState(() {
+        _settings = pending;
+        _scrollController = nextController;
+        _warmAdjacentPages = false;
+        _pageDragTargetIndex = null;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        previousController.dispose();
+        for (final controller in adjacentControllers) {
+          controller.dispose();
+        }
+      });
+    } else {
+      if (modeChanged) {
         final adjacentControllers = _adjacentScrollControllers.values.toSet();
         _adjacentScrollControllers.clear();
         _adjacentScrollRestoreSerials.clear();
-        _continuousAnchorChapterIndex = _chapterIndex;
-        _resetContinuousMetrics();
-        _setReaderState(() {
-          _settings = pending;
-          _scrollController = nextController;
-          _warmAdjacentPages = false;
-          _pageDragTargetIndex = null;
-          _readingModeReloading = rebuildsReadingController;
-        });
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          previousController.dispose();
           for (final controller in adjacentControllers) {
             controller.dispose();
           }
         });
-      } else {
-        if (modeChanged) {
-          final adjacentControllers = _adjacentScrollControllers.values.toSet();
-          _adjacentScrollControllers.clear();
-          _adjacentScrollRestoreSerials.clear();
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            for (final controller in adjacentControllers) {
-              controller.dispose();
-            }
-          });
-        }
-        _setReaderState(() {
-          _settings = pending;
-          _warmAdjacentPages = false;
-          _pageDragTargetIndex = null;
-        });
       }
+      _setReaderState(() {
+        _settings = pending;
+        _warmAdjacentPages = false;
+        _pageDragTargetIndex = null;
+      });
+    }
 
-      if (pending.readingMode == ReaderReadingMode.continuous) {
-        _requestContinuousRestore(
-          snapshot.progress,
-          offset: snapshot.offset,
-          textAnchor: textAnchor,
-        );
-      } else {
-        _scheduleAdjacentWarmup();
-        _requestScrollRestore(
-          offset: snapshot.offset,
-          progress: snapshot.progress,
-          preferProgress: false,
-          textAnchor: textAnchor,
-        );
-        _scheduleSimulationSnapshotWarmup();
-      }
-    });
+    if (pending.readingMode == ReaderReadingMode.continuous) {
+      _prefetchChapters([
+        for (var i = _continuousWindowStart; i <= _continuousWindowEnd; i++) i,
+      ]);
+      _requestContinuousRestore(
+        snapshot.progress,
+        offset: snapshot.offset,
+        textAnchor: textAnchor,
+      );
+    } else {
+      _prefetchChapters([_chapterIndex - 1, _chapterIndex + 1]);
+      _scheduleAdjacentWarmup();
+      _requestScrollRestore(
+        offset: snapshot.offset,
+        progress: snapshot.progress,
+        preferProgress: false,
+        textAnchor: textAnchor,
+      );
+      _scheduleSimulationSnapshotWarmup();
+    }
   }
 
   void _openChapter(int index) {
+    _pinnedReadingAnchor = null;
     if (_settings.readingMode == ReaderReadingMode.continuous) {
       _switchContinuousChapter(index, startAtTop: true);
     } else {
@@ -467,6 +488,7 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
 
   void _switchContinuousChapter(int index, {required bool startAtTop}) {
     if (index < 0 || index >= _book.chapters.length) return;
+    _pinnedReadingAnchor = null;
     final currentSnapshot = _currentScrollSnapshot();
     var progress = _recordCurrentChapterPosition(currentSnapshot);
     _enqueueProgressSave(progress);
@@ -490,7 +512,7 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
     final previousController = _scrollController;
     previousController.removeListener(_scheduleProgressSave);
     final nextController = _createScrollController();
-    _continuousAnchorChapterIndex = index;
+    _resetContinuousWindowAround(index, recreateView: true);
     _resetContinuousMetrics();
     _setReaderState(() {
       _chapterIndex = index;
@@ -501,6 +523,9 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       previousController.dispose();
     });
+    _prefetchChapters([
+      for (var i = _continuousWindowStart; i <= _continuousWindowEnd; i++) i,
+    ]);
     _enqueueProgressSave(progress);
     _requestContinuousRestore(targetProgress, offset: targetOffset);
   }
@@ -511,8 +536,10 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
       return;
     }
     if (index < 0 || index >= _book.chapters.length) {
+      _finishReadingModeReload();
       return;
     }
+    _pinnedReadingAnchor = null;
     if (index == _chapterIndex) {
       // A table-of-contents pick lands here when it names the current chapter.
       // The sheet is already popped; dismiss the reader chrome too so every
@@ -530,6 +557,7 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
         _enqueueProgressSave(progress);
         _scheduleSimulationSnapshotWarmup();
       }
+      _finishReadingModeReload();
       return;
     }
 
@@ -609,6 +637,7 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
       previousSimulationPaperBack?.dispose();
     });
     _setPageDragOffset(0);
+    _prefetchChapters([index - 1, index + 1]);
     _scheduleAdjacentWarmup();
     _enqueueProgressSave(progress);
     _requestScrollRestore(
@@ -739,10 +768,22 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
     if (simulationTurnWasActive) {
       _endHorizontalPageTurn(simulationVelocity, width);
     } else if (shouldToggle) {
-      if (!_showOverlay && !_readerModalOpen) {
+      if (_showOverlay) {
+        _lastEpubLinkOpenedAt = DateTime.now();
+        _toggleOverlay();
+        return;
+      }
+      if (!_readerModalOpen) {
+        final viewportSize = MediaQuery.sizeOf(context);
+        final hitLink = _epubLinkRegistry.hitTest(event.position, viewportSize);
+        if (hitLink != null) {
+          _lastEpubLinkOpenedAt = DateTime.now();
+          unawaited(_openEpubLink(hitLink, fromPointerUp: true));
+          return;
+        }
         final hitNote = _noteHighlightRegistry.hitTest(
           event.position,
-          MediaQuery.sizeOf(context),
+          viewportSize,
         );
         if (hitNote != null) {
           unawaited(_showInlineNoteQuickSheet(hitNote));
@@ -1248,11 +1289,13 @@ extension _ReaderScreenPageTurn on _ReaderScreenState {
 
   void _finishPageTurn(int targetIndex) {
     _setTextSelectionBlocked(false);
+    _pinnedReadingAnchor = null;
     _switchChapter(targetIndex, startAtTop: false);
   }
 
   void _finishSimulationPageTurn(SimulationPageTarget target) {
     _setTextSelectionBlocked(false);
+    _pinnedReadingAnchor = null;
     if (target.chapterIndex != _chapterIndex) {
       _switchChapter(target.chapterIndex, startAtTop: false);
       return;

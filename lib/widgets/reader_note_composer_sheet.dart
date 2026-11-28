@@ -188,7 +188,16 @@ class _ReaderNoteComposerSheetState extends State<_ReaderNoteComposerSheet> {
     final accentColor = _color.swatchColor(isDark);
     final danger = AppOverlayTheme.danger(colors);
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
-    final bottomPadding = MediaQuery.paddingOf(context).bottom;
+    final mq = MediaQuery.of(context);
+    final bottomPadding = mq.padding.bottom;
+    final availableHeight =
+        (mq.size.height - mq.viewPadding.top - bottomInset - 16).clamp(
+          240.0,
+          mq.size.height * 0.88,
+        );
+    final accentFg = accentColor.computeLuminance() > 0.35
+        ? colors.background
+        : Colors.white;
     final hasAnyBody =
         _quoteController.text.trim().isNotEmpty ||
         _contentController.text.trim().isNotEmpty;
@@ -196,9 +205,7 @@ class _ReaderNoteComposerSheetState extends State<_ReaderNoteComposerSheet> {
     return Padding(
       padding: EdgeInsets.only(bottom: bottomInset),
       child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(context).height * 0.88,
-        ),
+        constraints: BoxConstraints(maxHeight: availableHeight),
         child: AppSheetSurface(
           colors: colors,
           child: Column(
@@ -363,7 +370,11 @@ class _ReaderNoteComposerSheetState extends State<_ReaderNoteComposerSheet> {
                             height: 1.6,
                           ),
                           decoration: InputDecoration(
+                            filled: false,
                             border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            contentPadding: EdgeInsets.zero,
                             hintText: _quoteController.text.trim().isEmpty
                                 ? '写下这一页的阅读批注与思考…'
                                 : '写下你的思考（也可留空，仅保存划线高亮）…',
@@ -397,7 +408,7 @@ class _ReaderNoteComposerSheetState extends State<_ReaderNoteComposerSheet> {
                               style: AppButtonStyles.filledOverride(
                                 colors,
                                 backgroundColor: accentColor,
-                                foregroundColor: Colors.white,
+                                foregroundColor: accentFg,
                               ),
                               icon: const Icon(Icons.check_rounded, size: 18),
                               label: const Text('保存笔记'),
@@ -570,30 +581,41 @@ class _PaletteDot extends StatelessWidget {
       label: '$label色标',
       child: GestureDetector(
         onTap: onTap,
-        child: AnimatedContainer(
-          duration: AppMotion.quick,
-          width: 28,
-          height: 28,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: color,
-            border: selected
-                ? Border.all(color: Colors.white, width: 2.2)
-                : null,
-            boxShadow: selected
-                ? [
-                    BoxShadow(
-                      color: color.withValues(alpha: 0.45),
-                      blurRadius: 6,
-                      spreadRadius: 1,
-                    ),
-                  ]
+          child: AnimatedContainer(
+            duration: AppMotion.quick,
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: color,
+              border: selected
+                  ? Border.all(
+                      color: color.computeLuminance() > 0.35
+                          ? const Color(0xFF1A1816)
+                          : Colors.white,
+                      width: 2.2,
+                    )
+                  : null,
+              boxShadow: selected
+                  ? [
+                      BoxShadow(
+                        color: color.withValues(alpha: 0.45),
+                        blurRadius: 6,
+                        spreadRadius: 1,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: selected
+                ? Icon(
+                    Icons.check_rounded,
+                    size: 16,
+                    color: color.computeLuminance() > 0.35
+                        ? const Color(0xFF1A1816)
+                        : Colors.white,
+                  )
                 : null,
           ),
-          child: selected
-              ? const Icon(Icons.check_rounded, size: 16, color: Colors.white)
-              : null,
-        ),
       ),
     );
   }

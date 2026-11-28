@@ -90,7 +90,10 @@ class LibraryReorderGrid extends StatelessWidget {
           constraints.maxWidth - horizontalPadding * 2,
         );
         final cardWidth = metrics.cardWidth;
-        final cardHeight = metrics.cardHeight;
+        final cardHeight = math.max(
+          metrics.cardHeight,
+          BookCard.paintedHeight(context, cardWidth),
+        );
         final rowCount = (books.length / columnCount).ceil();
         final contentHeight = rowCount == 0
             ? 0.0

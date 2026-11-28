@@ -57,6 +57,7 @@ class LazyChapterStore {
   final List<int?> expectedBytes;
   final List<String?> expectedDigests;
   final LinkedHashMap<int, Chapter> _cache = LinkedHashMap<int, Chapter>();
+  final Map<int, Future<void>> _inFlight = <int, Future<void>>{};
 
   /// Chapters whose digest already matched during this session.
   ///
@@ -67,6 +68,8 @@ class LazyChapterStore {
   /// every cache miss stalls the frame that asked for it.
   final Set<int> _verified = <int>{};
 
+  static const _maxCachedChapters = 12;
+
   LazyChapterStore({
     required this.chaptersDirectoryPath,
     required this.contentRevision,
@@ -74,6 +77,45 @@ class LazyChapterStore {
     required this.expectedBytes,
     required this.expectedDigests,
   });
+
+  bool isCached(int index) => _cache.containsKey(index);
+
+  Future<void> prefetch(int index) {
+    if (_cache.containsKey(index) || index < 0 || index >= fileNames.length) {
+      return Future<void>.value();
+    }
+    return _inFlight[index] ??= _prefetchChapter(index).whenComplete(() {
+      _inFlight.remove(index);
+    });
+  }
+
+  Future<void> _prefetchChapter(int index) async {
+    try {
+      final path = p.join(chaptersDirectoryPath, fileNames[index]);
+      final expected = expectedBytes[index];
+      final digest = _verified.contains(index) ? null : expectedDigests[index];
+      final chapter = await _prefetchChapterInIsolate(
+        path: path,
+        expectedBytes: expected,
+        expectedDigest: digest,
+        chapterIndex: index,
+      );
+      if (chapter == null) return;
+      if (digest != null) _verified.add(index);
+      _putCache(index, chapter);
+    } on Object {
+      // Prefetch is purely opportunistic; explicit synchronous load still
+      // validates and reports any corrupted or missing chapter errors.
+    }
+  }
+
+  void _putCache(int index, Chapter chapter) {
+    _cache.remove(index);
+    _cache[index] = chapter;
+    while (_cache.length > _maxCachedChapters) {
+      _cache.remove(_cache.keys.first);
+    }
+  }
 
   Chapter load(int index) {
     final cached = _cache.remove(index);
@@ -103,10 +145,7 @@ class LazyChapterStore {
       _verified.add(index);
     }
     final chapter = decodeChapterPayload(jsonDecode(utf8.decode(bytes)), index);
-    _cache[index] = chapter;
-    while (_cache.length > 8) {
-      _cache.remove(_cache.keys.first);
-    }
+    _putCache(index, chapter);
     return chapter;
   }
 }
@@ -294,8 +333,8 @@ class ChapterDiskStore {
         final raw = await candidate
             .readAsString(encoding: utf8)
             .timeout(_kChapterIoTimeout);
-        final chapters = await Isolate.run(
-          () => _chaptersFromJson(raw),
+        final chapters = await _decodeChaptersInIsolate(
+          raw,
         ).timeout(_kChapterIoTimeout);
         if (candidate.path != file.path) {
           try {
@@ -841,6 +880,26 @@ List<Map<String, dynamic>> _storeChapterBatch(
   }
   return entries;
 }
+
+Future<Chapter?> _prefetchChapterInIsolate({
+  required String path,
+  required int? expectedBytes,
+  required String? expectedDigest,
+  required int chapterIndex,
+}) => Isolate.run(() {
+  final file = File(path);
+  if (!file.existsSync()) return null;
+  final bytes = file.readAsBytesSync();
+  if (expectedBytes != null && bytes.length != expectedBytes) return null;
+  if (expectedDigest != null &&
+      sha256.convert(bytes).toString() != expectedDigest) {
+    return null;
+  }
+  return decodeChapterPayload(jsonDecode(utf8.decode(bytes)), chapterIndex);
+});
+
+Future<List<Chapter>> _decodeChaptersInIsolate(String raw) =>
+    Isolate.run(() => _chaptersFromJson(raw));
 
 Future<Map<String, dynamic>> _decodeChapterManifestInBackground(String raw) =>
     Isolate.run(() => _chapterManifestFromJson(raw));

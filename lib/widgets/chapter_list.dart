@@ -424,7 +424,7 @@ class _ChapterListSheetState extends State<ChapterListSheet> {
             ),
           ),
           trailing: SizedBox(
-            width: 64,
+            width: MediaQuery.textScalerOf(context).scale(64).clamp(64.0, 108.0),
             child: ValueListenableBuilder<List<int>?>(
               valueListenable: widget.chapterWordCountsListenable,
               builder: (context, chapterWordCounts, _) {

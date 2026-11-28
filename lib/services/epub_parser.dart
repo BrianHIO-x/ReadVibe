@@ -6,6 +6,9 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
+import 'package:dart3_big5/big5.dart';
+import 'package:fast_gbk/fast_gbk.dart';
 import 'package:html/dom.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:path/path.dart' as p;
@@ -142,186 +145,222 @@ Book _parseEpubSync(
       'EPUB 文件过大，请选择不超过 ${_formatMegabytes(limits.maxInputBytes)} MB 的文件',
     );
   }
-  final bytes = source.readAsBytesSync();
-
-  late final Archive archive;
+  final input = InputFileStream(filePath);
   try {
-    archive = ZipDecoder().decodeBytes(bytes);
-  } on FormatException {
-    throw const FormatException('无效的 EPUB 文件：ZIP 数据已损坏');
-  }
-  if (archive.files.length > limits.maxArchiveEntries) {
-    throw const FormatException('EPUB 文件包含过多条目，无法安全解析');
-  }
-
-  var expandedBytes = 0;
-  final archiveFiles = <String, ArchiveFile>{};
-  for (final file in archive.files) {
-    expandedBytes += file.size;
-    if (expandedBytes > limits.maxExpandedBytes) {
-      throw const FormatException('EPUB 解压后的内容过大，无法安全解析');
+    late final Archive archive;
+    try {
+      archive = ZipDecoder().decodeStream(input);
+    } on Object {
+      throw const FormatException('无效的 EPUB 文件：ZIP 数据已损坏');
     }
-    archiveFiles.putIfAbsent(_normalizeArchivePath(file.name), () => file);
-  }
-  final archiveLookup = _ArchiveLookup(archiveFiles);
-  final encryptedPaths = _epubEncryptedPaths(archiveLookup);
+    if (archive.files.length > limits.maxArchiveEntries) {
+      throw const FormatException('EPUB 文件包含过多条目，无法安全解析');
+    }
 
-  final containerFile = archiveLookup.find('META-INF/container.xml');
-  if (containerFile == null) {
-    throw const FormatException('无效的 EPUB 文件：缺少 container.xml');
-  }
-  final container = _parseXml(containerFile, 'container.xml', lenient: true);
-  final opfSelection = _selectOpf(container, archiveLookup, encryptedPaths);
-  final opf = opfSelection.opf;
-  final opfPath = opfSelection.path;
-  final opfDir = p.posix.dirname(opfPath);
-  final title = _firstElementText(opf, 'title');
-  final author = _firstElementText(opf, 'creator');
-  final manifest = _extractManifest(opf, opfDir, archiveLookup);
-  final navigation = _extractNavigation(opf, manifest, archiveLookup);
-  final spineDocuments = _extractSpineDocuments(opf, manifest, archiveLookup);
-  if (spineDocuments.any(
-    (document) =>
-        document.linear &&
-        _isEncryptedPath(document.item.path, archiveLookup, encryptedPaths),
-  )) {
-    throw const FormatException('EPUB 正文章节受 DRM 或加密保护，无法离线解析');
-  }
+    var expandedBytes = 0;
+    final archiveFiles = <String, ArchiveFile>{};
+    for (final file in archive.files) {
+      expandedBytes += file.size;
+      if (expandedBytes > limits.maxExpandedBytes) {
+        throw const FormatException('EPUB 解压后的内容过大，无法安全解析');
+      }
+      archiveFiles.putIfAbsent(_normalizeArchivePath(file.name), () => file);
+    }
+    final archiveLookup = _ArchiveLookup(archiveFiles);
+    final encryptionInfo = _epubEncryptionInfo(archiveLookup);
+    final encryptedPaths = encryptionInfo.drmEncryptedPaths;
 
-  final resourceDirectory = Directory(resourceDirectoryPath);
-  resourceDirectory.createSync(recursive: true);
-  final imageStore = _EpubImageStore(
-    archiveLookup: archiveLookup,
-    encryptedPaths: encryptedPaths,
-    outputDirectory: resourceDirectory,
-    maxSingleImageBytes: limits.maxSingleImageBytes,
-  );
-  final fontStore = _EpubFontStore(
-    archiveLookup: archiveLookup,
-    encryptedPaths: encryptedPaths,
-    outputDirectory: resourceDirectory,
-    bookId: bookId,
-  );
-  final coverArchivePath = _epubCoverArchivePath(opf, manifest);
-  final coverImagePath = coverArchivePath == null
-      ? null
-      : imageStore.extractArchivePath(coverArchivePath)?.path;
+    final containerFile = archiveLookup.find('META-INF/container.xml');
+    if (containerFile == null) {
+      throw const FormatException('无效的 EPUB 文件：缺少 container.xml');
+    }
+    final container = _parseXml(containerFile, 'container.xml', lenient: true);
+    final opfSelection = _selectOpf(container, archiveLookup, encryptedPaths);
+    final opf = opfSelection.opf;
+    final opfPath = opfSelection.path;
+    final opfDir = p.posix.dirname(opfPath);
+    final title = _firstElementText(opf, 'title');
+    final author = _firstElementText(opf, 'creator');
+    final packageIdentifiers = _opfIdentifiers(opf);
+    final manifest = _extractManifest(opf, opfDir, archiveLookup);
+    final navigation = _extractNavigation(opf, manifest, archiveLookup);
+    final spineDocuments = _extractSpineDocuments(opf, manifest, archiveLookup);
+    if (spineDocuments.any(
+      (document) =>
+          document.linear &&
+          _isEncryptedPath(document.item.path, archiveLookup, encryptedPaths),
+    )) {
+      throw const FormatException('EPUB 正文章节受 DRM 或加密保护，无法离线解析');
+    }
 
-  final assembler = _EpubBookAssembler(
-    archiveLookup: archiveLookup,
-    encryptedPaths: encryptedPaths,
-    navigation: navigation,
-    imageStore: imageStore,
-    fontStore: fontStore,
-  );
+    final resourceDirectory = Directory(resourceDirectoryPath);
+    resourceDirectory.createSync(recursive: true);
+    final imageStore = _EpubImageStore(
+      archiveLookup: archiveLookup,
+      encryptedPaths: encryptedPaths,
+      outputDirectory: resourceDirectory,
+      maxSingleImageBytes: limits.maxSingleImageBytes,
+    );
+    final fontStore = _EpubFontStore(
+      archiveLookup: archiveLookup,
+      encryptedPaths: encryptedPaths,
+      idpfObfuscatedFonts: encryptionInfo.idpfObfuscatedFonts,
+      adobeObfuscatedFonts: encryptionInfo.adobeObfuscatedFonts,
+      packageIdentifiers: packageIdentifiers,
+      outputDirectory: resourceDirectory,
+      bookId: bookId,
+    );
+    final coverArchivePath = _epubCoverArchivePath(
+      opf,
+      opfDir,
+      manifest,
+      archiveLookup,
+    );
+    final coverImagePath = coverArchivePath == null
+        ? null
+        : imageStore.extractArchivePath(coverArchivePath)?.path;
 
-  // The reading order is the spine's linear order. Non-linear documents are
-  // parsed only when links point at them (footnote pages) or when the linear
-  // spine is too sparse to be the whole book.
-  for (final document in spineDocuments) {
-    if (!document.linear) continue;
-    assembler.addDocument(document.item);
-  }
-  final sparseLinearText = assembler.plainTextLength < 400;
-  if (sparseLinearText) {
+    final assembler = _EpubBookAssembler(
+      archiveLookup: archiveLookup,
+      encryptedPaths: encryptedPaths,
+      navigation: navigation,
+      imageStore: imageStore,
+      fontStore: fontStore,
+    );
+
+    // The reading order is the spine's linear order. Non-linear documents are
+    // parsed only when links point at them (footnote pages) or when the linear
+    // spine is too sparse to be the whole book.
     for (final document in spineDocuments) {
-      if (document.linear) continue;
+      if (!document.linear) continue;
       assembler.addDocument(document.item);
     }
-  }
-
-  // Follow only newly discovered references. Rescanning every link and the
-  // whole manifest each round would make a large book's import quadratic.
-  final documentCandidates = <String, _ManifestItem>{};
-  final manifestOrder = <String, int>{};
-  var manifestIndex = 0;
-  for (final item in manifest.values) {
-    if (_documentKind(item, archiveLookup) == _EpubDocumentKind.unsupported) {
-      continue;
+    final sparseLinearText = assembler.plainTextLength < 400;
+    if (sparseLinearText) {
+      for (final document in spineDocuments) {
+        if (document.linear) continue;
+        assembler.addDocument(document.item);
+      }
     }
-    documentCandidates[item.path] = item;
-    manifestOrder.putIfAbsent(item.path, () => manifestIndex++);
-  }
-  final spineOrder = <String, int>{};
-  for (var index = 0; index < spineDocuments.length; index++) {
-    spineOrder[spineDocuments[index].item.path] = index;
-  }
-  int referenceRank(String path) {
-    final spineIndex = spineOrder[path];
-    if (spineIndex != null) return spineIndex;
-    return spineDocuments.length + (manifestOrder[path] ?? 1 << 20);
-  }
 
-  final referenceQueue = ListQueue<String>();
-  final queuedReferences = <String>{};
-  void enqueueReferences(Iterable<String> references) {
-    final ordered =
-        references.where(documentCandidates.containsKey).toList(growable: false)
-          ..sort(
-            (first, second) =>
-                referenceRank(first).compareTo(referenceRank(second)),
-          );
-    for (final path in ordered) {
-      if (!queuedReferences.add(path) || assembler.hasProcessed(path)) {
+    // Follow only newly discovered references. Rescanning every link and the
+    // whole manifest each round would make a large book's import quadratic.
+    final documentCandidates = <String, _ManifestItem>{};
+    final manifestOrder = <String, int>{};
+    var manifestIndex = 0;
+    for (final item in manifest.values) {
+      if (_documentKind(item, archiveLookup) == _EpubDocumentKind.unsupported) {
         continue;
       }
-      referenceQueue.add(path);
+      documentCandidates[item.path] = item;
+      manifestOrder.putIfAbsent(item.path, () => manifestIndex++);
     }
-  }
+    final spineOrder = <String, int>{};
+    for (var index = 0; index < spineDocuments.length; index++) {
+      spineOrder[spineDocuments[index].item.path] = index;
+    }
+    int referenceRank(String path) {
+      final spineIndex = spineOrder[path];
+      if (spineIndex != null) return spineIndex;
+      return spineDocuments.length + (manifestOrder[path] ?? 1 << 20);
+    }
 
-  enqueueReferences(assembler.takeNewReferences());
-  var followGuard = 0;
-  while (referenceQueue.isNotEmpty &&
-      followGuard++ <= documentCandidates.length) {
-    final path = referenceQueue.removeFirst();
-    final item = documentCandidates[path];
-    if (item == null || assembler.hasProcessed(path)) continue;
-    if (assembler.addDocument(item)) {
-      enqueueReferences(assembler.takeNewReferences());
-    }
-  }
-
-  if (assembler.chapters.isEmpty) {
-    // A damaged or empty spine is not a reason to reject a book whose manifest
-    // still contains readable documents.
-    for (final document in spineDocuments) {
-      if (!document.linear) assembler.addDocument(document.item);
-    }
-    for (final item in manifest.values) {
-      if (_documentKind(item, archiveLookup) != _EpubDocumentKind.unsupported) {
-        assembler.addDocument(item);
+    final referenceQueue = ListQueue<String>();
+    final queuedReferences = <String>{};
+    void enqueueReferences(Iterable<String> references) {
+      final ordered =
+          references
+              .where(documentCandidates.containsKey)
+              .toList(growable: false)
+            ..sort(
+              (first, second) =>
+                  referenceRank(first).compareTo(referenceRank(second)),
+            );
+      for (final path in ordered) {
+        if (!queuedReferences.add(path) || assembler.hasProcessed(path)) {
+          continue;
+        }
+        referenceQueue.add(path);
       }
     }
-  }
-  if (assembler.chapters.isEmpty) {
-    throw const FormatException('无法从 EPUB 中解析出任何章节内容或图片');
-  }
 
-  _resolveEpubLinks(
-    assembler.chapters,
-    pendingLinks: assembler.pendingLinks,
-    chapterIndexByPath: assembler.chapterIndexByPath,
-    anchorLocations: assembler.anchorLocations,
-    navigationBlocks: assembler.navigationBlocks,
-  );
+    enqueueReferences(assembler.takeNewReferences());
+    var followGuard = 0;
+    while (referenceQueue.isNotEmpty &&
+        followGuard++ <= documentCandidates.length) {
+      final path = referenceQueue.removeFirst();
+      final item = documentCandidates[path];
+      if (item == null || assembler.hasProcessed(path)) continue;
+      if (assembler.addDocument(item)) {
+        enqueueReferences(assembler.takeNewReferences());
+      }
+    }
 
-  final fallbackTitle = fileName
-      .replaceAll(RegExp(r'\.epub$', caseSensitive: false), '')
-      .trim();
-  return Book(
-    id: bookId,
-    title: title.isNotEmpty
-        ? title
-        : (fallbackTitle.isEmpty ? '未命名书籍' : fallbackTitle),
-    author: author,
-    format: BookFormat.epub,
-    chapters: assembler.chapters,
-    importDate: importDate,
-    fileSize: inputLength,
-    sourcePath: resourceDirectory.path,
-    coverImagePath: coverImagePath,
-    embeddedFonts: fontStore.embeddedFonts,
-  );
+    if (assembler.chapters.isEmpty) {
+      // A damaged or empty spine is not a reason to reject a book whose manifest
+      // still contains readable documents.
+      for (final document in spineDocuments) {
+        if (!document.linear) assembler.addDocument(document.item);
+      }
+      for (final item in manifest.values) {
+        if (_documentKind(item, archiveLookup) !=
+            _EpubDocumentKind.unsupported) {
+          assembler.addDocument(item);
+        }
+      }
+    }
+    if (assembler.chapters.isEmpty) {
+      throw const FormatException('无法从 EPUB 中解析出任何章节内容或图片');
+    }
+
+    _resolveEpubLinks(
+      assembler.chapters,
+      pendingLinks: assembler.pendingLinks,
+      chapterIndexByPath: assembler.chapterIndexByPath,
+      anchorLocations: assembler.anchorLocations,
+      navigationBlocks: assembler.navigationBlocks,
+    );
+
+    final fallbackTitle = fileName
+        .replaceAll(RegExp(r'\.epub$', caseSensitive: false), '')
+        .trim();
+    return Book(
+      id: bookId,
+      title: title.isNotEmpty
+          ? title
+          : (fallbackTitle.isEmpty ? '未命名书籍' : fallbackTitle),
+      author: author,
+      format: BookFormat.epub,
+      chapters: assembler.chapters,
+      importDate: importDate,
+      fileSize: inputLength,
+      sourcePath: resourceDirectory.path,
+      coverImagePath: coverImagePath,
+      embeddedFonts: fontStore.embeddedFonts,
+    );
+  } finally {
+    input.closeSync();
+  }
+}
+
+List<String> _opfIdentifiers(XmlDocument opf) {
+  final uniqueId = _elementsNamed(opf, 'package')
+      .firstOrNull
+      ?.getAttribute('unique-identifier')
+      ?.trim();
+  final ordered = <String>[];
+  final others = <String>[];
+  for (final element in _elementsNamed(opf, 'identifier')) {
+    final text = element.innerText.trim();
+    if (text.isEmpty) continue;
+    final id = element.getAttribute('id')?.trim();
+    if (uniqueId != null && uniqueId.isNotEmpty && id == uniqueId) {
+      ordered.add(text);
+    } else {
+      others.add(text);
+    }
+  }
+  return <String>[...ordered, ...others];
 }
 
 class _EpubBookAssembler {
@@ -377,7 +416,9 @@ class _EpubBookAssembler {
     try {
       switch (kind) {
         case _EpubDocumentKind.markup:
-          final document = html_parser.parse(decodeEpubMarkup(_bytesOf(file)));
+          final document = html_parser.parse(
+            normalizeXhtmlSelfClosingTags(decodeEpubMarkup(_bytesOf(file))),
+          );
           final cssText = _chapterCssText(
             document,
             item.path,
@@ -542,10 +583,7 @@ List<_ChapterPlan> _chapterPlans(
       _documentVolumeTitle(path, navigation),
     ),
   ];
-  final entries = navigation
-      .entriesForPath(path)
-      .where((entry) => entry.fragment != null && entry.fragment!.isNotEmpty)
-      .toList(growable: false);
+  final entries = navigation.entriesForPath(path);
   if (entries.isEmpty) return fallback;
 
   final blockByAnchor = <String, int>{};
@@ -557,7 +595,10 @@ List<_ChapterPlan> _chapterPlans(
   final resolved = <_ResolvedNavEntry>[];
   final usedBlocks = <int>{};
   for (final entry in entries) {
-    final blockIndex = blockByAnchor[entry.fragment!];
+    final fragment = entry.fragment;
+    final blockIndex = (fragment == null || fragment.isEmpty)
+        ? 0
+        : blockByAnchor[fragment];
     if (blockIndex == null || !usedBlocks.add(blockIndex)) continue;
     resolved.add(_ResolvedNavEntry(entry, blockIndex));
   }
@@ -653,14 +694,20 @@ _LoadedDocument? _svgPageDocument(
   ArchiveFile file,
   _EpubImageStore imageStore,
 ) {
-  final document = html_parser.parse(decodeEpubMarkup(_bytesOf(file)));
+  final document = html_parser.parse(
+    normalizeXhtmlSelfClosingTags(decodeEpubMarkup(_bytesOf(file))),
+  );
   final documentTitle = _extractDocumentTitle(document);
   final imageElements = <Element>[];
+  final textElements = <Element>[];
   final root = document.documentElement;
   if (root != null) {
     void collect(Element element) {
       if (element.localName == 'image' || element.localName == 'img') {
         imageElements.add(element);
+      } else if (element.localName == 'text') {
+        textElements.add(element);
+        return;
       }
       for (final child in element.children) {
         collect(child);
@@ -691,6 +738,17 @@ _LoadedDocument? _svgPageDocument(
             documentTitle,
         imageWidth: width ?? extracted.width,
         imageHeight: height ?? extracted.height,
+        style: const EpubContentStyle(textIndentEm: 0),
+      ),
+    );
+  }
+  for (final element in textElements) {
+    final text = _normalizeVisibleText(element.text);
+    if (text.isEmpty) continue;
+    blocks.add(
+      EpubContentBlock(
+        kind: EpubContentBlockKind.text,
+        text: text,
         style: const EpubContentStyle(textIndentEm: 0),
       ),
     );

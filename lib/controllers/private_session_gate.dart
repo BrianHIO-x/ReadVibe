@@ -486,7 +486,9 @@ class PrivateLockOverlay extends StatelessWidget {
                   style: AppButtonStyles.filledOverride(
                     colors,
                     backgroundColor: danger,
-                    foregroundColor: Colors.white,
+                    foregroundColor: danger.computeLuminance() > 0.35
+                        ? colors.background
+                        : Colors.white,
                   ),
                   child: const Text('确认清空'),
                 ),

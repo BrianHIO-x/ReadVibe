@@ -13,8 +13,11 @@ import 'package:flutter/rendering.dart'
         RenderParagraph,
         RenderRepaintBoundary,
         RenderSliver,
-        ScrollCacheExtent;
+        ScrollCacheExtent,
+        ScrollDirection;
+import 'package:flutter/scheduler.dart' show SchedulerPhase;
 import 'package:flutter/services.dart';
+import '../theme/app_overlay_theme.dart';
 import '../theme/app_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_motion.dart';
@@ -28,6 +31,7 @@ import '../services/font_service.dart';
 import '../services/book_search_service.dart';
 import '../services/motion_service.dart';
 import '../services/storage_service.dart';
+import '../services/storage/chapter_disk_store.dart' show LazyChapter;
 import '../widgets/app_toast.dart';
 import '../widgets/app_sheet.dart';
 import '../widgets/chapter_list.dart';
@@ -156,6 +160,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       ReaderProgressController();
   final ReaderSearchController _searchController = ReaderSearchController();
   bool _readingModeReloading = false;
+  Timer? _reloadingGuardTimer;
   // A modal with a text field (currently full-text search) can cause Android
   // to report a transient keyboard inset.  Simulation pagination is based on
   // the reader viewport, so never allow that transient inset to repaginate the
@@ -173,6 +178,10 @@ class _ReaderScreenState extends State<ReaderScreen>
       const <int, Map<int, List<ReaderNote>>>{};
   final ReaderNoteHighlightRegistry _noteHighlightRegistry =
       ReaderNoteHighlightRegistry();
+  final ReaderEpubLinkRegistry _epubLinkRegistry = ReaderEpubLinkRegistry();
+  DateTime? _lastEpubLinkOpenedAt;
+  ReadingTextAnchor? _pinnedReadingAnchor;
+  Locale? _readerLocale;
   // Resolving the reading anchor lays out every paragraph above the viewport,
   // so the toggle icon reads this cached flag instead of probing each build.
   // It is refreshed when the chrome appears and whenever a mark is committed.
@@ -200,11 +209,16 @@ class _ReaderScreenState extends State<ReaderScreen>
   ui.Image? _reversePageTurnSnapshot;
   Future<bool>? _reversePageTurnSnapshotCapture;
   int _reversePageTurnSnapshotSerial = 0;
-  late final List<GlobalKey> _continuousChapterKeys;
+  final Map<int, GlobalKey> _continuousChapterKeys = <int, GlobalKey>{};
+  int _continuousWindowStart = 0;
+  int _continuousWindowEnd = -1;
+  int _continuousViewGeneration = 0;
+  bool _continuousRecenterScheduled = false;
   int _continuousAnchorChapterIndex = 0;
   final Map<int, double> _continuousChapterStarts = <int, double>{};
   final Map<int, double> _continuousChapterExtents = <int, double>{};
   bool _continuousMetricsScheduled = false;
+  bool _prefetchRefreshScheduled = false;
   int _continuousRestoreSerial = 0;
   double? _pendingContinuousProgress;
   double? _pendingContinuousOffset;
@@ -223,11 +237,75 @@ class _ReaderScreenState extends State<ReaderScreen>
   EdgeInsets _readerViewPadding = EdgeInsets.zero;
   TextScaler _readerTextScaler = TextScaler.noScaling;
 
-  ReaderEpubLayout get _epubLayout => ReaderEpubLayout(
-    textScaler: _readerTextScaler,
-    resolveSimulationLineExtent: _resolvedSimulationLineExtent,
-    onOpenLink: _handleEpubLink,
-  );
+  ReaderEpubLayout get _epubLayout {
+    final activeHeight = _simulationViewportLock ?? _readerViewportHeight;
+    return ReaderEpubLayout(
+      textScaler: _readerTextScaler,
+      resolveSimulationLineExtent: _resolvedSimulationLineExtent,
+      onOpenLink: _handleEpubLink,
+      linkRegistry: _epubLinkRegistry,
+      maxImageHeight: activeHeight > 0
+          ? math.max(200.0, activeHeight - 80.0)
+          : 560.0,
+      locale: _readerLocale,
+    );
+  }
+
+  GlobalKey _continuousKeyFor(int chapterIndex) =>
+      _continuousChapterKeys.putIfAbsent(chapterIndex, () => GlobalKey());
+
+  void _prefetchChapters(Iterable<int> indices) {
+    for (final index in indices) {
+      if (index < 0 || index >= _book.chapters.length) continue;
+      final chapter = _book.chapters[index];
+      if (chapter is LazyChapter && !chapter.store.isCached(index)) {
+        unawaited(
+          chapter.store.prefetch(index).then((_) {
+            if (!mounted ||
+                _settings.readingMode != ReaderReadingMode.continuous ||
+                !chapter.store.isCached(index) ||
+                index < _continuousWindowStart ||
+                index > _continuousWindowEnd ||
+                _prefetchRefreshScheduled) {
+              return;
+            }
+            _prefetchRefreshScheduled = true;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _prefetchRefreshScheduled = false;
+              if (mounted &&
+                  _settings.readingMode == ReaderReadingMode.continuous) {
+                setState(() {});
+              }
+            });
+          }),
+        );
+      }
+    }
+  }
+
+  void _resetContinuousWindowAround(
+    int anchorIndex, {
+    bool recreateView = false,
+  }) {
+    final count = _book.chapters.length;
+    if (count == 0) {
+      _continuousAnchorChapterIndex = 0;
+      _continuousWindowStart = 0;
+      _continuousWindowEnd = -1;
+      _continuousChapterKeys.clear();
+      if (recreateView) _continuousViewGeneration++;
+      return;
+    }
+    final clamped = anchorIndex.clamp(0, count - 1);
+    _continuousAnchorChapterIndex = clamped;
+    _continuousWindowStart = math.max(0, clamped - 1);
+    _continuousWindowEnd = math.min(count - 1, clamped + 2);
+    _continuousChapterKeys.removeWhere(
+      (index, _) =>
+          index < _continuousWindowStart || index > _continuousWindowEnd,
+    );
+    if (recreateView) _continuousViewGeneration++;
+  }
 
   @override
   void initState() {
@@ -238,11 +316,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _book = widget.book;
     _chapterIndex = 0;
     _settings = const ReaderSettings();
-    _continuousChapterKeys = List<GlobalKey>.generate(
-      _book.chapters.length,
-      (_) => GlobalKey(),
-      growable: false,
-    );
+    _resetContinuousWindowAround(0);
     _wordCountController = ReaderWordCountController(_storage, _book);
     _scrollController = _createScrollController();
     _selectionController.active.addListener(
@@ -614,7 +688,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       offset: safeRestoredOffset,
       progress: safeRestoredProgress,
     );
-    _continuousAnchorChapterIndex = _chapterIndex;
+    _resetContinuousWindowAround(_chapterIndex, recreateView: true);
     _currentProgress = ReadingProgress(
       bookId: _book.id,
       chapterIndex: _chapterIndex,
@@ -635,12 +709,21 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     setState(() {});
     if (loadedSettings.readingMode == ReaderReadingMode.continuous) {
+      _prefetchChapters([
+        for (
+          var i = _continuousWindowStart;
+          i <= _continuousWindowEnd;
+          i++
+        )
+          i,
+      ]);
       _requestContinuousRestore(
         hasSavedProgressRatio ? safeRestoredProgress : 0,
         offset: launchAnchor != null ? null : safeRestoredOffset,
         textAnchor: launchAnchor,
       );
     } else {
+      _prefetchChapters([_chapterIndex - 1, _chapterIndex + 1]);
       _scheduleAdjacentWarmup();
       _requestScrollRestore(
         offset: launchAnchor != null ? 0 : safeRestoredOffset,
@@ -737,7 +820,20 @@ class _ReaderScreenState extends State<ReaderScreen>
     _finishReadingModeReload();
   }
 
+  void _beginReadingModeReload() {
+    _reloadingGuardTimer?.cancel();
+    _reloadingGuardTimer = Timer(
+      const Duration(milliseconds: 900),
+      _finishReadingModeReload,
+    );
+    if (!_readingModeReloading && mounted) {
+      setState(() => _readingModeReloading = true);
+    }
+  }
+
   void _finishReadingModeReload() {
+    _reloadingGuardTimer?.cancel();
+    _reloadingGuardTimer = null;
     if (!_readingModeReloading || !mounted) return;
     setState(() => _readingModeReloading = false);
   }
@@ -778,6 +874,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pendingContinuousOffset = null;
     _pendingContinuousTextAnchor = null;
     _continuousMetricsScheduled = false;
+    _continuousRecenterScheduled = false;
     _continuousChapterStarts
       ..clear()
       ..[_continuousAnchorChapterIndex] = 0;
@@ -789,7 +886,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     double? offset,
     ReadingTextAnchor? textAnchor,
   }) {
-    _continuousAnchorChapterIndex = _chapterIndex;
+    _resetContinuousWindowAround(_chapterIndex);
     _continuousChapterStarts
       ..clear()
       ..[_continuousAnchorChapterIndex] = 0;
@@ -824,7 +921,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         return;
       }
       final extent = _continuousChapterExtents[_continuousAnchorChapterIndex];
-      if (extent == null || !extent.isFinite || extent <= 0) {
+      if (extent == null || !extent.isFinite || extent < 0) {
         if (attempt < 20) {
           _restoreContinuousPosition(serial, attempt + 1);
         } else {
@@ -833,6 +930,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         return;
       }
       final viewport = _scrollController.position.viewportDimension;
+      final chapterMax = math.max(0.0, extent - 1.0);
       final readableExtent = math.max(0.0, extent - viewport);
       final textAnchor = _pendingContinuousTextAnchor;
       final anchoredOffset = textAnchor == null
@@ -842,11 +940,13 @@ class _ReaderScreenState extends State<ReaderScreen>
               settings: _settings,
               mode: ReaderReadingMode.continuous,
               viewportDimension: viewport,
-              maxExtent: readableExtent,
+              maxExtent: chapterMax,
             );
       final requestedOffset = anchoredOffset ?? _pendingContinuousOffset;
       final target =
-          (requestedOffset ?? _pendingContinuousProgress! * readableExtent)
+          (requestedOffset != null
+                  ? requestedOffset.clamp(0.0, chapterMax).toDouble()
+                  : _pendingContinuousProgress! * readableExtent)
               .clamp(
                 _scrollController.position.minScrollExtent,
                 _scrollController.position.maxScrollExtent,
@@ -858,8 +958,12 @@ class _ReaderScreenState extends State<ReaderScreen>
       if ((_scrollController.offset - target).abs() > 0.5) {
         _scrollController.jumpTo(target);
       }
+      _refreshContinuousMetrics(updateActiveChapter: false);
       final snapshot = _continuousSnapshotForChapter(_chapterIndex);
       _recordCurrentChapterPosition(snapshot);
+      _prefetchChapters([
+        for (var i = _continuousWindowStart; i <= _continuousWindowEnd; i++) i,
+      ]);
       _finishReadingModeReload();
     });
   }
@@ -887,14 +991,94 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
   }
 
+  void _scheduleContinuousIdleRecenter() {
+    if (_continuousRecenterScheduled ||
+        _settings.readingMode != ReaderReadingMode.continuous ||
+        (_chapterIndex - _continuousAnchorChapterIndex).abs() < 4) {
+      return;
+    }
+    _continuousRecenterScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _continuousRecenterScheduled = false;
+      if (!mounted ||
+          _settings.readingMode != ReaderReadingMode.continuous ||
+          _closingReader ||
+          _readerModalOpen ||
+          _selectionController.active.value ||
+          _pendingContinuousProgress != null ||
+          (_chapterIndex - _continuousAnchorChapterIndex).abs() < 4 ||
+          !_scrollController.hasClients ||
+          !_scrollController.position.hasContentDimensions ||
+          _scrollController.position.isScrollingNotifier.value) {
+        return;
+      }
+      final currentIndex = _chapterIndex;
+      final start = _continuousChapterStarts[currentIndex];
+      final extent = _continuousChapterExtents[currentIndex];
+      if (start == null || extent == null || !extent.isFinite) return;
+      final localOffset = _scrollController.offset - start;
+      // Preserve the exact screen y-position when promoting the active chapter
+      // to be the CustomScrollView's center sliver: the center chapter uses
+      // `viewPadding.top + AppSpacing.lg` at its top while non-anchor chapters
+      // use `AppSpacing.xxl`.
+      final oldTop = currentIndex == _continuousAnchorChapterIndex
+          ? _readerViewPadding.top + AppSpacing.lg
+          : AppSpacing.xxl;
+      final newTop = _readerViewPadding.top + AppSpacing.lg;
+      final adjustedOffset = localOffset + (newTop - oldTop);
+
+      final previousController = _scrollController;
+      previousController.removeListener(_scheduleProgressSave);
+      _resetContinuousWindowAround(currentIndex, recreateView: true);
+      _continuousChapterStarts
+        ..clear()
+        ..[currentIndex] = 0.0;
+      _continuousChapterExtents.clear();
+      final nextController = _createScrollController(
+        adjustedOffset.isFinite ? adjustedOffset : 0.0,
+      );
+      _setReaderState(() => _scrollController = nextController);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        previousController.dispose();
+        if (!mounted ||
+            !identical(_scrollController, nextController) ||
+            !nextController.hasClients ||
+            !nextController.position.hasContentDimensions) {
+          return;
+        }
+        final clamped = adjustedOffset
+            .clamp(
+              nextController.position.minScrollExtent,
+              nextController.position.maxScrollExtent,
+            )
+            .toDouble();
+        if ((nextController.offset - clamped).abs() > 0.5) {
+          nextController.jumpTo(clamped);
+        }
+        _refreshContinuousMetrics(updateActiveChapter: false);
+        _prefetchChapters([
+          for (var i = _continuousWindowStart; i <= _continuousWindowEnd; i++)
+            i,
+        ]);
+      });
+    });
+  }
+
   void _refreshContinuousMetrics({required bool updateActiveChapter}) {
-    if (_continuousChapterKeys.isEmpty) return;
-    _continuousChapterStarts.putIfAbsent(
-      _continuousAnchorChapterIndex,
-      () => 0,
+    if (_book.chapters.isEmpty || _continuousWindowEnd < _continuousWindowStart) {
+      return;
+    }
+    final anchor = _continuousAnchorChapterIndex.clamp(
+      _continuousWindowStart,
+      _continuousWindowEnd,
     );
-    for (var index = 0; index < _continuousChapterKeys.length; index++) {
-      final renderObject = _continuousChapterKeys[index].currentContext
+    _continuousAnchorChapterIndex = anchor;
+    for (
+      var index = _continuousWindowStart;
+      index <= _continuousWindowEnd;
+      index++
+    ) {
+      final renderObject = _continuousChapterKeys[index]?.currentContext
           ?.findRenderObject();
       if (renderObject is! RenderSliver) continue;
       final extent = renderObject.geometry?.scrollExtent;
@@ -903,31 +1087,20 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
     }
 
-    var changed = true;
-    while (changed) {
-      changed = false;
-      for (var index = 0; index < _continuousChapterKeys.length - 1; index++) {
-        final start = _continuousChapterStarts[index];
-        final extent = _continuousChapterExtents[index];
-        if (start != null && extent != null) {
-          final nextStart = start + extent;
-          if (_continuousChapterStarts[index + 1] != nextStart) {
-            _continuousChapterStarts[index + 1] = nextStart;
-            changed = true;
-          }
-        }
-      }
-      for (var index = _continuousChapterKeys.length - 1; index > 0; index--) {
-        final start = _continuousChapterStarts[index];
-        final previousExtent = _continuousChapterExtents[index - 1];
-        if (start != null && previousExtent != null) {
-          final previousStart = start - previousExtent;
-          if (_continuousChapterStarts[index - 1] != previousStart) {
-            _continuousChapterStarts[index - 1] = previousStart;
-            changed = true;
-          }
-        }
-      }
+    _continuousChapterStarts
+      ..clear()
+      ..[anchor] = 0.0;
+    for (var index = anchor + 1; index <= _continuousWindowEnd; index++) {
+      final prevStart = _continuousChapterStarts[index - 1];
+      final prevExtent = _continuousChapterExtents[index - 1];
+      if (prevStart == null || prevExtent == null) break;
+      _continuousChapterStarts[index] = prevStart + prevExtent;
+    }
+    for (var index = anchor - 1; index >= _continuousWindowStart; index--) {
+      final nextStart = _continuousChapterStarts[index + 1];
+      final extent = _continuousChapterExtents[index];
+      if (nextStart == null || extent == null) break;
+      _continuousChapterStarts[index] = nextStart - extent;
     }
 
     if (!updateActiveChapter ||
@@ -936,17 +1109,53 @@ class _ReaderScreenState extends State<ReaderScreen>
         _pendingContinuousProgress != null) {
       return;
     }
-    final viewportOffset = _scrollController.offset + 0.5;
-    var activeIndex = _chapterIndex;
+    final probeOffset = _scrollController.offset <= 0.5
+        ? _scrollController.offset + 0.5
+        : _scrollController.offset +
+              _visualTopInsetForMode(ReaderReadingMode.continuous) +
+              0.5;
+    var activeIndex = _chapterIndex.clamp(
+      _continuousWindowStart,
+      _continuousWindowEnd,
+    );
     var activeStart = double.negativeInfinity;
     for (final entry in _continuousChapterStarts.entries) {
-      if (entry.value <= viewportOffset && entry.value >= activeStart) {
+      if (entry.key < _continuousWindowStart ||
+          entry.key > _continuousWindowEnd) {
+        continue;
+      }
+      if (entry.value <= probeOffset && entry.value >= activeStart) {
         activeIndex = entry.key;
         activeStart = entry.value;
       }
     }
     activeIndex = activeIndex.clamp(0, _book.chapters.length - 1);
-    if (activeIndex != _chapterIndex) {
+
+    var desiredStart = _continuousWindowStart;
+    var desiredEnd = _continuousWindowEnd;
+    if (activeIndex <= _continuousWindowStart + 1 &&
+        _continuousWindowStart > 0) {
+      desiredStart = math.max(0, activeIndex - 2);
+    }
+    if (activeIndex >= _continuousWindowEnd - 1 &&
+        _continuousWindowEnd < _book.chapters.length - 1) {
+      desiredEnd = math.min(_book.chapters.length - 1, activeIndex + 2);
+    }
+    final safeMin = math.max(0, math.min(anchor, activeIndex) - 2);
+    final safeMax = math.min(
+      _book.chapters.length - 1,
+      math.max(anchor, activeIndex) + 2,
+    );
+    if (desiredStart < safeMin) desiredStart = safeMin;
+    if (desiredEnd > safeMax) desiredEnd = safeMax;
+    if (desiredStart > anchor) desiredStart = anchor;
+    if (desiredEnd < anchor) desiredEnd = anchor;
+
+    final windowChanged =
+        desiredStart != _continuousWindowStart ||
+        desiredEnd != _continuousWindowEnd;
+    final chapterChanged = activeIndex != _chapterIndex;
+    if (chapterChanged) {
       final previousIndex = _chapterIndex;
       final previousSnapshot = _continuousSnapshotForChapter(previousIndex);
       final base = _currentProgress;
@@ -957,7 +1166,29 @@ class _ReaderScreenState extends State<ReaderScreen>
           progress: previousSnapshot.progress,
         );
       }
-      setState(() => _chapterIndex = activeIndex);
+    }
+    if (windowChanged || chapterChanged) {
+      final newlyAdded = <int>[
+        for (var i = desiredStart; i < _continuousWindowStart; i++) i,
+        for (var i = _continuousWindowEnd + 1; i <= desiredEnd; i++) i,
+      ];
+      _continuousWindowStart = desiredStart;
+      _continuousWindowEnd = desiredEnd;
+      _continuousChapterKeys.removeWhere(
+        (index, _) => index < desiredStart || index > desiredEnd,
+      );
+      _continuousChapterExtents.removeWhere(
+        (index, _) => index < desiredStart || index > desiredEnd,
+      );
+      _continuousChapterStarts.removeWhere(
+        (index, _) => index < desiredStart || index > desiredEnd,
+      );
+      setState(() {
+        if (chapterChanged) _chapterIndex = activeIndex;
+      });
+      if (newlyAdded.isNotEmpty) {
+        _prefetchChapters(newlyAdded);
+      }
     }
     final snapshot = _continuousSnapshotForChapter(_chapterIndex);
     final updated = _recordCurrentChapterPosition(snapshot);
@@ -979,13 +1210,16 @@ class _ReaderScreenState extends State<ReaderScreen>
       return _lastScrollSnapshot;
     }
     final viewport = _scrollController.position.viewportDimension;
+    final rawLocal = _scrollController.offset - start;
     final readableExtent = math.max(0.0, extent - viewport);
-    final localOffset = (_scrollController.offset - start)
-        .clamp(0.0, readableExtent)
+    final localOffset = rawLocal
+        .clamp(0.0, math.max(0.0, extent - 1.0))
         .toDouble();
     return ScrollSnapshot(
       offset: localOffset,
-      progress: readableExtent > 0 ? localOffset / readableExtent : 0,
+      progress: readableExtent > 0
+          ? (rawLocal / readableExtent).clamp(0.0, 1.0).toDouble()
+          : 0,
     );
   }
 
@@ -1005,6 +1239,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _hideStatusBarTimer?.cancel();
     _saveTimer?.cancel();
     _settingsApplyTimer?.cancel();
+    _reloadingGuardTimer?.cancel();
     if (!_closingReader) unawaited(_saveProgress());
     _discardPageTurnSnapshot();
     _discardReversePageTurnSnapshot();
@@ -1189,10 +1424,17 @@ class _ReaderScreenState extends State<ReaderScreen>
         current.fontWeight != next.fontWeight ||
         current.fontFamily != next.fontFamily ||
         current.importedFontFamily != next.importedFontFamily ||
+        current.importedFontPath != next.importedFontPath ||
         current.pageMargin != next.pageMargin ||
         current.paragraphSpacing != next.paragraphSpacing ||
         current.readingMode != next.readingMode;
   }
+
+  double _visualTopInsetForMode(ReaderReadingMode mode) => switch (mode) {
+    ReaderReadingMode.simulation => 0.0,
+    ReaderReadingMode.chapter ||
+    ReaderReadingMode.continuous => _readerViewPadding.top + AppSpacing.lg,
+  };
 
   /// [topBias] shifts the probe down the page before the anchor is resolved.
   /// The reader almost always clips its first line, so passing half a line lets
@@ -1204,6 +1446,14 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_readerViewportWidth <= 0 || _book.chapters.isEmpty) return null;
     final paragraphs = _paragraphsFor(_currentChapter);
     if (paragraphs.isEmpty) return null;
+    if (topBias == 0 && snapshot.offset <= 0.5) {
+      return ReadingTextAnchor(
+        chapterIndex: _chapterIndex,
+        paragraphIndex: 0,
+        characterOffset: 0,
+        isChapterTop: true,
+      );
+    }
     final settings = _settings;
     final width = math.max(
       1.0,
@@ -1215,20 +1465,36 @@ class _ReaderScreenState extends State<ReaderScreen>
       mode: settings.readingMode,
       width: width,
     );
+    final visualY =
+        snapshot.offset + _visualTopInsetForMode(settings.readingMode) + topBias;
+    if (topBias == 0 && visualY < bodyStart) {
+      return ReadingTextAnchor(
+        chapterIndex: _chapterIndex,
+        paragraphIndex: 0,
+        characterOffset: 0,
+        isChapterTop: true,
+      );
+    }
     if (_currentChapter.hasRichEpubContent) {
       return _captureRichEpubTextAnchor(
         chapter: _currentChapter,
-        bodyOffset: snapshot.offset - bodyStart + topBias,
+        bodyOffset: visualY - bodyStart,
         settings: settings,
         mode: settings.readingMode,
         width: width,
       );
     }
-    final bodyY = math.max(0.0, snapshot.offset - bodyStart + topBias);
+    final bodyY = math.max(0.0, visualY - bodyStart);
+    final simulation = settings.readingMode == ReaderReadingMode.simulation;
+    final lineExtent = _resolvedSimulationOrNaturalLineExtent(
+      settings,
+      settings.readingMode,
+    );
     final paragraphGap =
         settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
-        ? _resolvedSimulationOrNaturalLineExtent(settings, settings.readingMode)
+        ? lineExtent
         : 0.0;
+    const boundaryEpsilon = 0.5;
     var cursor = 0.0;
     for (var index = 0; index < paragraphs.length; index++) {
       final paragraph = paragraphs[index];
@@ -1239,21 +1505,47 @@ class _ReaderScreenState extends State<ReaderScreen>
         width: width,
       );
       try {
-        if (bodyY <= cursor + painter.height ||
-            index == paragraphs.length - 1) {
-          final localY = (bodyY - cursor)
+        final paragraphHeight = simulation
+            ? painter.computeLineMetrics().length * lineExtent
+            : painter.height;
+        if (index < paragraphs.length - 1 &&
+            bodyY >= cursor + paragraphHeight - boundaryEpsilon) {
+          if (bodyY <
+              cursor + paragraphHeight + paragraphGap - boundaryEpsilon) {
+            return ReadingTextAnchor(
+              chapterIndex: _chapterIndex,
+              paragraphIndex: index + 1,
+              characterOffset: 0,
+            );
+          }
+          cursor += paragraphHeight + paragraphGap;
+          continue;
+        }
+        final double probeY;
+        if (painter.height <= 0) {
+          probeY = 0;
+        } else if (simulation && lineExtent > 0) {
+          final lineCount = math.max(1, painter.computeLineMetrics().length);
+          final targetLine = (((bodyY - cursor) + boundaryEpsilon) / lineExtent)
+              .floor()
+              .clamp(0, lineCount - 1);
+          probeY = ((targetLine + 0.5) * lineExtent)
               .clamp(0.0, math.max(0.0, painter.height - 0.01))
               .toDouble();
-          final position = painter.height <= 0
-              ? 0
-              : painter.getPositionForOffset(Offset(0, localY)).offset;
-          return ReadingTextAnchor(
-            chapterIndex: _chapterIndex,
-            paragraphIndex: index,
-            characterOffset: position.clamp(0, paragraph.length),
-          );
+        } else {
+          final rawLocalY = math.max(0.0, bodyY - cursor);
+          probeY = (rawLocalY + math.min(lineExtent * 0.25, 4.0))
+              .clamp(0.0, math.max(0.0, painter.height - 0.01))
+              .toDouble();
         }
-        cursor += painter.height + paragraphGap;
+        final position = painter.height <= 0
+            ? 0
+            : painter.getPositionForOffset(Offset(0, probeY)).offset;
+        return ReadingTextAnchor(
+          chapterIndex: _chapterIndex,
+          paragraphIndex: index,
+          characterOffset: position.clamp(0, paragraph.length),
+        );
       } finally {
         painter.dispose();
       }
@@ -1277,12 +1569,19 @@ class _ReaderScreenState extends State<ReaderScreen>
         !maxExtent.isFinite) {
       return null;
     }
+    if (anchor.isChapterTop) return 0;
     final chapter = _book.chapters[anchor.chapterIndex];
     final paragraphs = _paragraphsFor(chapter);
     if (paragraphs.isEmpty) return 0;
     final width = math.max(
       1.0,
       _readerViewportWidth - settings.pageMargin.horizontalPadding * 2,
+    );
+    final bodyStart = _bodyStartOffset(
+      chapter,
+      settings: settings,
+      mode: mode,
+      width: width,
     );
     if (chapter.hasRichEpubContent) {
       final bodyOffset = _richEpubOffsetForAnchor(
@@ -1292,17 +1591,10 @@ class _ReaderScreenState extends State<ReaderScreen>
         mode: mode,
         width: width,
       );
-      final rawOffset =
-          _bodyStartOffset(
-            chapter,
-            settings: settings,
-            mode: mode,
-            width: width,
-          ) +
-          bodyOffset;
+      final contentY = bodyStart + bodyOffset;
       if (mode == ReaderReadingMode.simulation && viewportDimension > 0) {
         final pageOffset =
-            ((rawOffset + 0.01) / viewportDimension).floor() *
+            ((contentY + 0.01) / viewportDimension).floor() *
             viewportDimension;
         return _alignSimulationOffset(
           pageOffset,
@@ -1310,12 +1602,15 @@ class _ReaderScreenState extends State<ReaderScreen>
           maxExtent: maxExtent,
         );
       }
+      final rawOffset = contentY - _visualTopInsetForMode(mode);
       return rawOffset.clamp(0.0, maxExtent).toDouble();
     }
     final targetIndex = anchor.paragraphIndex.clamp(0, paragraphs.length - 1);
+    final simulation = mode == ReaderReadingMode.simulation;
+    final lineExtent = _resolvedSimulationOrNaturalLineExtent(settings, mode);
     final paragraphGap =
         settings.paragraphSpacing == ReaderParagraphSpacing.blankLine
-        ? _resolvedSimulationOrNaturalLineExtent(settings, mode)
+        ? lineExtent
         : 0.0;
     var bodyOffset = 0.0;
     for (var index = 0; index <= targetIndex; index++) {
@@ -1334,31 +1629,33 @@ class _ReaderScreenState extends State<ReaderScreen>
             ),
             Rect.zero,
           );
-          bodyOffset += caretOffset.dy;
+          if (simulation && lineExtent > 0) {
+            final lineIndex = ((caretOffset.dy + 0.01) / lineExtent).floor();
+            bodyOffset += lineIndex * lineExtent;
+          } else {
+            bodyOffset += caretOffset.dy;
+          }
         } else {
-          bodyOffset += painter.height + paragraphGap;
+          final paragraphHeight = simulation
+              ? painter.computeLineMetrics().length * lineExtent
+              : painter.height;
+          bodyOffset += paragraphHeight + paragraphGap;
         }
       } finally {
         painter.dispose();
       }
     }
-    final rawOffset =
-        _bodyStartOffset(
-          chapter,
-          settings: settings,
-          mode: mode,
-          width: width,
-        ) +
-        bodyOffset;
+    final contentY = bodyStart + bodyOffset;
     if (mode == ReaderReadingMode.simulation && viewportDimension > 0) {
       final pageOffset =
-          ((rawOffset + 0.01) / viewportDimension).floor() * viewportDimension;
+          ((contentY + 0.01) / viewportDimension).floor() * viewportDimension;
       return _alignSimulationOffset(
         pageOffset,
         pageExtent: viewportDimension,
         maxExtent: maxExtent,
       );
     }
+    final rawOffset = contentY - _visualTopInsetForMode(mode);
     return rawOffset.clamp(0.0, maxExtent).toDouble();
   }
 
@@ -1371,7 +1668,12 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   double _resolvedSimulationLineExtent(ReaderSettings settings) =>
       _layoutCache.lineExtent(
-        SimulationLayoutSignature(contentWidth: 0, settings: settings),
+        SimulationLayoutSignature(
+          contentWidth: 0,
+          settings: settings,
+          mode: ReaderReadingMode.simulation,
+          locale: _readerLocale,
+        ),
         () => _measureSimulationLineExtent(settings),
       );
 
@@ -1390,6 +1692,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       ),
       textDirection: TextDirection.ltr,
       textScaler: _readerTextScaler,
+      locale: _readerLocale,
       strutStyle: StrutStyle(
         fontFamily: settings.effectiveFontFamily,
         fontSize: settings.fontSize,
@@ -1428,12 +1731,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       ReaderReadingMode.simulation => 0.0,
       ReaderReadingMode.chapter => _readerViewPadding.top + AppSpacing.lg,
       ReaderReadingMode.continuous =>
-        _continuousAnchorChapterIndex >= 0 &&
-                _continuousAnchorChapterIndex < _book.chapters.length &&
-                identical(
-                  chapter,
-                  _book.chapters[_continuousAnchorChapterIndex],
-                )
+        chapter.index == _continuousAnchorChapterIndex
             ? _readerViewPadding.top + AppSpacing.lg
             : AppSpacing.xxl,
     };
@@ -1460,6 +1758,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       ),
       textDirection: TextDirection.ltr,
       textScaler: _readerTextScaler,
+      locale: _readerLocale,
       strutStyle: titleStrut,
     )..layout(maxWidth: width);
     try {
@@ -1501,6 +1800,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       ),
       textDirection: TextDirection.ltr,
       textScaler: _readerTextScaler,
+      locale: _readerLocale,
       strutStyle: simulation
           ? StrutStyle(
               fontFamily: settings.effectiveFontFamily,
@@ -1513,6 +1813,38 @@ class _ReaderScreenState extends State<ReaderScreen>
     )..layout(maxWidth: width);
   }
 
+  double _epubAnchorProbeY(
+    TextPainter painter,
+    double rawLocalY, {
+    required bool simulation,
+    required double naturalLineExtent,
+  }) {
+    if (painter.height <= 0) return 0;
+    const boundaryEpsilon = 0.5;
+    if (simulation) {
+      final metrics = painter.computeLineMetrics();
+      if (metrics.isNotEmpty) {
+        var lineTop = 0.0;
+        for (final line in metrics) {
+          final lineHeight = line.height > 0 ? line.height : naturalLineExtent;
+          final lineBottom = lineTop + lineHeight;
+          if (lineBottom > rawLocalY + boundaryEpsilon) {
+            return (lineTop + lineHeight * 0.5)
+                .clamp(0.0, math.max(0.0, painter.height - 0.01))
+                .toDouble();
+          }
+          lineTop = lineBottom;
+        }
+        final last = metrics.last;
+        final lastHeight = last.height > 0 ? last.height : naturalLineExtent;
+        return math.max(0.0, painter.height - lastHeight * 0.5);
+      }
+    }
+    return (rawLocalY + math.min(naturalLineExtent * 0.25, 4.0))
+        .clamp(0.0, math.max(0.0, painter.height - 0.01))
+        .toDouble();
+  }
+
   ReadingTextAnchor _captureRichEpubTextAnchor({
     required Chapter chapter,
     required double bodyOffset,
@@ -1520,19 +1852,34 @@ class _ReaderScreenState extends State<ReaderScreen>
     required ReaderReadingMode mode,
     required double width,
   }) {
+    const boundaryEpsilon = 0.5;
     final safeOffset = math.max(0.0, bodyOffset);
+    final simulation = mode == ReaderReadingMode.simulation;
+    final naturalLineExtent = _resolvedSimulationOrNaturalLineExtent(
+      settings,
+      mode,
+    );
+    var lastTextBlockIndex = -1;
+    for (var i = 0; i < chapter.epubBlocks.length; i++) {
+      final candidate = chapter.epubBlocks[i];
+      if (candidate.isText && candidate.text.trim().isNotEmpty) {
+        lastTextBlockIndex = i;
+      }
+    }
     var cursor = 0.0;
     var paragraphIndex = 0;
     var lastParagraphIndex = 0;
-    for (final block in chapter.epubBlocks) {
-      final extent = _epubLayout.blockExtent(
+    for (var blockIdx = 0; blockIdx < chapter.epubBlocks.length; blockIdx++) {
+      final block = chapter.epubBlocks[blockIdx];
+      final metrics = _epubLayout.blockMetrics(
         block,
         settings: settings,
         mode: mode,
         width: width,
       );
+      final extent = metrics.total;
       if (!block.isText || block.text.trim().isEmpty) {
-        if (safeOffset < cursor + extent) {
+        if (safeOffset < cursor + extent - boundaryEpsilon) {
           return ReadingTextAnchor(
             chapterIndex: chapter.index,
             paragraphIndex: lastParagraphIndex,
@@ -1543,13 +1890,11 @@ class _ReaderScreenState extends State<ReaderScreen>
         continue;
       }
       lastParagraphIndex = paragraphIndex;
-      if (safeOffset < cursor + extent) {
-        final metrics = _epubLayout.blockMetrics(
-          block,
-          settings: settings,
-          mode: mode,
-          width: width,
-        );
+      if (safeOffset < cursor + extent - boundaryEpsilon ||
+          blockIdx == lastTextBlockIndex) {
+        final innerPadTop = _epubLayout.blockInnerPadding(block).top;
+        final textTop = cursor + metrics.leading + innerPadTop;
+        final rawLocalY = safeOffset - textTop;
         final row = _epubLayout.layoutTableRow(
           block,
           settings: settings,
@@ -1561,13 +1906,29 @@ class _ReaderScreenState extends State<ReaderScreen>
           // position is the left cell's line under the viewport's top edge;
           // offsets past its end clamp to its last line.
           try {
-            final localY = (safeOffset - cursor - metrics.leading)
-                .clamp(0.0, math.max(0.0, row.contentHeight - 0.01))
-                .toDouble();
+            final contentBottom = textTop + row.contentHeight;
+            if (blockIdx < lastTextBlockIndex &&
+                safeOffset >= contentBottom - boundaryEpsilon) {
+              return ReadingTextAnchor(
+                chapterIndex: chapter.index,
+                paragraphIndex: paragraphIndex + 1,
+                characterOffset: 0,
+              );
+            }
+            if (rawLocalY <= boundaryEpsilon) {
+              return ReadingTextAnchor(
+                chapterIndex: chapter.index,
+                paragraphIndex: paragraphIndex,
+                characterOffset: 0,
+              );
+            }
             final leftHeight = row.leftPainter.height;
-            final leftY = localY
-                .clamp(0.0, math.max(0.0, leftHeight - 0.01))
-                .toDouble();
+            final leftY = _epubAnchorProbeY(
+              row.leftPainter,
+              rawLocalY,
+              simulation: simulation,
+              naturalLineExtent: naturalLineExtent,
+            );
             final leftOffset = leftHeight <= 0
                 ? 0
                 : row.leftPainter.getPositionForOffset(Offset(0, leftY)).offset;
@@ -1587,12 +1948,31 @@ class _ReaderScreenState extends State<ReaderScreen>
           width: width,
         );
         try {
-          final localY = (safeOffset - cursor - metrics.leading)
-              .clamp(0.0, math.max(0.0, painter.height - 0.01))
-              .toDouble();
-          final position = painter
-              .getPositionForOffset(Offset(0, localY))
-              .offset;
+          final contentBottom = textTop + painter.height;
+          if (blockIdx < lastTextBlockIndex &&
+              safeOffset >= contentBottom - boundaryEpsilon) {
+            return ReadingTextAnchor(
+              chapterIndex: chapter.index,
+              paragraphIndex: paragraphIndex + 1,
+              characterOffset: 0,
+            );
+          }
+          if (rawLocalY <= boundaryEpsilon) {
+            return ReadingTextAnchor(
+              chapterIndex: chapter.index,
+              paragraphIndex: paragraphIndex,
+              characterOffset: 0,
+            );
+          }
+          final probeY = _epubAnchorProbeY(
+            painter,
+            rawLocalY,
+            simulation: simulation,
+            naturalLineExtent: naturalLineExtent,
+          );
+          final position = painter.height <= 0
+              ? 0
+              : painter.getPositionForOffset(Offset(0, probeY)).offset;
           return ReadingTextAnchor(
             chapterIndex: chapter.index,
             paragraphIndex: paragraphIndex,
@@ -1634,6 +2014,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       );
       if (block.isText && block.text.trim().isNotEmpty) {
         if (paragraphIndex == anchor.paragraphIndex) {
+          final innerPadTop = _epubLayout.blockInnerPadding(block).top;
           final row = _epubLayout.layoutTableRow(
             block,
             settings: settings,
@@ -1647,6 +2028,7 @@ class _ReaderScreenState extends State<ReaderScreen>
               final paragraph = _epubLayout.formatParagraph(block);
               return cursor +
                   metrics.leading +
+                  innerPadTop +
                   row.caretDyForOffset(
                     anchor.characterOffset.clamp(0, paragraph.length),
                   );
@@ -1668,7 +2050,7 @@ class _ReaderScreenState extends State<ReaderScreen>
               ),
               Rect.zero,
             );
-            return cursor + metrics.leading + caret.dy;
+            return cursor + metrics.leading + innerPadTop + caret.dy;
           } finally {
             painter.dispose();
           }
@@ -1758,11 +2140,12 @@ class _ReaderScreenState extends State<ReaderScreen>
       );
       return AnnotatedRegion<SystemUiOverlayStyle>(
         value: AppTheme.systemUiOverlayStyle(themeColors),
-        child: content,
+        child: AppOverlayTheme(colors: themeColors, child: content),
       );
     }
 
     final fontFamily = _settings.effectiveFontFamily;
+    _readerLocale = Localizations.maybeLocaleOf(context);
     final viewPadding = MediaQuery.viewPaddingOf(context);
     final contentInsets = _windowController.contentInsets(viewPadding);
     final chromeInsets = _windowController.chromeInsets(viewPadding);
@@ -1795,9 +2178,20 @@ class _ReaderScreenState extends State<ReaderScreen>
             Positioned.fill(child: ColoredBox(color: themeColors.background)),
 
             // ── Reading content ─────────────────────
-            NotificationListener<ScrollEndNotification>(
-              onNotification: (_) {
-                if (_showOverlay) _scheduleChromeAlignment();
+            NotificationListener<ScrollNotification>(
+              onNotification: (notification) {
+                if (notification is ScrollStartNotification &&
+                    notification.dragDetails != null) {
+                  _pinnedReadingAnchor = null;
+                } else if (notification is UserScrollNotification &&
+                    notification.direction != ScrollDirection.idle) {
+                  _pinnedReadingAnchor = null;
+                } else if (notification is ScrollEndNotification) {
+                  if (_showOverlay) _scheduleChromeAlignment();
+                  if (_settings.readingMode == ReaderReadingMode.continuous) {
+                    _scheduleContinuousIdleRecenter();
+                  }
+                }
                 return false;
               },
               child: LayoutBuilder(
@@ -1871,9 +2265,10 @@ class _ReaderScreenState extends State<ReaderScreen>
                               child: ClipRect(
                                 key: _readingSurfaceKey,
                                 child: MediaQuery(
-                                  data: MediaQuery.of(
-                                    context,
-                                  ).copyWith(textScaler: TextScaler.noScaling),
+                                  data: MediaQuery.of(context).copyWith(
+                                    textScaler: TextScaler.noScaling,
+                                    boldText: false,
+                                  ),
                                   child: _buildReadingModeView(
                                     width: width,
                                     height: readerHeight,

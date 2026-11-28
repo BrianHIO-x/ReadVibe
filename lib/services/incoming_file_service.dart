@@ -70,9 +70,10 @@ class IncomingFileService {
               'consumeNext',
             );
           } on PlatformException catch (error, stackTrace) {
+            _report(error.message, error, stackTrace);
+            if (error.code == 'INCOMING_FILE_FAILED') continue;
             // The native queue itself is unreachable. Stop draining, and let
             // the next 'available' notification start a fresh attempt.
-            _report(error.message, error, stackTrace);
             break;
           }
           if (raw == null) break;

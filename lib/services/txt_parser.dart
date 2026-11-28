@@ -19,10 +19,11 @@ final _txtLineBreakPattern = RegExp(r'\r\n?|\n|\u000B|\f|\u0085|\u2028|\u2029');
 final _commonChineseRunes =
     '的一是不了人我在有他這这為为個个們们來来時时說说書书閱讀读第章回卷內容内容簡介简介正文繁體体中文華华與与'.runes.toSet();
 
-// A line such as "第一卷载官股——皇室内帑、户部出资。" is ordinary prose, not a
-// chapter heading. Chinese headings may end in ! or ?, but a full stop, comma,
-// or semicolon is a strong prose signal. Closing quotation marks are allowed.
-final _proseEndingPattern = RegExp(r'[。，；,;][”’」』）)]*$');
+// A line such as "第一卷载官股——皇室内帑、户部出资。" or "Partly because she fell."
+// is ordinary prose, not a chapter heading.
+final _proseEndingPattern = RegExp(
+  r'''(?:[。，；,;]|(?<![0-9０-９IVXLCDM])\.)[”’」』）)"']*$''',
+);
 
 final _markdownHeadingPrefix = RegExp(r'^(?:#{1,6}|＃{1,6})[ \t　]*(.+)$');
 final _markdownHeadingSuffix = RegExp(r'[ \t　]+(?:#{1,6}|＃{1,6})[ \t　]*$');
@@ -31,19 +32,24 @@ final _markdownHeadingSuffix = RegExp(r'[ \t　]+(?:#{1,6}|＃{1,6})[ \t　]*$')
 /// been removed. This supports both ordinary TXT novels and Markdown-exported
 /// text without treating an arbitrary `# heading` as a novel chapter.
 final _chapterPatterns = [
-  RegExp(r'^第[一二两三四五六七八九十百千万零〇０-９0-9]+[章回节卷集部篇]'),
-  RegExp(r'^卷[一二两三四五六七八九十百千万零〇０-９0-9]+'),
-  RegExp(r'^(?:Chapter|Part)\s*[0-9０-９IVXLCDM]+', caseSensitive: false),
+  RegExp(r'^第[一二两兩三四五六七八九十百千万萬零〇０-９0-9]+[章回节節卷集部篇]'),
   RegExp(
-    r'^(?:内容简介|作品简介|书籍简介|作者简介|编辑推荐|内容提要|出版说明|简介|序言|序章|楔子|引子|前言|后记|尾声|附录)(?:$|[\s　:：—（(【\[-])',
+    r'^卷[一二两兩三四五六七八九十百千万萬零〇０-９0-9]+(?:$|[\s　:：—–\-（(【\[])',
   ),
   RegExp(
-    r'^番外(?:第?[一二两三四五六七八九十百千万零〇０-９0-9]+[章节篇]?|[一二两三四五六七八九十百千万零〇０-９0-9]+)?',
+    r'^(?:Chapter|Part)\s+(?:[0-9０-９]+|(?:M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})))(?:$|[\s　:：.．—–\-（(【\[])',
+    caseSensitive: false,
+  ),
+  RegExp(
+    r'^(?:内容简介|內容簡介|作品简介|作品簡介|书籍简介|書籍簡介|作者简介|作者簡介|编辑推荐|編輯推薦|内容提要|內容提要|出版说明|出版說明|简介|簡介|序言|序章|楔子|引子|前言|后记|後記|尾声|尾聲|附录|附錄|导读|導讀)(?:$|[\s　:：—（(【\[-])',
+  ),
+  RegExp(
+    r'^番外(?:$|[\s　:：—（(【\[-]|第?[一二两兩三四五六七八九十百千万萬零〇０-９0-9]+[章节節篇]?(?:$|[\s　:：—（(【\[]))',
   ),
 ];
 
-/// Encodings a plain text file is read as once its bytes rule out UTF-8.
-enum _TxtEncoding { utf8, gbk, big5, utf16le, utf16be }
+/// Encodings a plain text file is read as once its bytes rule out strict UTF-8.
+enum _TxtEncoding { utf8, gbk, big5, windows1252, utf16le, utf16be }
 
 // An encoding is recognizable from the opening pages, so only this many bytes
 // are decoded once per candidate before the winner reads the whole file.
@@ -94,7 +100,8 @@ Book buildBookFromText({
 }) {
   final normalized = content
       .replaceAll('\u0000', '')
-      .replaceAll('\u0007', '\n');
+      .replaceAll('\u0007', '\n')
+      .replaceAll(RegExp(r'[\u0001\u0008\u0013\u0014\u0015]'), '');
   if (normalized.trim().isEmpty) {
     throw FormatException('${format.name.toUpperCase()} 文件没有可阅读的正文');
   }
@@ -238,14 +245,15 @@ String decodeTxtBytes(List<int> bytes) {
   final probe = payload.length <= _encodingProbeBytes
       ? payload
       : payload.sublist(0, _encodingProbeBytes);
-  final encodings = _legacyChineseEncodings(payload, hasUtf8: utf8Text != null);
+  final encodings = _candidateEncodings(probe);
   if (encodings.isEmpty) return utf8.decode(payload, allowMalformed: true);
   var best = encodings.first;
   int? bestScore;
   for (final encoding in encodings) {
-    final text = _decodeWith(encoding, probe);
+    final alignedProbe = _alignedProbeSlice(probe, encoding);
+    final text = _decodeWith(encoding, alignedProbe);
     if (text == null) continue;
-    final score = _legacyChineseScore(text);
+    final score = _readabilityScore(text);
     if (bestScore == null || score > bestScore) {
       best = encoding;
       bestScore = score;
@@ -255,23 +263,115 @@ String decodeTxtBytes(List<int> bytes) {
       utf8.decode(payload, allowMalformed: true);
 }
 
-/// Encodings worth considering for [payload], in the order they are tried.
-///
-/// A Chinese UTF-16 file without a BOM has no NUL bytes to give it away, so it
-/// cannot be told apart from GBK by inspection. Both readings are offered and
-/// the scorer picks whichever one actually looks like Chinese prose.
-List<_TxtEncoding> _legacyChineseEncodings(
-  List<int> payload, {
-  required bool hasUtf8,
-}) => <_TxtEncoding>[
-  if (hasUtf8) _TxtEncoding.utf8,
-  _TxtEncoding.gbk,
-  _TxtEncoding.big5,
-  if (payload.length >= 4 && payload.length.isEven) ...<_TxtEncoding>[
-    _TxtEncoding.utf16le,
-    _TxtEncoding.utf16be,
-  ],
-];
+List<_TxtEncoding> _candidateEncodings(List<int> probe) {
+  final asciiDominant = _isAsciiDominant(probe);
+  return <_TxtEncoding>[
+    _TxtEncoding.utf8,
+    _TxtEncoding.gbk,
+    _TxtEncoding.big5,
+    _TxtEncoding.windows1252,
+    if (!asciiDominant && probe.length >= 4 && probe.length.isEven) ...<_TxtEncoding>[
+      _TxtEncoding.utf16le,
+      _TxtEncoding.utf16be,
+    ],
+  ];
+}
+
+List<int> _alignedProbeSlice(List<int> probe, _TxtEncoding encoding) {
+  if (probe.isEmpty) return probe;
+  switch (encoding) {
+    case _TxtEncoding.utf8:
+      var end = probe.length;
+      var cont = 0;
+      while (end > 0 && cont < 3 && (probe[end - 1] & 0xC0) == 0x80) {
+        end--;
+        cont++;
+      }
+      if (end > 0 && (probe[end - 1] & 0x80) != 0 && (probe[end - 1] & 0xC0) != 0x80) {
+        final lead = probe[end - 1];
+        final need = (lead & 0xE0) == 0xC0
+            ? 2
+            : (lead & 0xF0) == 0xE0
+            ? 3
+            : (lead & 0xF8) == 0xF0
+            ? 4
+            : 1;
+        if (cont + 1 < need) return probe.sublist(0, end - 1);
+      }
+      return probe;
+    case _TxtEncoding.gbk:
+    case _TxtEncoding.big5:
+      var i = 0;
+      while (i < probe.length) {
+        final b = probe[i];
+        if (b >= 0x81 && b <= 0xFE) {
+          if (i + 1 >= probe.length) return probe.sublist(0, i);
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      return probe;
+    case _TxtEncoding.utf16le:
+    case _TxtEncoding.utf16be:
+      return probe.length.isOdd ? probe.sublist(0, probe.length - 1) : probe;
+    case _TxtEncoding.windows1252:
+      return probe;
+  }
+}
+
+bool _isAsciiDominant(List<int> probe) {
+  if (probe.isEmpty) return false;
+  var ascii = 0;
+  for (final byte in probe) {
+    if (byte == 0x09 ||
+        byte == 0x0A ||
+        byte == 0x0D ||
+        (byte >= 0x20 && byte <= 0x7E)) {
+      ascii++;
+    }
+  }
+  return ascii >= probe.length * 0.72;
+}
+
+const _txtWindows1252Map = <int, int>{
+  0x80: 0x20AC,
+  0x82: 0x201A,
+  0x83: 0x0192,
+  0x84: 0x201E,
+  0x85: 0x2026,
+  0x86: 0x2020,
+  0x87: 0x2021,
+  0x88: 0x02C6,
+  0x89: 0x2030,
+  0x8A: 0x0160,
+  0x8B: 0x2039,
+  0x8C: 0x0152,
+  0x8E: 0x017D,
+  0x91: 0x2018,
+  0x92: 0x2019,
+  0x93: 0x201C,
+  0x94: 0x201D,
+  0x95: 0x2022,
+  0x96: 0x2013,
+  0x97: 0x2014,
+  0x98: 0x02DC,
+  0x99: 0x2122,
+  0x9A: 0x0161,
+  0x9B: 0x203A,
+  0x9C: 0x0153,
+  0x9E: 0x017E,
+  0x9F: 0x0178,
+};
+
+String _decodeWindows1252(List<int> bytes) {
+  final units = List<int>.filled(bytes.length, 0);
+  for (var i = 0; i < bytes.length; i++) {
+    final b = bytes[i];
+    units[i] = _txtWindows1252Map[b] ?? b;
+  }
+  return String.fromCharCodes(units);
+}
 
 /// Reads [bytes] as [encoding], or null when that codec rejects them.
 String? _decodeWith(_TxtEncoding encoding, List<int> bytes) {
@@ -280,6 +380,7 @@ String? _decodeWith(_TxtEncoding encoding, List<int> bytes) {
       _TxtEncoding.utf8 => utf8.decode(bytes, allowMalformed: true),
       _TxtEncoding.gbk => const GbkCodec(allowMalformed: true).decode(bytes),
       _TxtEncoding.big5 => _decodeBig5(bytes),
+      _TxtEncoding.windows1252 => _decodeWindows1252(bytes),
       _TxtEncoding.utf16le => _decodeUtf16(bytes, Endian.little),
       _TxtEncoding.utf16be => _decodeUtf16(bytes, Endian.big),
     };
@@ -342,24 +443,47 @@ bool _containsNulByte(List<int> payload) {
   return false;
 }
 
-int _legacyChineseScore(String text) {
+int _readabilityScore(String text) {
   final sample = text.length <= 256 * 1024
       ? text
       : '${text.substring(0, 128 * 1024)}${text.substring(text.length - 128 * 1024)}';
   var score = 0;
+  for (final codeUnit in sample.codeUnits) {
+    if (codeUnit >= 0xD800 && codeUnit <= 0xDFFF) {
+      // Unpaired/raw surrogates are handled separately below via runes check.
+    }
+  }
   for (final rune in sample.runes) {
     if (rune == 0xfffd) {
       score -= 120;
+    } else if (rune >= 0xD800 && rune <= 0xDFFF) {
+      score -= 200;
     } else if ((rune < 0x20 && rune != 0x09 && rune != 0x0a && rune != 0x0d) ||
-        (rune >= 0xe000 && rune <= 0xf8ff)) {
+        (rune >= 0xe000 && rune <= 0xf8ff) ||
+        (rune >= 0x80 && rune <= 0x9f)) {
       score -= 40;
     } else if (rune >= 0x4e00 && rune <= 0x9fff) {
-      score += 2;
-      if (_commonChineseRunes.contains(rune)) score += 3;
+      score += _commonChineseRunes.contains(rune) ? 5 : 2;
     } else if (rune == 0x3002 ||
         rune == 0xff0c ||
         rune == 0xff1a ||
         rune == 0x3001) {
+      score += 2;
+    } else if ((rune >= 0x41 && rune <= 0x5a) ||
+        (rune >= 0x61 && rune <= 0x7a) ||
+        (rune >= 0x30 && rune <= 0x39) ||
+        rune == 0x20 ||
+        rune == 0x0a ||
+        rune == 0x2c ||
+        rune == 0x2e ||
+        rune == 0x2018 ||
+        rune == 0x2019 ||
+        rune == 0x201c ||
+        rune == 0x201d ||
+        rune == 0x2013 ||
+        rune == 0x2014 ||
+        rune == 0x2026 ||
+        (rune >= 0xc0 && rune <= 0xff && rune != 0xd7 && rune != 0xf7)) {
       score += 2;
     }
   }
@@ -492,10 +616,11 @@ List<Chapter> extractTxtChapters(List<String> lines) {
 }
 
 String _canonicalizeChapterMarker(String marker) {
-  final numbered = RegExp(r'^第(.+)([章回节卷集部篇])$').firstMatch(marker);
+  final numbered = RegExp(r'^第(.+)([章回节節卷集部篇])$').firstMatch(marker);
   if (numbered != null) {
     final number = _chapterNumberValue(numbered.group(1)!);
-    if (number != null) return '第$number${numbered.group(2)!}';
+    final unit = numbered.group(2)! == '節' ? '节' : numbered.group(2)!;
+    if (number != null) return '第$number$unit';
   }
 
   final volume = RegExp(r'^卷(.+)$').firstMatch(marker);
@@ -534,6 +659,7 @@ int? _chapterNumberValue(String source) {
     '一': 1,
     '二': 2,
     '两': 2,
+    '兩': 2,
     '三': 3,
     '四': 4,
     '五': 5,
@@ -543,7 +669,7 @@ int? _chapterNumberValue(String source) {
     '九': 9,
   };
   const units = {'十': 10, '百': 100, '千': 1000};
-  final hasUnit = source.contains(RegExp(r'[十百千万]'));
+  final hasUnit = source.contains(RegExp(r'[十百千万萬]'));
   if (!hasUnit) {
     final result = StringBuffer();
     for (final character in source.split('')) {
@@ -565,7 +691,7 @@ int? _chapterNumberValue(String source) {
       sawNumber = true;
       continue;
     }
-    if (character == '万') {
+    if (character == '万' || character == '萬') {
       section = (section + number) * 10000;
       total += section;
       section = 0;

@@ -196,16 +196,11 @@ _ParsedDocument _documentToBlocks(
     return appendImageSource(image, rawSource, inheritedStyle);
   }
 
-  void appendDirectText(String rawText, EpubContentStyle inheritedStyle) {
-    if (rawText.trim().isEmpty) return;
-    final blockStyle = _normalizeBlockStyle(
-      inheritedStyle,
-      tag: null,
-      isHeading: false,
-    );
-    final collector = _EpubRunCollector()..add(rawText, inheritedStyle);
-    final collected = collector.finish();
-    if (collected == null) return;
+  void emitCollectedBlock(
+    _CollectedRuns collected,
+    EpubContentStyle blockStyle, {
+    required bool isHeading,
+  }) {
     final compact = _compactRuns(collected.runs, blockStyle);
     final hrefs = <int, String>{};
     for (var index = 0; index < compact.length; index++) {
@@ -221,10 +216,108 @@ _ParsedDocument _documentToBlocks(
           for (final run in compact)
             EpubTextRun(text: run.text, style: run.style),
         ]),
+        isHeading: isHeading,
         style: blockStyle,
         anchorIds: drainAnchorIds(),
       ),
     );
+  }
+
+  void collectInlineNode(
+    Node node,
+    EpubContentStyle style,
+    String? href, {
+    required _EpubRunCollector Function() currentCollector,
+    required void Function() flushText,
+    bool preserveWhitespace = false,
+    bool rubyHasRp = false,
+  }) {
+    if (node is Text) {
+      currentCollector().add(
+        node.data,
+        style,
+        href: href,
+        preserveWhitespace: preserveWhitespace,
+      );
+      return;
+    }
+    if (node is! Element || resolver.isHidden(node)) return;
+    final tag = node.localName;
+    if (_nonContentElements.contains(tag)) return;
+    if (tag == 'img' || tag == 'image') {
+      // Flush first: an anchor on the image belongs to the image block, not
+      // to the text that happens to precede it.
+      flushText();
+      noteAnchorId(node);
+      appendImage(node, style);
+      return;
+    }
+    if (tag == 'object' || tag == 'embed') {
+      final rawSource = tag == 'object'
+          ? _htmlAttribute(node, 'data')
+          : _htmlAttribute(node, 'src');
+      if (rawSource != null && rawSource.trim().isNotEmpty) {
+        flushText();
+        noteAnchorId(node);
+        if (appendImageSource(node, rawSource, style)) return;
+      }
+    }
+    noteAnchorId(node);
+    if (tag == 'br') {
+      currentCollector().addHardBreak(style, href: href);
+      return;
+    }
+    if (tag == 'hr') {
+      currentCollector().add(' ', style, href: href);
+      return;
+    }
+    // An anchor nested inside another anchor is malformed markup; the
+    // innermost href wins, matching how browsers resolve the same document.
+    final childHref = tag == 'a'
+        ? (resolveLinkHref(node.attributes['href'] ?? '') ?? href)
+        : href;
+    final childStyle = _normalizeInlineStyle(
+      resolver.styleFor(node, inherited: style),
+      inherited: style,
+    );
+    final childPreserve = preserveWhitespace || tag == 'pre';
+    final childRubyHasRp = tag == 'ruby'
+        ? node.querySelector('rp') != null
+        : rubyHasRp;
+    final wrapRt =
+        (tag == 'rt' || tag == 'rtc') &&
+        !rubyHasRp &&
+        node.text.trim().isNotEmpty;
+    if (wrapRt) {
+      currentCollector().add('（', childStyle, href: childHref);
+    }
+    for (final child in node.nodes) {
+      collectInlineNode(
+        child,
+        childStyle,
+        childHref,
+        currentCollector: currentCollector,
+        flushText: flushText,
+        preserveWhitespace: childPreserve,
+        rubyHasRp: childRubyHasRp,
+      );
+    }
+    if (wrapRt) {
+      currentCollector().add('）', childStyle, href: childHref);
+    }
+  }
+
+  void appendDirectText(String rawText, EpubContentStyle inheritedStyle) {
+    if (rawText.trim().isEmpty) return;
+    final blockStyle = _normalizeBlockStyle(
+      inheritedStyle,
+      tag: null,
+      isHeading: false,
+    );
+    final collector = _EpubRunCollector()..add(rawText, inheritedStyle);
+    final collected = collector.finish();
+    if (collected == null) return;
+    emitCollectedBlock(collected, blockStyle, isHeading: false);
   }
 
   void appendLeaf(Element element, EpubContentStyle inheritedStyle) {
@@ -242,76 +335,19 @@ _ParsedDocument _documentToBlocks(
       final collected = collector.finish();
       collector = _EpubRunCollector();
       if (collected == null) return;
-      final compact = _compactRuns(collected.runs, blockStyle);
-      final hrefs = <int, String>{};
-      for (var index = 0; index < compact.length; index++) {
-        final href = compact[index].href;
-        if (href != null) hrefs[index] = href;
-      }
-      if (hrefs.isNotEmpty) linkHrefs[blocks.length] = hrefs;
-      blocks.add(
-        EpubContentBlock(
-          kind: EpubContentBlockKind.text,
-          text: collected.text,
-          runs: List<EpubTextRun>.unmodifiable(<EpubTextRun>[
-            for (final run in compact)
-              EpubTextRun(text: run.text, style: run.style),
-          ]),
-          isHeading: isHeading,
-          style: blockStyle,
-          anchorIds: drainAnchorIds(),
-        ),
-      );
+      emitCollectedBlock(collected, blockStyle, isHeading: isHeading);
     }
 
-    void visit(Node node, EpubContentStyle style, String? href) {
-      if (node is Text) {
-        collector.add(node.data, style, href: href);
-        return;
-      }
-      if (node is! Element || resolver.isHidden(node)) return;
-      final tag = node.localName;
-      if (tag == 'script' || tag == 'style' || tag == 'head') return;
-      if (tag == 'img' || tag == 'image') {
-        // Flush first: an anchor on the image belongs to the image block, not
-        // to the text that happens to precede it.
-        flushText();
-        noteAnchorId(node);
-        appendImage(node, style);
-        return;
-      }
-      if (tag == 'object' || tag == 'embed') {
-        final rawSource = tag == 'object'
-            ? _htmlAttribute(node, 'data')
-            : _htmlAttribute(node, 'src');
-        if (rawSource != null && rawSource.trim().isNotEmpty) {
-          flushText();
-          noteAnchorId(node);
-          if (appendImageSource(node, rawSource, style)) return;
-        }
-      }
-      noteAnchorId(node);
-      if (tag == 'br') {
-        collector.addHardBreak(style, href: href);
-      } else if (tag == 'hr') {
-        collector.add(' ', style, href: href);
-      }
-      // An anchor nested inside another anchor is malformed markup; the
-      // innermost href wins, matching how browsers resolve the same document.
-      final childHref = tag == 'a'
-          ? (resolveLinkHref(node.attributes['href'] ?? '') ?? href)
-          : href;
-      final childStyle = _normalizeInlineStyle(
-        resolver.styleFor(node, inherited: style),
-        inherited: style,
-      );
-      for (final child in node.nodes) {
-        visit(child, childStyle, childHref);
-      }
-    }
-
+    final preserve = element.localName == 'pre';
     for (final child in element.nodes) {
-      visit(child, blockStyle, null);
+      collectInlineNode(
+        child,
+        blockStyle,
+        null,
+        currentCollector: () => collector,
+        flushText: flushText,
+        preserveWhitespace: preserve,
+      );
     }
     flushText();
   }
@@ -527,6 +563,7 @@ _ParsedDocument _documentToBlocks(
 
   walk = (Element element, EpubContentStyle inheritedStyle) {
     if (resolver.isHidden(element)) return;
+    if (_nonContentElements.contains(element.localName)) return;
     noteAnchorId(element);
     final style = resolver.styleFor(element, inherited: inheritedStyle);
     if (element.localName == 'table') {
@@ -551,9 +588,7 @@ _ParsedDocument _documentToBlocks(
         return;
       }
     }
-    final containsBlockChild = element.children.any(
-      (child) => _blockElements.contains(child.localName),
-    );
+    final containsBlockChild = _hasDescendantBlock(element);
     // Inline wrappers such as <span> or <b> legitimately hold chapter text in
     // real-world EPUBs. Treating only block tags as leaves silently dropped
     // that text whenever the wrapper sat next to block-level siblings.
@@ -564,15 +599,52 @@ _ParsedDocument _documentToBlocks(
       appendLeaf(element, inheritedStyle);
       return;
     }
+
+    final inlineBlockStyle = _normalizeBlockStyle(
+      style,
+      tag: null,
+      isHeading: false,
+    );
+    var inlineCollector = _EpubRunCollector();
+    void flushInline() {
+      final collected = inlineCollector.finish();
+      inlineCollector = _EpubRunCollector();
+      if (collected == null) return;
+      emitCollectedBlock(collected, inlineBlockStyle, isHeading: false);
+    }
+
     for (final node in element.nodes) {
       if (node is Text) {
-        // Mixed content such as <body>开场<p>中间</p>结尾</body> is valid
-        // HTML. element.children alone would silently drop the direct text.
-        appendDirectText(node.data, style);
+        inlineCollector.add(node.data, inlineBlockStyle);
       } else if (node is Element) {
-        walk(node, style);
+        if (resolver.isHidden(node) ||
+            _nonContentElements.contains(node.localName)) {
+          continue;
+        }
+        final tag = node.localName;
+        final isInlineLeaf =
+            !_blockElements.contains(tag) &&
+            !_transparentContainers.contains(tag) &&
+            tag != 'img' &&
+            tag != 'image' &&
+            tag != 'object' &&
+            tag != 'embed' &&
+            !_hasDescendantBlock(node);
+        if (isInlineLeaf) {
+          collectInlineNode(
+            node,
+            inlineBlockStyle,
+            null,
+            currentCollector: () => inlineCollector,
+            flushText: flushInline,
+          );
+        } else {
+          flushInline();
+          walk(node, style);
+        }
       }
     }
+    flushInline();
   };
 
   walk(root, const EpubContentStyle(textIndentEm: 0));
@@ -632,7 +704,25 @@ const _tableRowComplexElements = <String>{
   'video',
 };
 
-const _nonContentElements = <String>{'head', 'script', 'style', 'title'};
+const _nonContentElements = <String>{
+  'head',
+  'script',
+  'style',
+  'title',
+  'desc',
+  'noscript',
+  'template',
+};
+
+bool _hasDescendantBlock(Element element) {
+  for (final child in element.children) {
+    final tag = child.localName;
+    if (_nonContentElements.contains(tag)) continue;
+    if (_blockElements.contains(tag)) return true;
+    if (_hasDescendantBlock(child)) return true;
+  }
+  return false;
+}
 
 const _mediaElements = <String>{
   'audio',
@@ -806,11 +896,17 @@ const _blockElements = <String>{
   'aside',
   'blockquote',
   'caption',
+  'center',
   'dd',
+  'details',
   'div',
+  'dl',
   'dt',
+  'fieldset',
   'figcaption',
+  'figure',
   'footer',
+  'form',
   'h1',
   'h2',
   'h3',
@@ -818,12 +914,15 @@ const _blockElements = <String>{
   'h5',
   'h6',
   'header',
+  'hr',
   'li',
   'main',
   'nav',
+  'ol',
   'p',
   'pre',
   'section',
+  'summary',
   'table',
   'tbody',
   'td',
@@ -831,6 +930,7 @@ const _blockElements = <String>{
   'th',
   'thead',
   'tr',
+  'ul',
 };
 
 const _headingElements = <String>{'h1', 'h2', 'h3', 'h4', 'h5', 'h6'};
@@ -851,16 +951,25 @@ bool _isSemanticHeading(Element element, EpubContentStyle style) {
   )) {
     return true;
   }
+  final textLen = _normalizeVisibleText(element.text).length;
+  if (textLen == 0 || textLen > 80) return false;
   final identityTokens = <String>{
     element.id.toLowerCase(),
     ...element.classes.map((value) => value.toLowerCase()),
   };
-  final namedAsHeading = identityTokens.any(
+  final excluded = identityTokens.any(
     (value) => RegExp(
-      r'(^|[-_])(chapter[-_]?title|chaptertitle|title|heading|head)([-_]|$)',
+      r'(^|[-_])(sub[-_]?title|subtitle|figure|image|img|caption|table|running|page|foot)([-_]|$)',
     ).hasMatch(value),
   );
-  if (namedAsHeading) return true;
+  if (!excluded) {
+    final namedAsHeading = identityTokens.any(
+      (value) => RegExp(
+        r'^(?:chapter[-_]?title|chaptertitle|title|heading|head|chap[-_]?title|chapter[-_]?head)$',
+      ).hasMatch(value),
+    );
+    if (namedAsHeading) return true;
+  }
   return style.fontScale >= 1.12 &&
       style.fontWeight >= 600 &&
       (style.textIndentEm == 0 || style.textAlign == 'center');
@@ -948,7 +1057,12 @@ EpubContentStyle _normalizeBlockStyle(
     );
   }
   final withoutIndent =
-      tag == 'blockquote' || tag == 'figcaption' || tag == 'li' || tag == 'pre';
+      tag == 'blockquote' ||
+      tag == 'figcaption' ||
+      tag == 'li' ||
+      tag == 'pre' ||
+      tag == 'dt' ||
+      tag == 'dd';
   return EpubContentStyle(
     fontFamily: style.fontFamily,
     fontWeight: 400,
@@ -1063,8 +1177,23 @@ class _EpubRunCollector {
   var _hasText = false;
   var _endsWithSpace = false;
 
-  void add(String rawText, EpubContentStyle style, {String? href}) {
+  void add(
+    String rawText,
+    EpubContentStyle style, {
+    String? href,
+    bool preserveWhitespace = false,
+  }) {
     if (rawText.isEmpty) return;
+    if (preserveWhitespace) {
+      var text = rawText.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+      if (!_hasText) text = text.replaceFirst(RegExp(r'^[ \t\n]+'), '');
+      if (text.isEmpty) return;
+      _runs.add(_RawRun(text, style, href));
+      _hasText = true;
+      _endsWithSpace =
+          text.endsWith(' ') || text.endsWith('\t') || text.endsWith('\n');
+      return;
+    }
     var text = rawText.replaceAll(RegExp(r'\s+'), ' ');
     if (!_hasText) text = text.trimLeft();
     if (_endsWithSpace) text = text.trimLeft();

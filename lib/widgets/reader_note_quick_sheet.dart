@@ -72,12 +72,18 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
     final accentColor = _note.color.swatchColor(isDark);
     final danger = AppOverlayTheme.danger(colors);
 
+    final swatchStroke = colors.background;
+    final buttonFg = accentColor.computeLuminance() > 0.35
+        ? colors.background
+        : Colors.white;
+
     return AppSheetSurface(
       colors: colors,
-      child: SafeArea(
-        top: false,
-        bottom: false,
-        child: Padding(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.88,
+        ),
+        child: SingleChildScrollView(
           padding: EdgeInsets.fromLTRB(
             AppSpacing.xl,
             0,
@@ -211,54 +217,81 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
               Row(
                 children: [
                   for (final color in NoteColor.values) ...[
-                    GestureDetector(
-                      onTap: () => _update(color: color),
-                      child: AnimatedContainer(
-                        duration: AppMotion.quick,
-                        width: 24,
-                        height: 24,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: color.swatchColor(isDark),
-                          border: _note.color == color
-                              ? Border.all(color: Colors.white, width: 2)
-                              : null,
-                          boxShadow: _note.color == color
-                              ? [
-                                  BoxShadow(
-                                    color: color
-                                        .swatchColor(isDark)
-                                        .withValues(alpha: 0.45),
-                                    blurRadius: 5,
-                                  ),
-                                ]
-                              : null,
-                        ),
-                        child: _note.color == color
-                            ? const Icon(
-                                Icons.check_rounded,
-                                size: 13,
-                                color: Colors.white,
-                              )
-                            : null,
-                      ),
+                    Builder(
+                      builder: (_) {
+                        final swatch = color.swatchColor(isDark);
+                        final ink = swatch.computeLuminance() > 0.35
+                            ? swatchStroke
+                            : Colors.white;
+                        return GestureDetector(
+                          onTap: () => _update(color: color),
+                          child: AnimatedContainer(
+                            duration: AppMotion.quick,
+                            width: 24,
+                            height: 24,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: swatch,
+                              border: _note.color == color
+                                  ? Border.all(color: ink, width: 2)
+                                  : null,
+                              boxShadow: _note.color == color
+                                  ? [
+                                      BoxShadow(
+                                        color: swatch.withValues(alpha: 0.45),
+                                        blurRadius: 5,
+                                      ),
+                                    ]
+                                  : null,
+                            ),
+                            child: _note.color == color
+                                ? Icon(
+                                    Icons.check_rounded,
+                                    size: 13,
+                                    color: ink,
+                                  )
+                                : null,
+                          ),
+                        );
+                      },
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                   ],
-                  const Spacer(),
-                  for (final style in NoteStyle.values)
-                    IconButton(
-                      visualDensity: VisualDensity.compact,
-                      tooltip: style.label,
-                      onPressed: () => _update(style: style),
-                      icon: Icon(
-                        style.icon,
-                        size: 19,
-                        color: _note.style == style
-                            ? accentColor
-                            : colors.secondary,
+                  Expanded(
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            for (final style in NoteStyle.values)
+                              IconButton(
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints.tightFor(
+                                  width: 34,
+                                  height: 34,
+                                ),
+                                visualDensity: VisualDensity.compact,
+                                style: AppButtonStyles.iconOverride(
+                                  colors,
+                                  minimumSize: const Size(34, 34),
+                                ),
+                                tooltip: style.label,
+                                onPressed: () => _update(style: style),
+                                icon: Icon(
+                                  style.icon,
+                                  size: 19,
+                                  color: _note.style == style
+                                      ? accentColor
+                                      : colors.secondary,
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
                     ),
+                  ),
                 ],
               ),
               const SizedBox(height: AppSpacing.md),
@@ -266,6 +299,13 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
+                      style: AppButtonStyles.outlinedOverride(
+                        colors,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 10,
+                        ),
+                      ),
                       onPressed: () async {
                         final text = _note.hasContent
                             ? '${_note.quote}\n\n批注：${_note.content}'.trim()
@@ -275,16 +315,31 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
                         AppToast.success(context, '已复制原文内容', colors: colors);
                       },
                       icon: const Icon(Icons.copy_rounded, size: 16),
-                      label: const Text('复制'),
+                      label: const Text(
+                        '复制',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ),
                   const SizedBox(width: AppSpacing.sm),
                   Expanded(
                     child: OutlinedButton.icon(
+                      style: AppButtonStyles.outlinedOverride(
+                        colors,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 10,
+                        ),
+                      ),
                       onPressed: () =>
                           Navigator.of(context).pop(QuickNoteAction.quoteCard),
                       icon: const Icon(Icons.style_outlined, size: 16),
-                      label: const Text('金句卡'),
+                      label: const Text(
+                        '金句卡',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ),
                   const SizedBox(width: AppSpacing.sm),
@@ -293,11 +348,19 @@ class _ReaderNoteQuickSheetState extends State<_ReaderNoteQuickSheet> {
                       onPressed: () =>
                           Navigator.of(context).pop(QuickNoteAction.edit),
                       icon: const Icon(Icons.edit_note_rounded, size: 18),
-                      label: Text(_note.hasContent ? '编辑' : '写笔记'),
+                      label: Text(
+                        _note.hasContent ? '编辑' : '写笔记',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                       style: AppButtonStyles.filledOverride(
                         colors,
                         backgroundColor: accentColor,
-                        foregroundColor: Colors.white,
+                        foregroundColor: buttonFg,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 10,
+                        ),
                       ),
                     ),
                   ),

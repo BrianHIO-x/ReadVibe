@@ -623,49 +623,57 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
+              Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                alignment: WrapAlignment.spaceBetween,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: badgeColor.withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(AppRadius.sm),
-                    ),
-                    child: Text(
-                      badgeText,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: badgeColor,
-                      ),
-                    ),
-                  ),
-                  if (isBound) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 7,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: colors.headerBg,
-                        borderRadius: BorderRadius.circular(AppRadius.sm),
-                        border: Border.all(color: colors.border),
-                      ),
-                      child: Text(
-                        config.isDirectMode ? '应用内直连' : '系统 SAF',
-                        style: TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w500,
-                          color: colors.secondary,
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: badgeColor.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(AppRadius.sm),
+                        ),
+                        child: Text(
+                          badgeText,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: badgeColor,
+                          ),
                         ),
                       ),
-                    ),
-                  ],
-                  const Spacer(),
+                      if (isBound) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 7,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: colors.headerBg,
+                            borderRadius: BorderRadius.circular(AppRadius.sm),
+                            border: Border.all(color: colors.border),
+                          ),
+                          child: Text(
+                            config.isDirectMode ? '应用内直连' : '系统 SAF',
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w500,
+                              color: colors.secondary,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                   if (status != null && status.freeDeviceBytes > 0)
                     Text(
                       '设备可用 ${_formatBytes(status.freeDeviceBytes)}',
@@ -687,8 +695,10 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
               ),
               if (isBound) ...[
                 const SizedBox(height: AppSpacing.sm),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                Wrap(
+                  spacing: AppSpacing.sm,
+                  runSpacing: 2,
+                  alignment: WrapAlignment.spaceBetween,
                   children: [
                     Text(
                       '已备份 ${status?.bookCount ?? 0} 本书'
@@ -786,17 +796,39 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
             children: [
               Expanded(
                 child: OutlinedButton.icon(
+                  style: AppButtonStyles.outlinedOverride(
+                    colors,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 10,
+                    ),
+                  ),
                   onPressed: _busy ? null : _restoreFromVault,
                   icon: const Icon(Icons.restore_rounded, size: 18),
-                  label: const Text('从守护目录恢复'),
+                  label: const Text(
+                    '从守护目录恢复',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ),
               const SizedBox(width: AppSpacing.sm),
               Expanded(
                 child: OutlinedButton.icon(
+                  style: AppButtonStyles.outlinedOverride(
+                    colors,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 10,
+                    ),
+                  ),
                   onPressed: _busy ? null : _verifyAndClean,
                   icon: const Icon(Icons.cleaning_services_outlined, size: 18),
-                  label: const Text('核验与清理'),
+                  label: const Text(
+                    '核验与清理',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ),
             ],
@@ -899,9 +931,20 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
             children: [
               Expanded(
                 child: TextButton.icon(
+                  style: AppButtonStyles.textOverride(
+                    colors,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                  ),
                   onPressed: _busy ? null : _unbindOnly,
                   icon: const Icon(Icons.link_off_rounded, size: 17),
-                  label: const Text('仅解绑目录'),
+                  label: const Text(
+                    '仅解绑目录',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ),
               Expanded(
@@ -910,9 +953,17 @@ class _DataSafetySheetState extends State<_DataSafetySheet> {
                   style: AppButtonStyles.textOverride(
                     colors,
                     foregroundColor: danger,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
                   ),
                   icon: const Icon(Icons.delete_sweep_outlined, size: 17),
-                  label: const Text('清空守护目录并解绑'),
+                  label: const Text(
+                    '清空守护目录并解绑',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ),
             ],

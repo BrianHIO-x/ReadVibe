@@ -1,8 +1,10 @@
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:flutter/gestures.dart' show TapGestureRecognizer;
+import 'package:flutter/gestures.dart' show GestureRecognizer, TapGestureRecognizer;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart'
+    show PipelineOwner, RenderOffstage, RenderParagraph, RenderProxyBox;
 
 import '../../models/book.dart';
 import '../../models/reading_paragraph.dart';
@@ -12,6 +14,86 @@ import '../../services/resource_presence.dart';
 import '../../theme/app_theme.dart';
 import 'reader_justified_text.dart';
 import 'reader_note_highlights.dart';
+
+/// Tracks mounted EPUB link paragraphs so tapping an inline footnote or
+/// cross-reference link triggers link handling immediately without toggling the
+/// reader's top/bottom chrome overlay.
+class ReaderEpubLinkRegistry {
+  final Map<RenderBox, Map<GestureRecognizer, EpubLinkTarget>> _targets =
+      <RenderBox, Map<GestureRecognizer, EpubLinkTarget>>{};
+
+  void register(
+    RenderBox target,
+    Map<GestureRecognizer, EpubLinkTarget> links,
+  ) {
+    _targets[target] = links;
+  }
+
+  void unregister(RenderBox target) => _targets.remove(target);
+
+  EpubLinkTarget? hitTest(Offset globalPosition, Size viewportSize) {
+    final screenRect = Offset.zero & viewportSize;
+    for (final entry in _targets.entries) {
+      final target = entry.key;
+      if (!target.attached || !target.hasSize) continue;
+      if (_isHiddenInOffstage(target)) continue;
+      final bounds = MatrixUtils.transformRect(
+        target.getTransformTo(null),
+        Offset.zero & target.size,
+      );
+      if (!bounds.overlaps(screenRect) ||
+          !bounds.inflate(6).contains(globalPosition)) {
+        continue;
+      }
+      final hit = _hitParagraphs(target, globalPosition, entry.value);
+      if (hit != null) return hit;
+    }
+    return null;
+  }
+
+  EpubLinkTarget? _hitParagraphs(
+    RenderObject root,
+    Offset globalPosition,
+    Map<GestureRecognizer, EpubLinkTarget> links,
+  ) {
+    if (root is RenderOffstage && root.offstage) return null;
+    if (root is RenderParagraph && root.attached && root.hasSize) {
+      final local = root.globalToLocal(globalPosition);
+      if ((Offset.zero & root.size).inflate(6).contains(local)) {
+        final pos = root.getPositionForOffset(local);
+        final span = root.text.getSpanForPosition(pos);
+        if (span is TextSpan && span.recognizer != null) {
+          final target = links[span.recognizer!];
+          if (target != null) return target;
+        }
+        if (pos.offset > 0) {
+          final prevSpan = root.text.getSpanForPosition(
+            TextPosition(offset: pos.offset - 1),
+          );
+          if (prevSpan is TextSpan && prevSpan.recognizer != null) {
+            final target = links[prevSpan.recognizer!];
+            if (target != null) return target;
+          }
+        }
+      }
+      return null;
+    }
+    EpubLinkTarget? match;
+    root.visitChildren((child) {
+      match ??= _hitParagraphs(child, globalPosition, links);
+    });
+    return match;
+  }
+
+  static bool _isHiddenInOffstage(RenderObject node) {
+    var parent = node.parent;
+    while (parent != null) {
+      if (parent is RenderOffstage && parent.offstage) return true;
+      parent = parent.parent;
+    }
+    return false;
+  }
+}
 
 class EpubBlockLayoutMetrics {
   final double leading;
@@ -160,6 +242,9 @@ class ReaderEpubLayout {
     required this.textScaler,
     required this.resolveSimulationLineExtent,
     this.onOpenLink,
+    this.linkRegistry,
+    this.maxImageHeight = 560.0,
+    this.locale,
   });
 
   final TextScaler textScaler;
@@ -168,6 +253,9 @@ class ReaderEpubLayout {
   /// Opens an internal EPUB link. Null in measurement-only contexts, where a
   /// tap target would only allocate recognizers no one can reach.
   final void Function(EpubLinkTarget target)? onOpenLink;
+  final ReaderEpubLinkRegistry? linkRegistry;
+  final double maxImageHeight;
+  final Locale? locale;
 
   String formatParagraph(EpubContentBlock block) {
     final body = visibleParagraphBody(block.text);
@@ -193,7 +281,9 @@ class ReaderEpubLayout {
 
   bool hasEmbeddedHeading(Chapter chapter, {bool avoidLazyLoad = false}) {
     if (!chapter.hasRichEpubContent) return false;
-    if (avoidLazyLoad && !chapter.hasKnownSemanticHeading) return false;
+    if (avoidLazyLoad) {
+      return chapter.hasKnownSemanticHeading && chapter.hasSemanticHeading;
+    }
     if (chapter.hasSemanticHeading) return true;
     for (final block in chapter.epubBlocks) {
       if (!block.isText || block.text.trim().isEmpty) continue;
@@ -207,6 +297,21 @@ class ReaderEpubLayout {
     return false;
   }
 
+  EdgeInsets blockInnerPadding(EpubContentBlock block) =>
+      _blockInnerPadding(block);
+
+  EdgeInsets _blockInnerPadding(EpubContentBlock block) {
+    if (block.isImage) return EdgeInsets.zero;
+    final hasDecor =
+        block.style.backgroundColorArgb != null ||
+        importedResourceExists(block.style.backgroundImagePath);
+    if (!hasDecor) return EdgeInsets.zero;
+    return const EdgeInsets.symmetric(
+      horizontal: AppSpacing.sm,
+      vertical: AppSpacing.xs,
+    );
+  }
+
   EpubBlockLayoutMetrics blockMetrics(
     EpubContentBlock block, {
     required ReaderSettings settings,
@@ -216,9 +321,16 @@ class ReaderEpubLayout {
     final spacing = blockSpacing(block, settings: settings, mode: mode);
     final leading = spacing.leading;
     final trailing = spacing.trailing;
+    final innerPadding = _blockInnerPadding(block);
+    final innerWidth = math.max(1.0, width - innerPadding.horizontal);
     final double content;
     if (block.isImage) {
-      content = imageHeight(block, width: width, settings: settings);
+      content = imageHeight(
+        block,
+        width: innerWidth,
+        settings: settings,
+        mode: mode,
+      );
     } else {
       final row = layoutTableRow(
         block,
@@ -227,7 +339,7 @@ class ReaderEpubLayout {
         width: width,
       );
       if (row != null) {
-        content = row.contentHeight;
+        content = row.contentHeight + innerPadding.vertical;
         row.dispose();
       } else {
         final painter = layoutTextBlock(
@@ -236,7 +348,7 @@ class ReaderEpubLayout {
           mode: mode,
           width: width,
         );
-        content = painter.height;
+        content = painter.height + innerPadding.vertical;
         painter.dispose();
       }
     }
@@ -307,7 +419,16 @@ class ReaderEpubLayout {
   }) {
     final parts = _rowTextParts(block);
     if (parts == null) return null;
-    return _tableRowGeometryFor(block, parts, settings: settings, width: width);
+    final innerWidth = math.max(
+      1.0,
+      width - _blockInnerPadding(block).horizontal,
+    );
+    return _tableRowGeometryFor(
+      block,
+      parts,
+      settings: settings,
+      width: innerWidth,
+    );
   }
 
   EpubTableRowGeometry? _tableRowGeometryFor(
@@ -349,11 +470,15 @@ class ReaderEpubLayout {
   }) {
     final parts = _rowTextParts(block);
     if (parts == null) return null;
+    final innerWidth = math.max(
+      1.0,
+      width - _blockInnerPadding(block).horizontal,
+    );
     final geometry = _tableRowGeometryFor(
       block,
       parts,
       settings: settings,
-      width: width,
+      width: innerWidth,
     );
     if (geometry == null) return null;
     final strutStyle = mode == ReaderReadingMode.simulation
@@ -366,10 +491,12 @@ class ReaderEpubLayout {
         settings: settings,
         foreground: Colors.black,
         background: Colors.white,
+        blockBackgroundColorArgb: block.style.backgroundColorArgb,
       ),
       textDirection: TextDirection.ltr,
       textAlign: TextAlign.start,
       textScaler: textScaler,
+      locale: locale,
       strutStyle: strutStyle,
     )..layout(maxWidth: geometry.leftWidth);
     final rightPainter = TextPainter(
@@ -379,10 +506,12 @@ class ReaderEpubLayout {
         settings: settings,
         foreground: Colors.black,
         background: Colors.white,
+        blockBackgroundColorArgb: block.style.backgroundColorArgb,
       ),
       textDirection: TextDirection.ltr,
       textAlign: TextAlign.end,
       textScaler: textScaler,
+      locale: locale,
       strutStyle: strutStyle,
     )..layout(maxWidth: geometry.rightWidth);
     return EpubTableRowLayout(
@@ -551,9 +680,16 @@ class ReaderEpubLayout {
     try {
       for (final block in blocks) {
         final spacing = blockSpacing(block, settings: settings, mode: mode);
+        final innerPadding = _blockInnerPadding(block);
+        final innerWidth = math.max(1.0, width - innerPadding.horizontal);
         final double content;
         if (block.isImage) {
-          content = imageHeight(block, width: width, settings: settings);
+          content = imageHeight(
+            block,
+            width: innerWidth,
+            settings: settings,
+            mode: mode,
+          );
         } else {
           final row = layoutTableRow(
             block,
@@ -562,12 +698,13 @@ class ReaderEpubLayout {
             width: width,
           );
           if (row != null) {
-            content = row.contentHeight;
+            content = row.contentHeight + innerPadding.vertical;
             row.dispose();
           } else {
             final shared = painter ??= TextPainter(
               textDirection: TextDirection.ltr,
               textScaler: textScaler,
+              locale: locale,
             );
             shared.text = _textSpan(
               block,
@@ -579,8 +716,8 @@ class ReaderEpubLayout {
             shared.strutStyle = mode == ReaderReadingMode.simulation
                 ? _simulationStrutStyle(block, settings)
                 : null;
-            shared.layout(maxWidth: width);
-            content = shared.height;
+            shared.layout(maxWidth: innerWidth);
+            content = shared.height + innerPadding.vertical;
           }
         }
         var total = spacing.leading + content + spacing.trailing;
@@ -604,6 +741,10 @@ class ReaderEpubLayout {
     required ReaderReadingMode mode,
     required double width,
   }) {
+    final innerWidth = math.max(
+      1.0,
+      width - _blockInnerPadding(block).horizontal,
+    );
     return TextPainter(
       text: _textSpan(
         block,
@@ -614,16 +755,18 @@ class ReaderEpubLayout {
       textDirection: TextDirection.ltr,
       textAlign: _textAlign(block.style.textAlign),
       textScaler: textScaler,
+      locale: locale,
       strutStyle: mode == ReaderReadingMode.simulation
           ? _simulationStrutStyle(block, settings)
           : null,
-    )..layout(maxWidth: width);
+    )..layout(maxWidth: innerWidth);
   }
 
   double imageHeight(
     EpubContentBlock block, {
     required double width,
     required ReaderSettings settings,
+    ReaderReadingMode? mode,
   }) {
     final requestedWidth = block.imageWidth;
     final displayWidth = requestedWidth != null && requestedWidth > 0
@@ -631,18 +774,20 @@ class ReaderEpubLayout {
         : width;
     final sourceWidth = block.imageWidth;
     final sourceHeight = block.imageHeight;
-    final aspect =
+    final hasKnownAspect =
         sourceWidth != null &&
-            sourceHeight != null &&
-            sourceWidth > 0 &&
-            sourceHeight > 0
-        ? sourceWidth / sourceHeight
-        : 1.5;
+        sourceHeight != null &&
+        sourceWidth > 0 &&
+        sourceHeight > 0;
+    final aspect = hasKnownAspect ? sourceWidth / sourceHeight : 1.5;
     final naturalHeight = displayWidth / aspect;
-    return naturalHeight.clamp(
-      settings.fontSize * settings.lineHeight * 2,
-      560.0,
-    );
+    final minHeight = hasKnownAspect
+        ? 16.0
+        : settings.fontSize * settings.lineHeight * 2;
+    final maxCap = mode == ReaderReadingMode.simulation
+        ? math.max(minHeight, math.min(560.0, maxImageHeight))
+        : 560.0;
+    return naturalHeight.clamp(minHeight, maxCap).toDouble();
   }
 
   Widget buildBlock({
@@ -684,6 +829,14 @@ class ReaderEpubLayout {
           ? themeColors.background
           : blockBackground,
     );
+    final backgroundPath = block.style.backgroundImagePath;
+    final hasDecor =
+        blockBackground != Colors.transparent ||
+        importedResourceExists(backgroundPath);
+    final innerPadding = hasDecor
+        ? _blockInnerPadding(block)
+        : EdgeInsets.zero;
+    final innerWidth = math.max(1.0, width - innerPadding.horizontal);
     Widget content;
     if (block.isImage) {
       final path = block.imagePath;
@@ -695,7 +848,7 @@ class ReaderEpubLayout {
         width: displayWidth,
         height: simulationPage
             ? metrics.content
-            : imageHeight(block, width: width, settings: settings),
+            : imageHeight(block, width: width, settings: settings, mode: mode),
         child: path == null
             ? _imageFallback(block, themeColors)
             : Image.file(
@@ -767,14 +920,20 @@ class ReaderEpubLayout {
               registry: noteHighlightRegistry,
               child: text,
             );
+      final innerContentHeight = math.max(
+        0.0,
+        metrics.content - innerPadding.vertical,
+      );
       content = simulationPage
-          ? SizedBox(width: width, height: metrics.content, child: decoratedText)
-          : SizedBox(width: width, child: decoratedText);
+          ? SizedBox(
+              width: innerWidth,
+              height: innerContentHeight,
+              child: decoratedText,
+            )
+          : SizedBox(width: innerWidth, child: decoratedText);
     }
 
-    final backgroundPath = block.style.backgroundImagePath;
-    final decoration =
-        blockBackground == Colors.transparent && backgroundPath == null
+    final decoration = !hasDecor
         ? null
         : BoxDecoration(
             color: blockBackground == Colors.transparent
@@ -793,7 +952,9 @@ class ReaderEpubLayout {
       padding: EdgeInsets.only(top: metrics.leading, bottom: metrics.trailing),
       child: DecoratedBox(
         decoration: decoration ?? const BoxDecoration(),
-        child: content,
+        child: innerPadding == EdgeInsets.zero
+            ? content
+            : Padding(padding: innerPadding, child: content),
       ),
     );
     if (!simulationPage) return padded;
@@ -843,9 +1004,14 @@ class ReaderEpubLayout {
     Color? linkColor,
     Map<int, TapGestureRecognizer>? linkRecognizers,
   }) {
+    final text = block.text;
+    final body = visibleParagraphBody(text);
+    final bodyStart = body.isEmpty ? 0 : math.max(0, text.indexOf(body));
+    final bodyEnd = bodyStart + body.length;
     final formatted = formatParagraph(block);
-    final prefixLength = math.max(0, formatted.length - block.text.length);
+    final prefixLength = math.max(0, formatted.length - body.length);
     final children = <InlineSpan>[];
+    final blockBgArgb = block.style.backgroundColorArgb;
     if (prefixLength > 0) {
       children.add(
         TextSpan(
@@ -855,19 +1021,25 @@ class ReaderEpubLayout {
             settings: settings,
             foreground: foreground,
             background: background,
+            blockBackgroundColorArgb: blockBgArgb,
           ),
         ),
       );
     }
-    if (block.runs.isEmpty) {
+    var runLength = 0;
+    for (final run in block.runs) {
+      runLength += run.text.length;
+    }
+    if (block.runs.isEmpty || runLength != text.length) {
       children.add(
         TextSpan(
-          text: block.text.trim(),
+          text: body,
           style: _runTextStyle(
             block.style,
             settings: settings,
             foreground: foreground,
             background: background,
+            blockBackgroundColorArgb: blockBgArgb,
           ),
         ),
       );
@@ -896,8 +1068,14 @@ class ReaderEpubLayout {
         mergedLink = null;
       }
 
+      var cursor = 0;
       for (var index = 0; index < block.runs.length; index++) {
         final run = block.runs[index];
+        final sliceStart = math.max(cursor, bodyStart);
+        final sliceEnd = math.min(cursor + run.text.length, bodyEnd);
+        cursor += run.text.length;
+        if (sliceEnd <= sliceStart) continue;
+        final sliceText = text.substring(sliceStart, sliceEnd);
         final isLink = run.link != null && linkColor != null;
         final style = isLink
             ? _runTextStyle(
@@ -905,6 +1083,7 @@ class ReaderEpubLayout {
                 settings: settings,
                 foreground: foreground,
                 background: background,
+                blockBackgroundColorArgb: blockBgArgb,
               ).copyWith(
                 color: linkColor,
                 decoration: TextDecoration.underline,
@@ -915,6 +1094,7 @@ class ReaderEpubLayout {
                 settings: settings,
                 foreground: foreground,
                 background: background,
+                blockBackgroundColorArgb: blockBgArgb,
               );
         final link = isLink ? run.link : null;
         final previousLink = mergedLink;
@@ -925,11 +1105,11 @@ class ReaderEpubLayout {
                   previousLink.blockIndex == link.blockIndex &&
                   previousLink.needDirectJump == link.needDirectJump;
         if (mergedText.isNotEmpty && style == mergedStyle && sameLink) {
-          mergedText.write(run.text);
+          mergedText.write(sliceText);
           continue;
         }
         flushMerged();
-        mergedText.write(run.text);
+        mergedText.write(sliceText);
         mergedStyle = style;
         if (isLink) {
           mergedRecognizer = linkRecognizers == null
@@ -977,6 +1157,7 @@ class ReaderEpubLayout {
             : null,
       );
     }
+    final blockBgArgb = block.style.backgroundColorArgb;
     final strutStyle = simulationPage
         ? _simulationStrutStyle(block, settings)
         : null;
@@ -987,6 +1168,7 @@ class ReaderEpubLayout {
         settings: settings,
         foreground: foreground,
         background: background,
+        blockBackgroundColorArgb: blockBgArgb,
         linkColor: linkColor,
         linkRecognizers: linkRecognizers,
       ),
@@ -1002,6 +1184,7 @@ class ReaderEpubLayout {
         settings: settings,
         foreground: foreground,
         background: background,
+        blockBackgroundColorArgb: blockBgArgb,
         linkColor: linkColor,
         linkRecognizers: linkRecognizers,
       ),
@@ -1027,6 +1210,7 @@ class ReaderEpubLayout {
     required ReaderSettings settings,
     required Color foreground,
     required Color background,
+    int? blockBackgroundColorArgb,
     Color? linkColor,
     Map<int, TapGestureRecognizer>? linkRecognizers,
   }) {
@@ -1059,6 +1243,7 @@ class ReaderEpubLayout {
               settings: settings,
               foreground: foreground,
               background: background,
+              blockBackgroundColorArgb: blockBackgroundColorArgb,
             ).copyWith(
               color: linkColor,
               decoration: TextDecoration.underline,
@@ -1069,6 +1254,7 @@ class ReaderEpubLayout {
               settings: settings,
               foreground: foreground,
               background: background,
+              blockBackgroundColorArgb: blockBackgroundColorArgb,
             );
       final link = isLink ? run.link : null;
       final previousLink = mergedLink;
@@ -1100,10 +1286,14 @@ class ReaderEpubLayout {
     required ReaderSettings settings,
     required Color foreground,
     required Color background,
+    int? blockBackgroundColorArgb,
   }) {
     final weight = style.fontWeight >= 600
         ? (style.fontWeight >= 800 ? FontWeight.w900 : FontWeight.w700)
         : settings.effectiveFontWeight;
+    final runBgArgb = style.backgroundColorArgb;
+    final showInlineBg =
+        runBgArgb != null && runBgArgb != blockBackgroundColorArgb;
     return TextStyle(
       fontFamily: style.fontFamily ?? settings.effectiveFontFamily,
       fontSize: settings.fontSize * style.fontScale,
@@ -1119,9 +1309,9 @@ class ReaderEpubLayout {
         fallback: foreground,
         background: background,
       ),
-      backgroundColor: style.backgroundColorArgb == null
-          ? null
-          : Color(style.backgroundColorArgb!).withValues(alpha: 0.18),
+      backgroundColor: showInlineBg
+          ? Color(runBgArgb).withValues(alpha: 0.22)
+          : null,
       letterSpacing:
           settings.fontSize * style.fontScale * style.letterSpacingEm + 0.2,
     );
@@ -1164,7 +1354,13 @@ class ReaderEpubLayout {
     if (raw == null) return Colors.transparent;
     final publisher = Color(raw);
     final dark = themeColors.background.computeLuminance() < 0.25;
-    return Color.lerp(themeColors.background, publisher, dark ? 0.16 : 0.42)!;
+    if (dark && publisher.computeLuminance() < 0.12) {
+      return Color.lerp(themeColors.headerBg, themeColors.text, 0.06)!;
+    }
+    final opaque = publisher.a < 0.99
+        ? Color.alphaBlend(publisher, themeColors.background)
+        : publisher;
+    return Color.lerp(themeColors.background, opaque, dark ? 0.22 : 0.48)!;
   }
 
   Color _foreground(
@@ -1265,6 +1461,7 @@ class _EpubLinkedText extends StatefulWidget {
 
 class _EpubLinkedTextState extends State<_EpubLinkedText> {
   final _recognizers = <int, TapGestureRecognizer>{};
+  final _linkTargets = <GestureRecognizer, EpubLinkTarget>{};
 
   @override
   void initState() {
@@ -1286,8 +1483,10 @@ class _EpubLinkedTextState extends State<_EpubLinkedText> {
       final target = runs[index].link;
       if (target == null) continue;
       // The callback is read at tap time so a rebuilt parent stays authoritative.
-      _recognizers[index] = TapGestureRecognizer()
+      final recognizer = TapGestureRecognizer()
         ..onTap = () => widget.onOpenLink(target);
+      _recognizers[index] = recognizer;
+      _linkTargets[recognizer] = target;
     }
   }
 
@@ -1296,6 +1495,7 @@ class _EpubLinkedTextState extends State<_EpubLinkedText> {
       recognizer.dispose();
     }
     _recognizers.clear();
+    _linkTargets.clear();
   }
 
   @override
@@ -1307,31 +1507,40 @@ class _EpubLinkedTextState extends State<_EpubLinkedText> {
   @override
   Widget build(BuildContext context) {
     final rowGeometry = widget.rowGeometry;
-    if (rowGeometry != null) {
-      return widget.layout._buildTableRow(
-        widget.block,
-        settings: widget.settings,
-        foreground: widget.foreground,
-        background: widget.background,
-        simulationPage: widget.simulationPage,
-        geometry: rowGeometry,
-        linkColor: _safeLinkColor(),
-        linkRecognizers: _recognizers,
-      );
-    }
-    return widget.layout._blockText(
-      widget.layout._textSpan(
-        widget.block,
-        settings: widget.settings,
-        foreground: widget.foreground,
-        background: widget.background,
-        linkColor: _safeLinkColor(),
-        linkRecognizers: _recognizers,
-      ),
-      align: widget.layout._textAlign(widget.block.style.textAlign),
-      strutStyle: widget.simulationPage
-          ? widget.layout._simulationStrutStyle(widget.block, widget.settings)
-          : null,
+    final child = rowGeometry != null
+        ? widget.layout._buildTableRow(
+            widget.block,
+            settings: widget.settings,
+            foreground: widget.foreground,
+            background: widget.background,
+            simulationPage: widget.simulationPage,
+            geometry: rowGeometry,
+            linkColor: _safeLinkColor(),
+            linkRecognizers: _recognizers,
+          )
+        : widget.layout._blockText(
+            widget.layout._textSpan(
+              widget.block,
+              settings: widget.settings,
+              foreground: widget.foreground,
+              background: widget.background,
+              linkColor: _safeLinkColor(),
+              linkRecognizers: _recognizers,
+            ),
+            align: widget.layout._textAlign(widget.block.style.textAlign),
+            strutStyle: widget.simulationPage
+                ? widget.layout._simulationStrutStyle(
+                    widget.block,
+                    widget.settings,
+                  )
+                : null,
+          );
+    final registry = widget.layout.linkRegistry;
+    if (registry == null) return child;
+    return _EpubLinkHitTarget(
+      registry: registry,
+      links: Map<GestureRecognizer, EpubLinkTarget>.of(_linkTargets),
+      child: child,
     );
   }
 
@@ -1343,5 +1552,61 @@ class _EpubLinkedTextState extends State<_EpubLinkedText> {
         (accent.computeLuminance() - widget.background.computeLuminance())
             .abs();
     return contrast < 0.12 ? widget.foreground : accent;
+  }
+}
+
+class _EpubLinkHitTarget extends SingleChildRenderObjectWidget {
+  const _EpubLinkHitTarget({
+    required this.registry,
+    required this.links,
+    required super.child,
+  });
+
+  final ReaderEpubLinkRegistry registry;
+  final Map<GestureRecognizer, EpubLinkTarget> links;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderEpubLinkHitTarget(registry, links);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderEpubLinkHitTarget renderObject,
+  ) {
+    renderObject
+      ..registry = registry
+      ..links = links;
+  }
+}
+
+class _RenderEpubLinkHitTarget extends RenderProxyBox {
+  _RenderEpubLinkHitTarget(this._registry, this._links);
+
+  // Keep fields mutable so updateRenderObject updates the mounted target cleanly.
+  ReaderEpubLinkRegistry _registry;
+  set registry(ReaderEpubLinkRegistry value) {
+    if (identical(_registry, value)) return;
+    if (attached) _registry.unregister(this);
+    _registry = value;
+    if (attached) _registry.register(this, _links);
+  }
+
+  Map<GestureRecognizer, EpubLinkTarget> _links;
+  set links(Map<GestureRecognizer, EpubLinkTarget> value) {
+    _links = value;
+    if (attached) _registry.register(this, _links);
+  }
+
+  @override
+  void attach(PipelineOwner owner) {
+    super.attach(owner);
+    _registry.register(this, _links);
+  }
+
+  @override
+  void detach() {
+    _registry.unregister(this);
+    super.detach();
   }
 }

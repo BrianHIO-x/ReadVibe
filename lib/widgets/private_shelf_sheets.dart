@@ -180,38 +180,45 @@ class _PinSheet extends StatelessWidget {
         padding: EdgeInsets.fromLTRB(
           AppSpacing.xl,
           AppSpacing.sm,
-          AppSpacing.sm,
+          AppSpacing.xl,
           AppSpacing.lg + MediaQuery.paddingOf(context).bottom,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            AppSheetDragHandle(
+            Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.center,
+              children: [
+                Align(
+                  alignment: Alignment.topCenter,
+                  child: AppSheetDragHandle(
+                    colors: colors,
+                    padding: const EdgeInsets.only(top: 4, bottom: 20),
+                  ),
+                ),
+                Positioned(
+                  right: -12,
+                  bottom: 0,
+                  child: IconButton(
+                    tooltip: '关闭',
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: Icon(Icons.close_rounded, color: colors.secondary),
+                  ),
+                ),
+              ],
+            ),
+            PrivateShelfPinPad(
+              lock: lock,
               colors: colors,
-              padding: const EdgeInsets.only(top: 4, bottom: 2),
-            ),
-            Align(
-              alignment: Alignment.centerRight,
-              child: IconButton(
-                tooltip: '关闭',
-                onPressed: () => Navigator.of(context).pop(),
-                icon: Icon(Icons.close_rounded, color: colors.secondary),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.only(right: AppSpacing.lg),
-              child: PrivateShelfPinPad(
-                lock: lock,
-                colors: colors,
-                title: title,
-                verifying: verifying,
-                purpose: purpose,
-                biometric: biometric,
-                notice: notice,
-                onUnlocked: () => Navigator.of(context).pop(_PinOutcome.unlocked),
-                onCreated: () => Navigator.of(context).pop(true),
-                onForgot: () => Navigator.of(context).pop(_PinOutcome.forgot),
-              ),
+              title: title,
+              verifying: verifying,
+              purpose: purpose,
+              biometric: biometric,
+              notice: notice,
+              onUnlocked: () => Navigator.of(context).pop(_PinOutcome.unlocked),
+              onCreated: () => Navigator.of(context).pop(true),
+              onForgot: () => Navigator.of(context).pop(_PinOutcome.forgot),
             ),
           ],
         ),
@@ -484,12 +491,13 @@ class _PrivateShelfPinPadState extends State<PrivateShelfPinPad>
           ),
         ),
         const SizedBox(height: AppSpacing.sm),
-        SizedBox(
-          height: 40,
+        ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 40),
           child: Text(
             _statusText,
             textAlign: TextAlign.center,
             maxLines: 2,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontSize: 13,
               height: 1.4,

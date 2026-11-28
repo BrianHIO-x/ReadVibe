@@ -847,11 +847,14 @@ class _LibraryScreenState extends State<LibraryScreen>
               onPressed: () => Navigator.pop(dialogContext),
               child: const Text('取消'),
             ),
-            FilledButton(
-              onPressed: controller.text.isEmpty
-                  ? null
-                  : () => Navigator.pop(dialogContext, controller.text),
-              child: const Text('解锁并导入'),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: controller,
+              builder: (_, value, _) => FilledButton(
+                onPressed: value.text.isEmpty
+                    ? null
+                    : () => Navigator.pop(dialogContext, value.text),
+                child: const Text('解锁并导入'),
+              ),
             ),
           ],
         ),
@@ -1764,50 +1767,53 @@ class _LibraryScreenState extends State<LibraryScreen>
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
     final selectedBooks = _selectedBooks;
-    final content = DefaultTextStyle.merge(
-      style: TextStyle(fontFamily: _settings.effectiveFontFamily),
-      child: Scaffold(
-        backgroundColor: colors.background,
-        body: Listener(
-          behavior: HitTestBehavior.translucent,
-          onPointerDown: _handleShelfPointerDown,
-          onPointerUp: _handleShelfPointerUp,
-          onPointerCancel: _handleShelfPointerCancel,
-          child: SafeArea(
-            bottom: false,
-            child: Column(
-              children: [
-                AnimatedContainer(
-                  duration: AppMotion.normal,
-                  curve: AppMotion.standard,
-                  decoration: BoxDecoration(
-                    color: colors.background,
-                    boxShadow: _gridScrolled
-                        ? [
-                            BoxShadow(
-                              color: colors.text.withValues(alpha: 0.06),
-                              blurRadius: 8,
-                              offset: const Offset(0, 2),
-                            ),
-                          ]
-                        : const [],
-                  ),
-                  child: _buildLibraryHeader(colors),
-                ),
-                Expanded(child: _buildShelfContent(colors)),
-                if (_selection.isSelecting)
-                  LibraryBatchBar(
-                    colors: colors,
-                    selectedCount: selectedBooks.length,
-                    privateMode: _privateMode,
-                    onAssignGroups: () => _assignGroups(selectedBooks),
-                    onTogglePrivate: () => _moveBooksToShelf(
-                      selectedBooks,
-                      private: !_privateMode,
+    final content = AppOverlayTheme(
+      colors: colors,
+      child: DefaultTextStyle.merge(
+        style: TextStyle(fontFamily: _settings.effectiveFontFamily),
+        child: Scaffold(
+          backgroundColor: colors.background,
+          body: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: _handleShelfPointerDown,
+            onPointerUp: _handleShelfPointerUp,
+            onPointerCancel: _handleShelfPointerCancel,
+            child: SafeArea(
+              bottom: false,
+              child: Column(
+                children: [
+                  AnimatedContainer(
+                    duration: AppMotion.normal,
+                    curve: AppMotion.standard,
+                    decoration: BoxDecoration(
+                      color: colors.background,
+                      boxShadow: _gridScrolled
+                          ? [
+                              BoxShadow(
+                                color: colors.text.withValues(alpha: 0.06),
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ]
+                          : const [],
                     ),
-                    onDelete: () => _confirmDeleteBooks(selectedBooks),
+                    child: _buildLibraryHeader(colors),
                   ),
-              ],
+                  Expanded(child: _buildShelfContent(colors)),
+                  if (_selection.isSelecting)
+                    LibraryBatchBar(
+                      colors: colors,
+                      selectedCount: selectedBooks.length,
+                      privateMode: _privateMode,
+                      onAssignGroups: () => _assignGroups(selectedBooks),
+                      onTogglePrivate: () => _moveBooksToShelf(
+                        selectedBooks,
+                        private: !_privateMode,
+                      ),
+                      onDelete: () => _confirmDeleteBooks(selectedBooks),
+                    ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1847,6 +1853,9 @@ class _LibraryScreenState extends State<LibraryScreen>
           Row(
             children: [
               IconButton(
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+                visualDensity: VisualDensity.compact,
                 onPressed: _reorderMode
                     ? _exitReorderMode
                     : selecting
@@ -1870,7 +1879,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                   ),
                 ),
               ),
-              SizedBox(width: selecting ? AppSpacing.xs : AppSpacing.sm),
+              SizedBox(width: selecting ? AppSpacing.xs : 4),
               Expanded(
                 child: AnimatedSwitcher(
                   duration: AppMotion.fast,
@@ -1887,30 +1896,38 @@ class _LibraryScreenState extends State<LibraryScreen>
                     ).animate(animation),
                     child: FadeTransition(opacity: animation, child: child),
                   ),
-                  child: Text(
-                    _reorderMode
-                        ? '调整顺序'
-                        : selecting
-                        ? '已选 ${_selection.count} 本'
-                        : _privateMode
-                        ? '隐私书架'
-                        : '书架',
+                  child: FittedBox(
                     key: ValueKey(
                       '$_reorderMode-$selecting-${_selection.count}-$_privateMode',
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: selecting ? 16 : (_reorderMode ? 20 : 24),
-                      fontWeight: selecting ? FontWeight.w600 : FontWeight.w700,
-                      color: colors.text,
-                      letterSpacing: selecting ? 0 : -0.3,
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      _reorderMode
+                          ? '调整顺序'
+                          : selecting
+                          ? '已选 ${_selection.count} 本'
+                          : _privateMode
+                          ? '隐私书架'
+                          : '书架',
+                      maxLines: 1,
+                      style: TextStyle(
+                        fontSize: selecting ? 16 : (_reorderMode ? 20 : 24),
+                        fontWeight: selecting
+                            ? FontWeight.w600
+                            : FontWeight.w700,
+                        color: colors.text,
+                        letterSpacing: selecting ? 0 : -0.3,
+                      ),
                     ),
                   ),
                 ),
               ),
               if (!_reorderMode && !selecting) ...[
                 IconButton(
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+                  visualDensity: VisualDensity.compact,
                   tooltip: '搜索书架',
                   onPressed: () {
                     setState(
@@ -1935,6 +1952,12 @@ class _LibraryScreenState extends State<LibraryScreen>
                 ),
                 if (_shelfBooks.isNotEmpty)
                   IconButton(
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 38,
+                      minHeight: 38,
+                    ),
+                    visualDensity: VisualDensity.compact,
                     tooltip: '多选管理',
                     onPressed: _selection.enter,
                     icon: Icon(
@@ -2023,7 +2046,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                           style: AppButtonStyles.filledOverride(
                             colors,
                             backgroundColor: colors.accent,
-                            foregroundColor: Colors.white,
+                            foregroundColor: AppOverlayTheme.onAccent(colors),
                             padding: const EdgeInsets.symmetric(
                               horizontal: AppSpacing.md,
                               vertical: 6,
@@ -2041,13 +2064,15 @@ class _LibraryScreenState extends State<LibraryScreen>
                           ),
                           label: Text(
                             _importing ? _importLabel(compact: true) : '导入',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                           style: AppButtonStyles.filledOverride(
                             colors,
                             backgroundColor: colors.accent,
-                            foregroundColor: Colors.white,
+                            foregroundColor: AppOverlayTheme.onAccent(colors),
                             padding: const EdgeInsets.symmetric(
-                              horizontal: AppSpacing.lg,
+                              horizontal: AppSpacing.md,
                               vertical: AppSpacing.sm,
                             ),
                           ),
@@ -2238,7 +2263,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             style: AppButtonStyles.filledOverride(
               colors,
               backgroundColor: colors.accent,
-              foregroundColor: Colors.white,
+              foregroundColor: AppOverlayTheme.onAccent(colors),
               padding: const EdgeInsets.symmetric(
                 horizontal: AppSpacing.xl,
                 vertical: AppSpacing.md,
@@ -2334,6 +2359,19 @@ class _LibraryScreenState extends State<LibraryScreen>
 
     return LayoutBuilder(
       builder: (context, constraints) {
+        final metrics = computeShelfGridMetrics(
+          MediaQuery.sizeOf(context).width,
+        );
+        final columns = metrics.columns;
+        final innerWidth = math.max(0.0, constraints.maxWidth - AppSpacing.md * 2);
+        final cellWidth = columns <= 1
+            ? innerWidth
+            : math.max(
+                0.0,
+                (innerWidth - AppSpacing.xs * (columns - 1)) / columns,
+              );
+        final painted = BookCard.paintedHeight(context, cellWidth);
+        final cellHeight = math.max(cellWidth / 0.52, painted);
         final booksFit = _shelfBooksFitViewport(
           screenWidth: MediaQuery.sizeOf(context).width,
           viewportWidth: constraints.maxWidth,
@@ -2342,8 +2380,8 @@ class _LibraryScreenState extends State<LibraryScreen>
           topPadding: AppSpacing.md,
           horizontalPadding: AppSpacing.md,
           gestureInset: selecting ? 0 : MediaQuery.paddingOf(context).bottom,
-          paintedHeight: (cellWidth) =>
-              BookCard.paintedHeight(context, cellWidth),
+          paintedHeight: (w) => BookCard.paintedHeight(context, w),
+          cellHeight: cellHeight,
         );
         _pinShelfOffsetWhenItFits(_gridScrollController, booksFit);
         return RefreshIndicator(
@@ -2369,10 +2407,8 @@ class _LibraryScreenState extends State<LibraryScreen>
                               : MediaQuery.paddingOf(context).bottom),
               ),
               gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: computeShelfGridMetrics(
-                  MediaQuery.sizeOf(context).width,
-                ).columns,
-                childAspectRatio: 0.52,
+                crossAxisCount: columns,
+                mainAxisExtent: cellHeight,
                 crossAxisSpacing: AppSpacing.xs,
                 mainAxisSpacing: AppSpacing.sm,
               ),
@@ -2449,6 +2485,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     required double horizontalPadding,
     required double gestureInset,
     required double Function(double cellWidth) paintedHeight,
+    required double cellHeight,
   }) {
     if (bookCount <= 0) return true;
     if (!viewportWidth.isFinite || !viewportHeight.isFinite) return false;
@@ -2457,7 +2494,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     final cardWidth = columns <= 1
         ? innerWidth
         : math.max(0.0, (innerWidth - AppSpacing.xs * (columns - 1)) / columns);
-    final cardHeight = cardWidth / 0.52;
+    final cardHeight = cellHeight;
     final rows = (bookCount / columns).ceil();
     final lastRowHeight = math.min(cardHeight, paintedHeight(cardWidth));
     final contentHeight =

@@ -7,6 +7,7 @@ import '../models/book.dart';
 import '../models/reader_note.dart';
 import '../repositories/reader_repositories.dart';
 import '../services/chinese_text.dart';
+import '../theme/app_overlay_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_theme.dart';
 import '../widgets/app_choice_pill.dart';
@@ -67,7 +68,7 @@ class _LibraryNotesScreenState extends State<LibraryNotesScreen> {
   }
 
   Future<void> _loadNotes() async {
-    setState(() => _loading = true);
+    if (_allNotes.isEmpty) setState(() => _loading = true);
     final scopedBooks = _booksById.values.toList(growable: false);
     final perBook = await Future.wait(
       scopedBooks.map(
@@ -185,8 +186,10 @@ class _LibraryNotesScreenState extends State<LibraryNotesScreen> {
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: AppTheme.systemUiOverlayStyle(colors),
-      child: Scaffold(
-        backgroundColor: colors.background,
+      child: AppOverlayTheme(
+        colors: colors,
+        child: Scaffold(
+          backgroundColor: colors.background,
         appBar: AppBar(
           backgroundColor: colors.background,
           foregroundColor: colors.text,
@@ -417,6 +420,7 @@ class _LibraryNotesScreenState extends State<LibraryNotesScreen> {
                   ),
                 ],
               ),
+        ),
       ),
     );
   }

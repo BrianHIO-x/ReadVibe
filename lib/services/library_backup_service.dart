@@ -265,13 +265,11 @@ class LibraryBackupService {
     ];
 
     try {
-      await Isolate.run(
-        () => _writeBackupZipWorker(
-          zipPath: stagedZip.path,
-          backupManifestJson: jsonEncode(backupManifest),
-          appRoot: appRoot,
-          fileSpecs: specs,
-        ),
+      await _writeBackupZipInIsolate(
+        zipPath: stagedZip.path,
+        backupManifestJson: jsonEncode(backupManifest),
+        appRoot: appRoot,
+        fileSpecs: specs,
       );
       final sizeBytes = await stagedZip.length();
       final saved = await _exportDestination.save(
@@ -308,9 +306,7 @@ class LibraryBackupService {
     final appRoot = p.normalize(
       (await _storage.getAppDataDirectory()).absolute.path,
     );
-    final decodedPayload = await Isolate.run(
-      () => _readAndValidateManifestWorker(zipPath),
-    );
+    final decodedPayload = await _readManifestInIsolate(zipPath);
     final manifest = _parseValidatedBackupManifest(decodedPayload);
 
     final rawBooks = (manifest['books'] as List)
@@ -379,13 +375,11 @@ class LibraryBackupService {
     }
 
     if (allowedExactPaths.isNotEmpty || allowedDirPrefixes.isNotEmpty) {
-      await Isolate.run(
-        () => _extractPayloadFilesWorker(
-          zipPath: zipPath,
-          appRoot: appRoot,
-          allowedExactPaths: allowedExactPaths.toList(growable: false),
-          allowedDirPrefixes: allowedDirPrefixes.toList(growable: false),
-        ),
+      await _extractPayloadFilesInIsolate(
+        zipPath: zipPath,
+        appRoot: appRoot,
+        allowedExactPaths: allowedExactPaths.toList(growable: false),
+        allowedDirPrefixes: allowedDirPrefixes.toList(growable: false),
       );
     }
 
@@ -1191,3 +1185,34 @@ List<String> _readStringList(Object? raw) {
       if (item is String && item.trim().isNotEmpty) item.trim(),
   ];
 }
+
+Future<void> _writeBackupZipInIsolate({
+  required String zipPath,
+  required String backupManifestJson,
+  required String appRoot,
+  required List<(String, String, bool)> fileSpecs,
+}) => Isolate.run(
+  () => _writeBackupZipWorker(
+    zipPath: zipPath,
+    backupManifestJson: backupManifestJson,
+    appRoot: appRoot,
+    fileSpecs: fileSpecs,
+  ),
+);
+
+Future<String> _readManifestInIsolate(String zipPath) =>
+    Isolate.run(() => _readAndValidateManifestWorker(zipPath));
+
+Future<void> _extractPayloadFilesInIsolate({
+  required String zipPath,
+  required String appRoot,
+  required List<String> allowedExactPaths,
+  required List<String> allowedDirPrefixes,
+}) => Isolate.run(
+  () => _extractPayloadFilesWorker(
+    zipPath: zipPath,
+    appRoot: appRoot,
+    allowedExactPaths: allowedExactPaths,
+    allowedDirPrefixes: allowedDirPrefixes,
+  ),
+);

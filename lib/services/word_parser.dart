@@ -10,6 +10,7 @@ import 'package:xml/xml_events.dart';
 
 import '../models/book.dart';
 import 'book_id.dart';
+import 'epub_markup_decoder.dart';
 import '../repositories/reader_repositories.dart';
 import 'txt_parser.dart';
 
@@ -43,30 +44,8 @@ Future<Book> parseWordDocument(
 ) async {
   final extension = fileName.toLowerCase();
   if (extension.endsWith('.docx')) {
-    final now = DateTime.now();
-    final bookId = nextBookId('docx', now: now);
     final root = await storage.getAppDataDirectory();
-    final resourceDirectory = Directory(p.join(root.path, 'word', bookId));
-    try {
-      return await Isolate.run(
-        () => _parseDocx(
-          filePath,
-          fileName,
-          bookId,
-          now,
-          resourceDirectory.path,
-        ),
-      );
-    } on Object {
-      try {
-        if (await resourceDirectory.exists()) {
-          await resourceDirectory.delete(recursive: true);
-        }
-      } on FileSystemException {
-        // Storage maintenance can retry an interrupted resource cleanup.
-      }
-      rethrow;
-    }
+    return _importDocx(filePath, fileName, root.path);
   }
   if (!extension.endsWith('.doc')) {
     throw const FormatException('仅支持 DOCX 或 DOC 文档');
@@ -92,17 +71,18 @@ Future<Book> parseWordDocument(
     }
     final title = rawDocument?['title'];
     final author = rawDocument?['author'];
-    return await Isolate.run(
-      () => buildBookFromText(
-        content: content,
-        fileName: fileName,
-        format: BookFormat.doc,
-        fileSize: stat.size,
-        title: title is String ? title : null,
-        author: author is String ? author : null,
-      ),
+    return await _buildDocBookInIsolate(
+      content: content,
+      fileName: fileName,
+      fileSize: stat.size,
+      title: title is String ? title : null,
+      author: author is String ? author : null,
     );
   } on PlatformException catch (error) {
+    if (error.code == 'DOC_IS_DOCX') {
+      final root = await storage.getAppDataDirectory();
+      return _importDocx(filePath, fileName, root.path);
+    }
     final message = error.message?.trim();
     throw FormatException(
       message == null || message.isEmpty
@@ -111,6 +91,69 @@ Future<Book> parseWordDocument(
     );
   }
 }
+
+Future<Book> _importDocx(
+  String filePath,
+  String fileName,
+  String rootPath,
+) async {
+  final now = DateTime.now();
+  final bookId = nextBookId('docx', now: now);
+  final resourceDirectory = Directory(p.join(rootPath, 'word', bookId));
+  try {
+    return await _runDocxInIsolate(
+      filePath,
+      fileName,
+      bookId,
+      now,
+      resourceDirectory.path,
+    );
+  } on Object {
+    try {
+      if (await resourceDirectory.exists()) {
+        await resourceDirectory.delete(recursive: true);
+      }
+    } on FileSystemException {
+      // Storage maintenance can retry an interrupted resource cleanup.
+    }
+    rethrow;
+  }
+}
+
+// Keep Isolate.run in its own top-level helper so the AOT closure context
+// never captures an async caller's StorageService (which holds a Future).
+Future<Book> _runDocxInIsolate(
+  String filePath,
+  String fileName,
+  String bookId,
+  DateTime importDate,
+  String resourceDirectoryPath,
+) => Isolate.run(
+  () => _parseDocx(
+    filePath,
+    fileName,
+    bookId,
+    importDate,
+    resourceDirectoryPath,
+  ),
+);
+
+Future<Book> _buildDocBookInIsolate({
+  required String content,
+  required String fileName,
+  required int fileSize,
+  String? title,
+  String? author,
+}) => Isolate.run(
+  () => buildBookFromText(
+    content: content,
+    fileName: fileName,
+    format: BookFormat.doc,
+    fileSize: fileSize,
+    title: title,
+    author: author,
+  ),
+);
 
 Future<Book> _parseDocx(
   String filePath,
@@ -146,16 +189,17 @@ Future<Book> _parseDocx(
 
     var expandedBytes = 0;
     final archiveFiles = <String, ArchiveFile>{};
-    ArchiveFile? documentFile;
     for (final entry in archive.files) {
       expandedBytes += entry.size;
       if (expandedBytes > _maxDocxExpandedBytes) {
         throw const FormatException('DOCX 解压后的内容过大，无法安全解析');
       }
-      final normalizedName = entry.name.replaceAll(r'\', '/').toLowerCase();
+      final normalizedName = _normalizeWordArchivePath(entry.name);
+      if (normalizedName.isEmpty) continue;
       archiveFiles.putIfAbsent(normalizedName, () => entry);
-      if (normalizedName == 'word/document.xml') documentFile = entry;
     }
+    final documentPath = _resolveDocxMainDocumentPath(archiveFiles);
+    final documentFile = archiveFiles[documentPath];
     if (documentFile == null) {
       throw const FormatException('DOCX 缺少主文档内容');
     }
@@ -163,8 +207,21 @@ Future<Book> _parseDocx(
       throw const FormatException('DOCX 正文过大，无法安全解析');
     }
 
-    final relationships = _docxRelationships(archiveFiles);
-    final footnotes = _docxFootnotes(archiveFiles);
+    final relationships = _docxRelationships(
+      archiveFiles,
+      mainDocumentPath: documentPath,
+    );
+    final styles = _docxHeadingStyleIds(archiveFiles);
+    final footnotes = _docxNotes(
+      archiveFiles,
+      partPath: 'word/footnotes.xml',
+      elementName: 'footnote',
+    );
+    final endnotes = _docxNotes(
+      archiveFiles,
+      partPath: 'word/endnotes.xml',
+      elementName: 'endnote',
+    );
     final imageStore = _DocxImageStore(
       archiveFiles: archiveFiles,
       relationships: relationships,
@@ -176,7 +233,13 @@ Future<Book> _parseDocx(
     // costs more than ten times its size and is what used to exhaust memory on
     // an ordinary novel.
     _inflateToFile(documentFile, spill, _maxDocumentXmlBytes);
-    final blocks = await _readDocxBody(spill, footnotes, imageStore);
+    final blocks = await _readDocxBody(
+      spill,
+      styles: styles,
+      footnotes: footnotes,
+      endnotes: endnotes,
+      imageStore: imageStore,
+    );
     if (blocks.isEmpty) {
       throw const FormatException('DOCX 中没有可读取的正文、表格或图片');
     }
@@ -282,14 +345,21 @@ class _BoundedFileOutput extends OutputStream {
 /// blocks it describes. Only the paragraph or table being read is held, so the
 /// walk costs the same for a short story and for a finished novel.
 Future<List<EpubContentBlock>> _readDocxBody(
-  File document,
-  Map<String, String> footnotes,
-  _DocxImageStore imageStore,
-) async {
-  final reader = _DocxBodyReader(footnotes: footnotes, imageStore: imageStore);
+  File document, {
+  required Set<String> styles,
+  required Map<String, String> footnotes,
+  required Map<String, String> endnotes,
+  required _DocxImageStore imageStore,
+}) async {
+  final reader = _DocxBodyReader(
+    headingStyleIds: styles,
+    footnotes: footnotes,
+    endnotes: endnotes,
+    imageStore: imageStore,
+  );
   try {
-    await for (final events
-        in document.openRead().transform(utf8.decoder).toXmlEvents()) {
+    final stream = _docxXmlTextStream(document).toXmlEvents();
+    await for (final events in stream) {
       for (final event in events) {
         reader.handle(event);
       }
@@ -303,6 +373,76 @@ Future<List<EpubContentBlock>> _readDocxBody(
     throw const FormatException('DOCX 中没有可读取的正文');
   }
   return reader.blocks;
+}
+
+Stream<String> _docxXmlTextStream(File document) async* {
+  final probe = <int>[];
+  final reader = document.openSync();
+  try {
+    final buffer = Uint8List(4);
+    final count = reader.readIntoSync(buffer);
+    probe.addAll(buffer.sublist(0, count));
+  } finally {
+    reader.closeSync();
+  }
+  final isUtf16 =
+      (probe.length >= 2 &&
+          ((probe[0] == 0xff && probe[1] == 0xfe) ||
+              (probe[0] == 0xfe && probe[1] == 0xff) ||
+              (probe[0] == 0x3c && probe[1] == 0x00) ||
+              (probe[0] == 0x00 && probe[1] == 0x3c)));
+  if (isUtf16) {
+    yield decodeEpubMarkup(document.readAsBytesSync());
+    return;
+  }
+  var first = true;
+  await for (final chunk
+      in document.openRead().transform(const Utf8Decoder(allowMalformed: true))) {
+    if (first && chunk.startsWith('\ufeff')) {
+      first = false;
+      yield chunk.substring(1);
+    } else {
+      first = false;
+      yield chunk;
+    }
+  }
+}
+
+String _normalizeWordArchivePath(String raw) {
+  var value = raw.replaceAll(r'\', '/').trim();
+  if (value.isEmpty) return '';
+  value = p.posix.normalize(value);
+  while (value.startsWith('/')) {
+    value = value.substring(1);
+  }
+  if (value == '.') return '';
+  return value.toLowerCase();
+}
+
+String _resolveDocxMainDocumentPath(Map<String, ArchiveFile> archiveFiles) {
+  final rootRels = _parseDocxPart(
+    archiveFiles,
+    '_rels/.rels',
+    _maxRelationshipsXmlBytes,
+  );
+  if (rootRels != null) {
+    for (final rel in rootRels.descendants.whereType<XmlElement>()) {
+      if (rel.name.local != 'Relationship') continue;
+      final type = _wordAttribute(rel, 'Type').toLowerCase();
+      final target = _wordAttribute(rel, 'Target');
+      if (target.isEmpty) continue;
+      if (type.endsWith('/officedocument') ||
+          type.contains('/officedocument')) {
+        final resolved = _normalizeWordArchivePath(
+          target.replaceAll(r'\', '/'),
+        );
+        if (resolved.isNotEmpty && archiveFiles.containsKey(resolved)) {
+          return resolved;
+        }
+      }
+    }
+  }
+  return 'word/document.xml';
 }
 
 ({String title, String author}) _docxCoreProperties(
@@ -338,7 +478,7 @@ XmlDocument? _parseDocxPart(
   if (file == null || file.size <= 0 || file.size > maxBytes) return null;
   try {
     return XmlDocument.parse(
-      utf8.decode(file.readBytes() ?? const <int>[], allowMalformed: true),
+      decodeEpubMarkup(file.readBytes() ?? const <int>[]),
     );
   } on Object {
     return null;
@@ -347,50 +487,125 @@ XmlDocument? _parseDocxPart(
   }
 }
 
-Map<String, String> _docxRelationships(Map<String, ArchiveFile> archiveFiles) {
-  final document = _parseDocxPart(
-    archiveFiles,
-    'word/_rels/document.xml.rels',
-    _maxRelationshipsXmlBytes,
-  );
+Map<String, String> _docxRelationships(
+  Map<String, ArchiveFile> archiveFiles, {
+  required String mainDocumentPath,
+}) {
+  final baseDir = p.posix.dirname(mainDocumentPath);
+  final baseName = p.posix.basename(mainDocumentPath);
+  final relsPath = baseDir == '.'
+      ? '_rels/$baseName.rels'
+      : '$baseDir/_rels/$baseName.rels';
+  final document =
+      _parseDocxPart(archiveFiles, relsPath, _maxRelationshipsXmlBytes) ??
+      _parseDocxPart(
+        archiveFiles,
+        'word/_rels/document.xml.rels',
+        _maxRelationshipsXmlBytes,
+      );
   if (document == null) return const {};
   final relationships = <String, String>{};
   for (final element in document.descendants.whereType<XmlElement>()) {
     if (element.name.local != 'Relationship') continue;
     final id = _wordAttribute(element, 'Id');
-    final target = _wordAttribute(element, 'Target');
+    final target = _wordAttribute(element, 'Target').replaceAll(r'\', '/');
     final targetMode = _wordAttribute(element, 'TargetMode').toLowerCase();
     if (id.isEmpty || target.isEmpty || targetMode == 'external') continue;
-    final String decodedTarget;
+    String decodedTarget;
     try {
       decodedTarget = Uri.decodeComponent(target);
     } on ArgumentError {
-      continue;
+      decodedTarget = target;
     }
-    final path = p.posix
-        .normalize(p.posix.join('word', decodedTarget))
-        .replaceFirst(RegExp(r'^/+'), '')
-        .toLowerCase();
-    if (path != '..' && !path.startsWith('../')) relationships[id] = path;
+    final joined = decodedTarget.startsWith('/')
+        ? decodedTarget
+        : (baseDir == '.' ? decodedTarget : p.posix.join(baseDir, decodedTarget));
+    final path = _normalizeWordArchivePath(joined);
+    if (path.isNotEmpty && path != '..' && !path.startsWith('../')) {
+      relationships[id] = path;
+    }
   }
   return relationships;
 }
 
-Map<String, String> _docxFootnotes(Map<String, ArchiveFile> archiveFiles) {
+Set<String> _docxHeadingStyleIds(Map<String, ArchiveFile> archiveFiles) {
+  final doc = _parseDocxPart(
+    archiveFiles,
+    'word/styles.xml',
+    _maxRelationshipsXmlBytes,
+  );
+  if (doc == null) return const <String>{};
+  final byId = <String, ({String name, String? basedOn, int? outlineLvl})>{};
+  for (final style in doc.descendants.whereType<XmlElement>()) {
+    if (style.name.local != 'style') continue;
+    final id = _wordAttribute(style, 'styleId').trim().toLowerCase();
+    if (id.isEmpty) continue;
+    var name = '';
+    String? basedOn;
+    int? outlineLvl;
+    for (final child in style.children.whereType<XmlElement>()) {
+      switch (child.name.local) {
+        case 'name':
+          name = _wordAttribute(child, 'val').trim().toLowerCase();
+        case 'basedOn':
+          basedOn = _wordAttribute(child, 'val').trim().toLowerCase();
+        case 'pPr':
+          for (final prop in child.children.whereType<XmlElement>()) {
+            if (prop.name.local == 'outlineLvl') {
+              outlineLvl = int.tryParse(_wordAttribute(prop, 'val').trim());
+            }
+          }
+      }
+    }
+    byId[id] = (name: name, basedOn: basedOn, outlineLvl: outlineLvl);
+  }
+
+  final headings = <String>{};
+  bool isHeading(String id, Set<String> visiting) {
+    if (headings.contains(id)) return true;
+    final entry = byId[id];
+    if (entry == null || !visiting.add(id)) return false;
+    if (entry.outlineLvl != null &&
+        entry.outlineLvl! >= 0 &&
+        entry.outlineLvl! <= 5) {
+      return true;
+    }
+    if (entry.name.startsWith('heading') ||
+        entry.name.startsWith('标题') ||
+        entry.name == 'title') {
+      return true;
+    }
+    if (entry.basedOn != null && entry.basedOn!.isNotEmpty) {
+      return isHeading(entry.basedOn!, visiting);
+    }
+    return false;
+  }
+
+  for (final id in byId.keys) {
+    if (isHeading(id, <String>{})) headings.add(id);
+  }
+  return headings;
+}
+
+Map<String, String> _docxNotes(
+  Map<String, ArchiveFile> archiveFiles, {
+  required String partPath,
+  required String elementName,
+}) {
   final document = _parseDocxPart(
     archiveFiles,
-    'word/footnotes.xml',
+    partPath,
     _maxFootnotesXmlBytes,
   );
   if (document == null) return const {};
   final notes = <String, String>{};
-  for (final footnote in document.descendants.whereType<XmlElement>().where(
-    (element) => element.name.local == 'footnote',
+  for (final note in document.descendants.whereType<XmlElement>().where(
+    (element) => element.name.local == elementName,
   )) {
-    final id = _wordAttribute(footnote, 'id');
+    final id = _wordAttribute(note, 'id');
     final parsed = int.tryParse(id);
     if (parsed == null || parsed < 0) continue;
-    final text = _docxElementText(footnote).trim();
+    final text = _docxElementText(note).trim();
     if (text.isNotEmpty) notes[id] = text;
   }
   return notes;
@@ -421,10 +636,34 @@ bool _docxToggleEnabled(String value) {
 /// what the tree walk used to see while holding nothing but the current
 /// paragraph. Paragraphs nested in a content control are read as well, so a
 /// document whose body Word wrapped in `w:sdt` no longer imports empty.
-class _DocxBodyReader {
-  _DocxBodyReader({required this.footnotes, required this.imageStore});
+class _DocxTableState {
+  _DocxTableState(this.depth);
 
+  final int depth;
+  final rows = <String>[];
+  final images = <EpubContentBlock>[];
+  int? rowDepth;
+  final rowCells = <String>[];
+  int? cellDepth;
+  final cellText = StringBuffer();
+  int? cellParagraphDepth;
+  bool cellHasParagraphText = false;
+  int? cellRunDepth;
+  int? cellRunPropertiesDepth;
+  bool cellRunVanish = false;
+}
+
+class _DocxBodyReader {
+  _DocxBodyReader({
+    required this.headingStyleIds,
+    required this.footnotes,
+    required this.endnotes,
+    required this.imageStore,
+  });
+
+  final Set<String> headingStyleIds;
   final Map<String, String> footnotes;
+  final Map<String, String> endnotes;
   final _DocxImageStore imageStore;
   final blocks = <EpubContentBlock>[];
 
@@ -433,14 +672,19 @@ class _DocxBodyReader {
   /// Local names of the elements enclosing the current position.
   final _open = <String>[];
 
+  /// Track `<mc:AlternateContent>` choice/fallback deduplication.
+  final _altContentStack = <({int depth, bool sawChoice})>[];
+  int? _skipDepth;
+
   int? _bodyDepth;
   int? _paragraphDepth;
-  int? _tableDepth;
+  final _tableStack = <_DocxTableState>[];
 
   // Paragraph being read.
   int? _paragraphPropertiesDepth;
   String _paragraphStyle = '';
   String _paragraphAlignment = '';
+  bool _paragraphOutlineHeading = false;
   final _paragraphRuns = <EpubTextRun>[];
   final _paragraphText = StringBuffer();
   final _paragraphImages = <EpubContentBlock>[];
@@ -455,15 +699,9 @@ class _DocxBodyReader {
   bool? _runItalic;
   bool? _runItalicComplex;
   bool? _runUnderline;
+  bool _runVanish = false;
   double? _runHalfPoints;
   int? _runColor;
-
-  // Table being read.
-  final _tableRows = <String>[];
-  int? _rowDepth;
-  final _rowCells = <String>[];
-  int? _cellDepth;
-  final _cellText = StringBuffer();
 
   void handle(XmlEvent event) {
     if (event is XmlStartElementEvent) {
@@ -482,6 +720,7 @@ class _DocxBodyReader {
       _end(_localName(event.name));
       return;
     }
+    if (_skipDepth != null) return;
     if (event is XmlTextEvent) {
       _write(event.value);
     } else if (event is XmlCDATAEvent) {
@@ -492,15 +731,48 @@ class _DocxBodyReader {
   int get _depth => _open.length;
 
   void _write(String value) {
-    if (_textDepth == null || value.isEmpty) return;
-    if (_cellDepth != null) {
-      _cellText.write(value);
-    } else {
+    if (_textDepth == null || value.isEmpty || _skipDepth != null) return;
+    if (_tableStack.isNotEmpty) {
+      final table = _tableStack.last;
+      if (table.cellDepth != null && !table.cellRunVanish) {
+        table.cellText.write(value);
+        table.cellHasParagraphText = true;
+      }
+    } else if (_runDepth != null && !_runVanish) {
       _runText.write(value);
     }
   }
 
   void _start(String local, XmlStartElementEvent event) {
+    if (_skipDepth != null) return;
+
+    if (local == 'AlternateContent') {
+      _altContentStack.add((depth: _depth, sawChoice: false));
+      return;
+    }
+    if (_altContentStack.isNotEmpty) {
+      final top = _altContentStack.last;
+      if (local == 'Choice' && _depth == top.depth + 1) {
+        _altContentStack[_altContentStack.length - 1] = (
+          depth: top.depth,
+          sawChoice: true,
+        );
+      } else if (local == 'Fallback' &&
+          _depth == top.depth + 1 &&
+          top.sawChoice) {
+        _skipDepth = _depth;
+        return;
+      }
+    }
+
+    if (local == 'del' ||
+        local == 'moveFrom' ||
+        local == 'rPrChange' ||
+        local == 'pPrChange') {
+      _skipDepth = _depth;
+      return;
+    }
+
     if (_bodyDepth == null) {
       if (local == 'body') {
         _bodyDepth = _depth;
@@ -508,7 +780,7 @@ class _DocxBodyReader {
       }
       return;
     }
-    if (_tableDepth != null) {
+    if (_tableStack.isNotEmpty) {
       _startInTable(local, event);
       return;
     }
@@ -519,33 +791,65 @@ class _DocxBodyReader {
     if (local == 'p') {
       _paragraphDepth = _depth;
     } else if (local == 'tbl') {
-      _tableDepth = _depth;
+      _tableStack.add(_DocxTableState(_depth));
     }
   }
 
   void _end(String local) {
+    if (_skipDepth != null) {
+      if (_skipDepth == _depth) _skipDepth = null;
+      return;
+    }
+    if (_altContentStack.isNotEmpty && _altContentStack.last.depth == _depth) {
+      _altContentStack.removeLast();
+    }
     if (_bodyDepth == null) return;
     if (_textDepth == _depth) _textDepth = null;
+    if (_tableStack.isNotEmpty) {
+      final table = _tableStack.last;
+      if (table.cellRunPropertiesDepth == _depth) {
+        table.cellRunPropertiesDepth = null;
+      }
+      if (table.cellRunDepth == _depth) {
+        table.cellRunDepth = null;
+        table.cellRunVanish = false;
+      }
+      if (table.cellParagraphDepth == _depth) {
+        table.cellParagraphDepth = null;
+        if (table.cellHasParagraphText &&
+            !table.cellText.toString().endsWith('\n')) {
+          table.cellText.write('\n');
+        }
+        table.cellHasParagraphText = false;
+      }
+      if (table.cellDepth == _depth) {
+        _closeCell(table);
+        return;
+      }
+      if (table.rowDepth == _depth) {
+        _closeRow(table);
+        return;
+      }
+      if (table.depth == _depth) {
+        _closeTable();
+        return;
+      }
+      return;
+    }
     if (_runPropertiesDepth == _depth) _runPropertiesDepth = null;
     if (_paragraphPropertiesDepth == _depth) _paragraphPropertiesDepth = null;
     if (_runDepth == _depth) {
       _closeRun();
       return;
     }
-    if (_cellDepth == _depth) {
-      _closeCell();
-      return;
-    }
-    if (_rowDepth == _depth) {
-      _closeRow();
+    if (_runDepth != null && local == 'p') {
+      if (_runText.isNotEmpty && !_runText.toString().endsWith('\n')) {
+        _runText.write('\n');
+      }
       return;
     }
     if (_paragraphDepth == _depth) {
       _closeParagraph();
-      return;
-    }
-    if (_tableDepth == _depth) {
-      _closeTable();
       return;
     }
     if (_bodyDepth == _depth) _bodyDepth = null;
@@ -565,6 +869,11 @@ class _DocxBodyReader {
         _paragraphStyle = _eventAttribute(event, 'val');
       } else if (local == 'jc' && _paragraphAlignment.isEmpty) {
         _paragraphAlignment = _eventAttribute(event, 'val');
+      } else if (local == 'outlineLvl') {
+        final lvl = int.tryParse(_eventAttribute(event, 'val'));
+        if (lvl != null && lvl >= 0 && lvl <= 5) {
+          _paragraphOutlineHeading = true;
+        }
       }
       return;
     }
@@ -582,10 +891,9 @@ class _DocxBodyReader {
       _runPropertiesDepth = _depth;
       return;
     }
+    if (_runVanish) return;
     switch (local) {
       case 't':
-      case 'delText':
-      case 'instrText':
         _textDepth ??= _depth;
       case 'tab':
         _runText.write('\t');
@@ -597,8 +905,20 @@ class _DocxBodyReader {
       case 'footnoteReference':
         final note = footnotes[_eventAttribute(event, 'id')];
         if (note != null) _runText.write('〔脚注：$note〕');
+      case 'endnoteReference':
+        final note = endnotes[_eventAttribute(event, 'id')];
+        if (note != null) _runText.write('〔尾注：$note〕');
       case 'blip':
-        final image = imageStore.extract(_eventAttribute(event, 'embed'));
+        final relId = _eventAttribute(event, 'embed');
+        final image = imageStore.extract(
+          relId.isNotEmpty ? relId : _eventAttribute(event, 'link'),
+        );
+        if (image != null) _paragraphImages.add(image);
+      case 'imagedata':
+        final id = _eventAttribute(event, 'id');
+        final image = imageStore.extract(
+          id.isNotEmpty ? id : _eventAttribute(event, 'relid'),
+        );
         if (image != null) _paragraphImages.add(image);
     }
   }
@@ -615,6 +935,8 @@ class _DocxBodyReader {
         _runItalicComplex ??= _docxToggleEnabled(_eventAttribute(event, 'val'));
       case 'u':
         _runUnderline ??= _docxToggleEnabled(_eventAttribute(event, 'val'));
+      case 'vanish':
+        _runVanish = _docxToggleEnabled(_eventAttribute(event, 'val'));
       case 'sz':
         _runHalfPoints ??= double.tryParse(_eventAttribute(event, 'val'));
       case 'color':
@@ -627,31 +949,75 @@ class _DocxBodyReader {
   }
 
   void _startInTable(String local, XmlStartElementEvent event) {
-    if (_cellDepth != null) {
+    final table = _tableStack.last;
+    if (local == 'tbl') {
+      _tableStack.add(_DocxTableState(_depth));
+      return;
+    }
+    if (table.cellDepth != null) {
+      if (table.cellRunPropertiesDepth != null) {
+        if (local == 'vanish') {
+          table.cellRunVanish = _docxToggleEnabled(_eventAttribute(event, 'val'));
+        }
+        return;
+      }
+      if (table.cellRunDepth != null &&
+          local == 'rPr' &&
+          _depth == table.cellRunDepth! + 1) {
+        table.cellRunPropertiesDepth = _depth;
+        return;
+      }
+      if (table.cellRunVanish) return;
       switch (local) {
+        case 'p':
+          table.cellParagraphDepth ??= _depth;
+          table.cellHasParagraphText = false;
+        case 'r':
+          table.cellRunDepth ??= _depth;
         case 't':
           _textDepth ??= _depth;
         case 'tab':
-          _cellText.write('\t');
+          table.cellText.write('\t');
         case 'br':
         case 'cr':
-          _cellText.write('\n');
+          table.cellText.write('\n');
+        case 'noBreakHyphen':
+          table.cellText.write('‑');
         case 'footnoteReference':
           final note = footnotes[_eventAttribute(event, 'id')];
-          if (note != null) _cellText.write('〔脚注：$note〕');
+          if (note != null) table.cellText.write('〔脚注：$note〕');
+        case 'endnoteReference':
+          final note = endnotes[_eventAttribute(event, 'id')];
+          if (note != null) table.cellText.write('〔尾注：$note〕');
+        case 'blip':
+          final relId = _eventAttribute(event, 'embed');
+          final image = imageStore.extract(
+            relId.isNotEmpty ? relId : _eventAttribute(event, 'link'),
+          );
+          if (image != null) table.images.add(image);
+        case 'imagedata':
+          final id = _eventAttribute(event, 'id');
+          final image = imageStore.extract(
+            id.isNotEmpty ? id : _eventAttribute(event, 'relid'),
+          );
+          if (image != null) table.images.add(image);
       }
       return;
     }
-    if (_rowDepth != null) {
-      if (local == 'tc' && _depth == _rowDepth! + 1) _cellDepth = _depth;
+    if (table.rowDepth != null) {
+      if (local == 'tc') {
+        table.cellDepth = _depth;
+      }
       return;
     }
-    if (local == 'tr') _rowDepth = _depth;
+    if (local == 'tr') table.rowDepth = _depth;
   }
 
   void _closeRun() {
     _runDepth = null;
-    final value = _runText.toString();
+    final vanished = _runVanish;
+    _runVanish = false;
+    final value = vanished ? '' : _runText.toString();
     _runText.clear();
     final style = EpubContentStyle(
       fontScale: _runHalfPoints == null
@@ -678,10 +1044,16 @@ class _DocxBodyReader {
   void _closeParagraph() {
     _paragraphDepth = null;
     final normalizedText = _paragraphText.toString().trimRight();
+    final trimmedRuns = _trimTrailingRunWhitespace(
+      _paragraphRuns,
+      normalizedText.length,
+    );
     final normalizedStyleName = _paragraphStyle.toLowerCase();
     final isHeading =
         normalizedText.isNotEmpty &&
-        (normalizedStyleName.startsWith('heading') ||
+        (_paragraphOutlineHeading ||
+            headingStyleIds.contains(normalizedStyleName) ||
+            normalizedStyleName.startsWith('heading') ||
             normalizedStyleName.startsWith('标题') ||
             normalizedStyleName == 'title' ||
             detectTxtChapterTitle(normalizedText) != null);
@@ -697,10 +1069,10 @@ class _DocxBodyReader {
           kind: EpubContentBlockKind.text,
           text: normalizedText,
           runs:
-              _paragraphRuns.length == 1 &&
-                  _isDefaultDocxStyle(_paragraphRuns.single.style)
+              trimmedRuns.length == 1 &&
+                  _isDefaultDocxStyle(trimmedRuns.single.style)
               ? const <EpubTextRun>[]
-              : List<EpubTextRun>.unmodifiable(_paragraphRuns),
+              : List<EpubTextRun>.unmodifiable(trimmedRuns),
           isHeading: isHeading,
           style: EpubContentStyle(
             fontScale: isHeading ? 1.25 : 1,
@@ -716,34 +1088,41 @@ class _DocxBodyReader {
     blocks.addAll(_paragraphImages);
     _paragraphStyle = '';
     _paragraphAlignment = '';
+    _paragraphOutlineHeading = false;
     _paragraphRuns.clear();
     _paragraphText.clear();
     _paragraphImages.clear();
   }
 
-  void _closeCell() {
-    _cellDepth = null;
-    _rowCells.add(
-      _cellText.toString().replaceAll(RegExp(r'\s+'), ' ').trim(),
-    );
-    _cellText.clear();
+  void _closeCell(_DocxTableState table) {
+    table.cellDepth = null;
+    table.cellParagraphDepth = null;
+    table.cellHasParagraphText = false;
+    final cleaned = table.cellText
+        .toString()
+        .split('\n')
+        .map((line) => line.replaceAll(RegExp(r'\s+'), ' ').trim())
+        .where((line) => line.isNotEmpty)
+        .join(' / ');
+    table.rowCells.add(cleaned);
+    table.cellText.clear();
   }
 
-  void _closeRow() {
-    _rowDepth = null;
-    if (_rowCells.any((cell) => cell.isNotEmpty)) {
-      _tableRows.add(_rowCells.join('　│　'));
+  void _closeRow(_DocxTableState table) {
+    table.rowDepth = null;
+    if (table.rowCells.any((cell) => cell.isNotEmpty)) {
+      table.rows.add(table.rowCells.join('　│　'));
     }
-    _rowCells.clear();
+    table.rowCells.clear();
   }
 
   void _closeTable() {
-    _tableDepth = null;
-    if (_tableRows.isNotEmpty) {
+    final table = _tableStack.removeLast();
+    if (table.rows.isNotEmpty) {
       blocks.add(
         EpubContentBlock(
           kind: EpubContentBlockKind.text,
-          text: _tableRows.join('\n'),
+          text: table.rows.join('\n'),
           style: const EpubContentStyle(
             fontScale: 0.92,
             textIndentEm: 0,
@@ -754,8 +1133,34 @@ class _DocxBodyReader {
         ),
       );
     }
-    _tableRows.clear();
+    blocks.addAll(table.images);
   }
+}
+
+List<EpubTextRun> _trimTrailingRunWhitespace(
+  List<EpubTextRun> runs,
+  int targetLength,
+) {
+  if (runs.isEmpty || targetLength <= 0) return const <EpubTextRun>[];
+  final kept = <EpubTextRun>[];
+  var remaining = targetLength;
+  for (final run in runs) {
+    if (remaining <= 0) break;
+    if (run.text.length <= remaining) {
+      kept.add(run);
+      remaining -= run.text.length;
+    } else {
+      kept.add(
+        EpubTextRun(
+          text: run.text.substring(0, remaining),
+          style: run.style,
+          link: run.link,
+        ),
+      );
+      remaining = 0;
+    }
+  }
+  return kept;
 }
 
 bool _isDefaultDocxStyle(EpubContentStyle style) =>
@@ -883,11 +1288,12 @@ class _DocxImageStore {
         // Word keeps pictures at their original resolution, so the bytes are
         // moved straight to disk instead of through a buffer.
         _inflateToFile(file, target, _maxDocxImageBytes);
-      } on FileSystemException {
-        return null;
-      } on FormatException {
-        // The entry inflated past what its header declared. A picture that
-        // cannot be trusted is dropped; the prose around it still imports.
+      } on Object {
+        try {
+          if (target.existsSync()) target.deleteSync();
+        } on FileSystemException {
+          // Best-effort cleanup of partial image payload.
+        }
         return null;
       }
       return EpubContentBlock(

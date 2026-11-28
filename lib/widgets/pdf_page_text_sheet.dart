@@ -67,6 +67,7 @@ class _PdfPageTextSheetState extends State<PdfPageTextSheet> {
     final colors = widget.colors;
     return AppSheetSurface(
       colors: colors,
+      animateSize: false,
       child: SafeArea(
         top: false,
         bottom: false,
@@ -79,16 +80,27 @@ class _PdfPageTextSheetState extends State<PdfPageTextSheet> {
             Divider(height: 1, color: colors.border),
             Expanded(
               child: body.isEmpty
-                  ? Center(
-                      child: Padding(
+                  ? LayoutBuilder(
+                      builder: (context, constraints) => SingleChildScrollView(
+                        controller: widget.scrollController,
+                        physics: const AlwaysScrollableScrollPhysics(),
                         padding: const EdgeInsets.all(AppSpacing.xl),
-                        child: Text(
-                          '这一页是纯图像，或者识别没有得到结果。\n'
-                          '可以在工具菜单里对当前页再做一次文字识别。',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: colors.secondary,
-                            height: 1.6,
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            minHeight: (constraints.maxHeight -
+                                    AppSpacing.xl * 2)
+                                .clamp(0.0, double.infinity),
+                          ),
+                          child: Center(
+                            child: Text(
+                              '这一页是纯图像，或者识别没有得到结果。\n'
+                              '可以在工具菜单里对当前页再做一次文字识别。',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: colors.secondary,
+                                height: 1.6,
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -127,11 +139,11 @@ class _PdfPageTextSheetState extends State<PdfPageTextSheet> {
                       },
                       child: ListView(
                         controller: widget.scrollController,
-                        padding: EdgeInsets.fromLTRB(
+                        padding: const EdgeInsets.fromLTRB(
                           20,
                           AppSpacing.md,
                           20,
-                          AppSpacing.xl + MediaQuery.paddingOf(context).bottom,
+                          AppSpacing.xl,
                         ),
                         children: [
                           Text(

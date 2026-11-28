@@ -279,6 +279,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
 
   Future<void> _toggleBookmark() async {
     if (_savingBookmark) return;
+    _autoHideTimer?.cancel();
     _savingBookmark = true;
     final previous = Set<int>.of(_bookmarks);
     final added = !_bookmarks.contains(_currentPage);
@@ -320,6 +321,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
       }
     } finally {
       _savingBookmark = false;
+      if (mounted && _chromeVisible) _scheduleChromeAutoHide();
     }
   }
 
@@ -330,49 +332,57 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     await showAppSheet<void>(
       context: context,
       colors: colors,
-      builder: (sheetContext) => DraggableScrollableSheet(
-        initialChildSize: 0.75,
-        maxChildSize: 0.95,
-        minChildSize: 0.3,
-        builder: (_, scrollController) => StatefulBuilder(
-          builder: (_, setSheetState) {
-            final pageMarks = (_bookmarks.toList()..sort())
-                .map(
-                  (page) => ReaderBookmark(
-                    id: 'pdf:$page',
-                    chapterIndex: page,
-                    chapterTitle: '第 ${page + 1} 页',
-                    paragraphIndex: 0,
-                    characterOffset: 0,
-                    excerpt: '',
-                    note: '',
-                    chapterProgress: _pageCount <= 1
-                        ? 0
-                        : page / (_pageCount - 1),
-                    createdAt: DateTime.now(),
-                  ),
-                )
-                .toList(growable: false);
-            return ReaderNotesHubSheet(
-              bookTitle: widget.book.title,
-              author: widget.book.author,
-              isPdf: true,
-              notes: _richNotes,
-              bookmarks: pageMarks,
-              colors: colors,
-              scrollController: scrollController,
-              onSelectNote: (note) {
-                selectedPage = note.chapterIndex;
-                Navigator.of(sheetContext).pop();
-              },
-              onEditNote: (note) async {
-                await _editPageNoteFor(note.chapterIndex, existing: note);
-                setSheetState(() {});
-              },
-              onDeleteNote: (note) {
-                unawaited(_deleteRichNote(note));
-                setSheetState(() {});
-              },
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
+        child: DraggableScrollableSheet(
+          initialChildSize: 0.75,
+          maxChildSize: 0.95,
+          minChildSize: 0.35,
+          builder: (_, scrollController) => StatefulBuilder(
+            builder: (_, setSheetState) {
+              final pageMarks = (_bookmarks.toList()..sort())
+                  .map(
+                    (page) => ReaderBookmark(
+                      id: 'pdf:$page',
+                      chapterIndex: page,
+                      chapterTitle: '第 ${page + 1} 页',
+                      paragraphIndex: 0,
+                      characterOffset: 0,
+                      excerpt: '',
+                      note: '',
+                      chapterProgress: _pageCount <= 1
+                          ? 0
+                          : page / (_pageCount - 1),
+                      createdAt: DateTime.now(),
+                    ),
+                  )
+                  .toList(growable: false);
+              return ReaderNotesHubSheet(
+                bookTitle: widget.book.title,
+                author: widget.book.author,
+                isPdf: true,
+                notes: _richNotes,
+                bookmarks: pageMarks,
+                colors: colors,
+                scrollController: scrollController,
+                onSelectNote: (note) {
+                  selectedPage = note.chapterIndex;
+                  Navigator.of(sheetContext).pop();
+                },
+                onEditNote: (note) async {
+                  await _editPageNoteFor(note.chapterIndex, existing: note);
+                  if (sheetContext.mounted) setSheetState(() {});
+                },
+                onDeleteNote: (note) {
+                  unawaited(
+                    _deleteRichNote(note).then((_) {
+                      if (sheetContext.mounted) setSheetState(() {});
+                    }),
+                  );
+                  setSheetState(() {});
+                },
               onSelectBookmark: (bookmark) {
                 selectedPage = bookmark.chapterIndex;
                 Navigator.of(sheetContext).pop();
@@ -396,6 +406,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
               },
             );
           },
+        ),
         ),
       ),
     );
@@ -492,6 +503,8 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     List<ReaderNote> nextRich, {
     required int syncPageIndex,
   }) async {
+    final previousRich = _richNotes;
+    final previousLegacy = _notes;
     final sorted = sortedReaderNotes(nextRich);
     final nextLegacy = Map<int, String>.of(_notes);
     final pageNotes = sorted
@@ -505,6 +518,12 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     } else {
       nextLegacy[syncPageIndex] = combinedSummary;
     }
+    if (mounted) {
+      setState(() {
+        _richNotes = sorted;
+        _notes = nextLegacy;
+      });
+    }
     try {
       await Future.wait([
         _storage.saveNotes(widget.book.id, sorted),
@@ -513,6 +532,10 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     } on Object catch (error) {
       debugPrint('PDF note save failed: $error');
       if (mounted) {
+        setState(() {
+          _richNotes = previousRich;
+          _notes = previousLegacy;
+        });
         AppToast.error(
           context,
           '笔记保存失败，请重试',
@@ -521,12 +544,6 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
         );
       }
       return;
-    }
-    if (mounted) {
-      setState(() {
-        _richNotes = sorted;
-        _notes = nextLegacy;
-      });
     }
     final sourcePath = _sourcePath;
     if (sourcePath != null) {
@@ -679,18 +696,23 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     await showAppSheet<void>(
       context: context,
       colors: colors,
-      builder: (_) => DraggableScrollableSheet(
-        initialChildSize: 0.75,
-        maxChildSize: 0.95,
-        minChildSize: 0.35,
-        builder: (_, scrollController) => PdfPageTextSheet(
-          pageNumber: pageIndex + 1,
-          text: text,
-          source: source,
-          colors: colors,
-          scrollController: scrollController,
-          onAddNote: (selectedQuote) =>
-              _editPageNoteFor(pageIndex, initialQuote: selectedQuote),
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
+        child: DraggableScrollableSheet(
+          initialChildSize: 0.75,
+          maxChildSize: 0.95,
+          minChildSize: 0.35,
+          builder: (_, scrollController) => PdfPageTextSheet(
+            pageNumber: pageIndex + 1,
+            text: text,
+            source: source,
+            colors: colors,
+            scrollController: scrollController,
+            onAddNote: (selectedQuote) =>
+                _editPageNoteFor(pageIndex, initialQuote: selectedQuote),
+          ),
         ),
       ),
     );
@@ -933,6 +955,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
     }
     _transformControllers.clear();
     _pageController?.dispose();
+    unawaited(_windowController.showChrome(true));
     _windowController.dispose();
     super.dispose();
   }
@@ -1027,8 +1050,19 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
   @override
   Widget build(BuildContext context) {
     final controller = _pageController;
+    final darkStatusIcons =
+        !_chromeVisible && _displayTheme == PdfDisplayTheme.paper;
+    final overlayStyle =
+        (darkStatusIcons
+                ? SystemUiOverlayStyle.dark
+                : SystemUiOverlayStyle.light)
+            .copyWith(
+              statusBarColor: Colors.transparent,
+              systemNavigationBarColor: Colors.transparent,
+              systemNavigationBarDividerColor: Colors.transparent,
+            );
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: SystemUiOverlayStyle.light,
+      value: overlayStyle,
       child: Scaffold(
         backgroundColor: const Color(0xFF111111),
         resizeToAvoidBottomInset: false,
@@ -1136,22 +1170,25 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
           opacity: _chromeVisible ? 1.0 : 0.0,
           duration: AppMotion.menu,
           curve: AppMotion.gentle,
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Colors.black.withValues(alpha: 0.85),
-                  Colors.black.withValues(alpha: 0.70),
-                ],
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {},
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.85),
+                    Colors.black.withValues(alpha: 0.70),
+                  ],
+                ),
               ),
-            ),
-            child: SafeArea(
-              bottom: false,
-              child: SizedBox(
-                height: 56,
-                child: Row(
+              child: SafeArea(
+                bottom: false,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 56),
+                  child: Row(
                   children: [
                     IconButton(
                       tooltip: '返回',
@@ -1254,6 +1291,7 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
                 ),
               ),
             ),
+            ),
           ),
         ),
       ),
@@ -1277,96 +1315,134 @@ class _PdfReaderScreenState extends State<PdfReaderScreen>
         child: AnimatedOpacity(
           opacity: _chromeVisible ? 1 : 0,
           duration: AppMotion.menu,
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Colors.black.withValues(alpha: 0.68),
-                  Colors.black.withValues(alpha: 0.90),
-                ],
-              ),
-            ),
-            child: SafeArea(
-              top: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-                child: Row(
-                  children: [
-                    IconButton(
-                      tooltip: '书签列表',
-                      onPressed: _showBookmarks,
-                      icon: const Icon(
-                        Icons.bookmarks_outlined,
-                        color: Colors.white70,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: _bookmarks.contains(_currentPage)
-                          ? '取消书签'
-                          : '添加书签',
-                      onPressed: _toggleBookmark,
-                      icon: Icon(
-                        _bookmarks.contains(_currentPage)
-                            ? Icons.bookmark_rounded
-                            : Icons.bookmark_border_rounded,
-                        color: _bookmarks.contains(_currentPage)
-                            ? Colors.amberAccent
-                            : Colors.white70,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip:
-                          _richNotes.any((n) => n.chapterIndex == _currentPage)
-                          ? '编辑本页笔记'
-                          : '添加本页笔记',
-                      onPressed: _editPageNote,
-                      icon: Icon(
-                        _richNotes.any((n) => n.chapterIndex == _currentPage)
-                            ? Icons.note_alt_rounded
-                            : Icons.note_add_outlined,
-                        color:
-                            _richNotes.any(
-                              (n) => n.chapterIndex == _currentPage,
-                            )
-                            ? Colors.lightBlueAccent
-                            : Colors.white70,
-                      ),
-                    ),
-                    Expanded(
-                      child: SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                          activeTrackColor: Colors.white,
-                          inactiveTrackColor: Colors.white24,
-                          thumbColor: Colors.white,
-                          overlayColor: Colors.white12,
-                        ),
-                        child: Slider(
-                          min: 0,
-                          max: math.max(1, _pageCount - 1).toDouble(),
-                          value: sliderPage.toDouble(),
-                          onChanged: _pageCount <= 1
-                              ? null
-                              : (value) =>
-                                    setState(() => _sliderPage = value.round()),
-                          onChangeEnd: _pageCount <= 1
-                              ? null
-                              : (value) => _goToPage(value.round()),
-                        ),
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: _showPageJumpDialog,
-                      child: Text(
-                        '${sliderPage + 1} / $_pageCount',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {},
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.68),
+                    Colors.black.withValues(alpha: 0.90),
                   ],
+                ),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 38,
+                          minHeight: 38,
+                        ),
+                        tooltip: '书签列表',
+                        onPressed: _showBookmarks,
+                        icon: const Icon(
+                          Icons.bookmarks_outlined,
+                          color: Colors.white70,
+                        ),
+                      ),
+                      IconButton(
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 38,
+                          minHeight: 38,
+                        ),
+                        tooltip: _bookmarks.contains(_currentPage)
+                            ? '取消书签'
+                            : '添加书签',
+                        onPressed: _toggleBookmark,
+                        icon: Icon(
+                          _bookmarks.contains(_currentPage)
+                              ? Icons.bookmark_rounded
+                              : Icons.bookmark_border_rounded,
+                          color: _bookmarks.contains(_currentPage)
+                              ? Colors.amberAccent
+                              : Colors.white70,
+                        ),
+                      ),
+                      IconButton(
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 38,
+                          minHeight: 38,
+                        ),
+                        tooltip:
+                            _richNotes.any((n) => n.chapterIndex == _currentPage)
+                            ? '编辑本页笔记'
+                            : '添加本页笔记',
+                        onPressed: _editPageNote,
+                        icon: Icon(
+                          _richNotes.any((n) => n.chapterIndex == _currentPage)
+                              ? Icons.note_alt_rounded
+                              : Icons.note_add_outlined,
+                          color:
+                              _richNotes.any(
+                                (n) => n.chapterIndex == _currentPage,
+                              )
+                              ? Colors.lightBlueAccent
+                              : Colors.white70,
+                        ),
+                      ),
+                      Expanded(
+                        child: SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            activeTrackColor: Colors.white,
+                            inactiveTrackColor: Colors.white24,
+                            thumbColor: Colors.white,
+                            overlayColor: Colors.white12,
+                          ),
+                          child: Slider(
+                            min: 0,
+                            max: math.max(1, _pageCount - 1).toDouble(),
+                            value: sliderPage.toDouble(),
+                            onChangeStart: _pageCount <= 1
+                                ? null
+                                : (_) => _autoHideTimer?.cancel(),
+                            onChanged: _pageCount <= 1
+                                ? null
+                                : (value) => setState(
+                                    () => _sliderPage = value.round(),
+                                  ),
+                            onChangeEnd: _pageCount <= 1
+                                ? null
+                                : (value) async {
+                                    await _goToPage(value.round());
+                                    if (mounted && _chromeVisible) {
+                                      _scheduleChromeAutoHide();
+                                    }
+                                  },
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 6,
+                          ),
+                          minimumSize: const Size(0, 36),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        onPressed: _showPageJumpDialog,
+                        child: Text(
+                          '${sliderPage + 1} / $_pageCount',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

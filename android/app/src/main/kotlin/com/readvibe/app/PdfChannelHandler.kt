@@ -48,8 +48,11 @@ internal class PdfChannelHandler(context: Context, messenger: BinaryMessenger) {
                     onSuccess = result::success,
                     onError = { error ->
                         result.error(
-                            if (error is InvalidPasswordException) "PDF_PASSWORD_REQUIRED"
-                            else "PDF_RENDER_FAILED",
+                            if (error is InvalidPasswordException || error is SecurityException) {
+                                "PDF_PASSWORD_REQUIRED"
+                            } else {
+                                "PDF_RENDER_FAILED"
+                            },
                             error.message ?: "PDF 已损坏、加密或不受支持",
                             null,
                         )

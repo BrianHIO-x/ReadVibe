@@ -54,7 +54,9 @@ _EpubNavigation _extractNavigation(
     final file = archiveLookup.find(item.path);
     if (file == null) continue;
     try {
-      final document = html_parser.parse(decodeEpubMarkup(_bytesOf(file)));
+      final document = html_parser.parse(
+        normalizeXhtmlSelfClosingTags(decodeEpubMarkup(_bytesOf(file))),
+      );
       final navigation = _findTocNavigation(document);
       if (navigation == null) continue;
       final list =

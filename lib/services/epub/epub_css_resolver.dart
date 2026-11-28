@@ -1,8 +1,10 @@
 part of '../epub_parser.dart';
 
+typedef _CssDeclaration = ({String property, String value, bool important});
+
 class _CssRule {
   final String selector;
-  final Map<String, String> declarations;
+  final List<_CssDeclaration> declarations;
   final int specificity;
   final int order;
 
@@ -18,8 +20,10 @@ class _EpubStyleResolver {
   final List<_CssRule> _rules;
   final String? Function(String rawUrl) resolveImage;
   final String? Function(String rawFamily) resolveFontFamily;
-  final Expando<Map<String, String>> _declarationCache =
-      Expando<Map<String, String>>('epub-css-declarations');
+  final Expando<
+    ({Map<String, String> map, List<_CssDeclaration> ordered})
+  >
+  _declarationCache = Expando('epub-css-declarations');
 
   _EpubStyleResolver(
     String cssText, {
@@ -38,8 +42,7 @@ class _EpubStyleResolver {
   }
 
   String? propertyFor(Element element, String property) {
-    final declarations = _declarationsFor(element);
-    return declarations[property.toLowerCase()];
+    return _declarationsFor(element).map[property.toLowerCase()];
   }
 
   EpubContentStyle styleFor(
@@ -100,7 +103,8 @@ class _EpubStyleResolver {
       fontScale *= 1.15;
     }
 
-    final declarations = _declarationsFor(element);
+    final resolved = _declarationsFor(element);
+    final declarations = resolved.map;
     final declaredFamily = declarations['font-family'];
     if (declaredFamily != null) {
       fontFamily = resolveFontFamily(declaredFamily) ?? fontFamily;
@@ -127,30 +131,55 @@ class _EpubStyleResolver {
       declarations['text-indent'],
       fallback: textIndentEm,
     );
-    marginTopEm = _emLength(declarations['margin-top'], fallback: marginTopEm);
-    marginBottomEm = _emLength(
-      declarations['margin-bottom'],
-      fallback: marginBottomEm,
-    );
-    final margin = declarations['margin'];
-    if (margin != null) {
-      final values = margin.trim().split(RegExp(r'\s+'));
-      if (values.isNotEmpty) {
-        marginTopEm = _emLength(values.first, fallback: marginTopEm);
-        marginBottomEm = _emLength(
-          values.length >= 3 ? values[2] : values.first,
-          fallback: marginBottomEm,
-        );
-      }
-    }
     colorArgb = _parseCssColor(declarations['color']) ?? colorArgb;
-    backgroundColorArgb =
-        _parseCssColor(declarations['background-color']) ?? backgroundColorArgb;
-    final background =
-        declarations['background-image'] ?? declarations['background'];
-    final backgroundUrl = _cssUrl(background);
-    if (backgroundUrl != null) {
-      backgroundImagePath = resolveImage(backgroundUrl);
+
+    // Replay ordered shorthand/longhand declarations in cascade order so
+    // `margin: 0` followed by `margin-top: 1em` vs reversed declaration order
+    // matches standard CSS cascade semantics.
+    for (final entry in resolved.ordered) {
+      switch (entry.property) {
+        case 'margin-top':
+          marginTopEm = _emLength(entry.value, fallback: marginTopEm);
+        case 'margin-bottom':
+          marginBottomEm = _emLength(entry.value, fallback: marginBottomEm);
+        case 'margin':
+          final values = entry.value.trim().split(RegExp(r'\s+'));
+          if (values.isNotEmpty) {
+            marginTopEm = _emLength(values.first, fallback: marginTopEm);
+            marginBottomEm = _emLength(
+              values.length >= 3 ? values[2] : values.first,
+              fallback: marginBottomEm,
+            );
+          }
+        case 'background-color':
+          final parsed = _parseCssColor(entry.value);
+          if (parsed != null) {
+            backgroundColorArgb = parsed;
+          } else if (entry.value.trim().toLowerCase() == 'transparent') {
+            backgroundColorArgb = null;
+          }
+        case 'background-image':
+          if (entry.value.trim().toLowerCase() == 'none') {
+            backgroundImagePath = null;
+          } else {
+            final backgroundUrl = _cssUrl(entry.value);
+            if (backgroundUrl != null) {
+              backgroundImagePath = resolveImage(backgroundUrl);
+            }
+          }
+        case 'background':
+          if (entry.value.trim().toLowerCase() == 'none') {
+            backgroundColorArgb = null;
+            backgroundImagePath = null;
+          } else {
+            final bgColor = _parseBackgroundColor(entry.value);
+            if (bgColor != null) backgroundColorArgb = bgColor;
+            final backgroundUrl = _cssUrl(entry.value);
+            if (backgroundUrl != null) {
+              backgroundImagePath = resolveImage(backgroundUrl);
+            }
+          }
+      }
     }
 
     return EpubContentStyle(
@@ -171,7 +200,9 @@ class _EpubStyleResolver {
     );
   }
 
-  Map<String, String> _declarationsFor(Element element) {
+  ({Map<String, String> map, List<_CssDeclaration> ordered}) _declarationsFor(
+    Element element,
+  ) {
     final cached = _declarationCache[element];
     if (cached != null) return cached;
     final matched =
@@ -182,33 +213,191 @@ class _EpubStyleResolver {
             final specificity = a.specificity.compareTo(b.specificity);
             return specificity != 0 ? specificity : a.order.compareTo(b.order);
           });
-    final declarations = <String, String>{};
+    final normal = <_CssDeclaration>[];
+    final important = <_CssDeclaration>[];
     for (final rule in matched) {
-      declarations.addAll(rule.declarations);
+      for (final decl in rule.declarations) {
+        (decl.important ? important : normal).add(decl);
+      }
     }
     final inline = element.attributes['style'];
-    if (inline != null) declarations.addAll(_parseDeclarations(inline));
-    _declarationCache[element] = declarations;
-    return declarations;
+    if (inline != null && inline.isNotEmpty) {
+      for (final decl in _parseDeclarationList(inline)) {
+        (decl.important ? important : normal).add(decl);
+      }
+    }
+    final ordered = <_CssDeclaration>[...normal, ...important];
+    final map = <String, String>{};
+    for (final decl in ordered) {
+      map[decl.property] = decl.value;
+    }
+    final result = (map: map, ordered: ordered);
+    _declarationCache[element] = result;
+    return result;
   }
 }
 
 List<_CssRule> _parseCssRules(String cssText) {
   if (cssText.trim().isEmpty) return const <_CssRule>[];
-  final clean = cssText
-      .replaceAll(RegExp(r'/\*.*?\*/', dotAll: true), '')
-      .replaceAll(
-        RegExp(r'@(?:import|charset)\b[^;]*;', caseSensitive: false),
-        '',
-      );
+  final withoutCdata = cssText
+      .replaceAll('<![CDATA[', '')
+      .replaceAll(']]>', '');
+  final clean = _stripCssComments(withoutCdata);
   final rules = <_CssRule>[];
   var order = 0;
-  for (final match in RegExp(r'([^{}]+)\{([^{}]*)\}').allMatches(clean)) {
-    final body = match.group(2);
-    if (body == null) continue;
-    final declarations = _parseDeclarations(body);
+  _collectCssRules(clean, rules, () => order++);
+  return rules;
+}
+
+String _stripCssComments(String input) {
+  final out = StringBuffer();
+  var quote = '';
+  var i = 0;
+  while (i < input.length) {
+    final ch = input[i];
+    if (quote.isNotEmpty) {
+      out.write(ch);
+      if (ch == r'\' && i + 1 < input.length) {
+        i++;
+        out.write(input[i]);
+      } else if (ch == quote) {
+        quote = '';
+      }
+      i++;
+      continue;
+    }
+    if (ch == '"' || ch == "'") {
+      quote = ch;
+      out.write(ch);
+      i++;
+      continue;
+    }
+    if (ch == '/' && i + 1 < input.length && input[i + 1] == '*') {
+      final close = input.indexOf('*/', i + 2);
+      if (close < 0) break;
+      out.write(' ');
+      i = close + 2;
+      continue;
+    }
+    out.write(ch);
+    i++;
+  }
+  return out.toString();
+}
+
+void _collectCssRules(
+  String css,
+  List<_CssRule> rules,
+  int Function() nextOrder, {
+  int depth = 0,
+}) {
+  if (depth > 8) return;
+  var i = 0;
+  while (i < css.length) {
+    while (i < css.length &&
+        (_isCssWhitespace(css.codeUnitAt(i)) || css[i] == ';')) {
+      i++;
+    }
+    if (i >= css.length) break;
+
+    final start = i;
+    var quote = '';
+    var parenDepth = 0;
+    var bracketDepth = 0;
+    var hitBrace = false;
+    var hitSemicolon = false;
+    while (i < css.length) {
+      final ch = css[i];
+      if (quote.isNotEmpty) {
+        if (ch == r'\' && i + 1 < css.length) {
+          i += 2;
+          continue;
+        }
+        if (ch == quote) quote = '';
+        i++;
+        continue;
+      }
+      if (ch == '"' || ch == "'") {
+        quote = ch;
+      } else if (ch == '(') {
+        parenDepth++;
+      } else if (ch == ')' && parenDepth > 0) {
+        parenDepth--;
+      } else if (ch == '[') {
+        bracketDepth++;
+      } else if (ch == ']' && bracketDepth > 0) {
+        bracketDepth--;
+      } else if (parenDepth == 0 && bracketDepth == 0) {
+        if (ch == '{') {
+          hitBrace = true;
+          break;
+        }
+        if (ch == ';') {
+          hitSemicolon = true;
+          break;
+        }
+        if (ch == '}') {
+          i++;
+          break;
+        }
+      }
+      i++;
+    }
+    if (hitSemicolon || !hitBrace) {
+      i++;
+      continue;
+    }
+
+    final prelude = css.substring(start, i).trim();
+    final bodyStart = i + 1;
+    var braceDepth = 1;
+    quote = '';
+    var j = bodyStart;
+    while (j < css.length && braceDepth > 0) {
+      final ch = css[j];
+      if (quote.isNotEmpty) {
+        if (ch == r'\' && j + 1 < css.length) {
+          j += 2;
+          continue;
+        }
+        if (ch == quote) quote = '';
+        j++;
+        continue;
+      }
+      if (ch == '"' || ch == "'") {
+        quote = ch;
+      } else if (ch == '{') {
+        braceDepth++;
+      } else if (ch == '}') {
+        braceDepth--;
+        if (braceDepth == 0) break;
+      }
+      j++;
+    }
+    final body = css.substring(bodyStart, j);
+    i = j + 1;
+
+    if (prelude.isEmpty) continue;
+    if (prelude.startsWith('@')) {
+      final keyword = RegExp(
+        r'^@([a-zA-Z-]+)',
+      ).firstMatch(prelude)?.group(1)?.toLowerCase();
+      if (keyword == 'media') {
+        if (_mediaQueryAppliesToScreen(prelude)) {
+          _collectCssRules(body, rules, nextOrder, depth: depth + 1);
+        }
+      } else if (keyword == 'supports' ||
+          keyword == 'layer' ||
+          keyword == 'document' ||
+          keyword == 'container') {
+        _collectCssRules(body, rules, nextOrder, depth: depth + 1);
+      }
+      continue;
+    }
+
+    final declarations = _parseDeclarationList(body);
     if (declarations.isEmpty) continue;
-    for (final rawSelector in (match.group(1) ?? '').split(',')) {
+    for (final rawSelector in _splitTopLevel(prelude, ',')) {
       final selector = rawSelector.trim();
       if (selector.isEmpty || selector.startsWith('@')) continue;
       rules.add(
@@ -216,25 +405,148 @@ List<_CssRule> _parseCssRules(String cssText) {
           selector: selector,
           declarations: declarations,
           specificity: _selectorSpecificity(selector),
-          order: order++,
+          order: nextOrder(),
         ),
       );
     }
   }
-  return rules;
+}
+
+bool _isCssWhitespace(int codeUnit) =>
+    codeUnit == 0x20 ||
+    codeUnit == 0x09 ||
+    codeUnit == 0x0a ||
+    codeUnit == 0x0d ||
+    codeUnit == 0x0c;
+
+bool _mediaQueryAppliesToScreen(String prelude) {
+  final raw = prelude
+      .replaceFirst(RegExp(r'^@media\b', caseSensitive: false), '')
+      .trim()
+      .toLowerCase();
+  if (raw.isEmpty) return true;
+  for (final query in raw.split(',')) {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) continue;
+    if (trimmed.contains('prefers-color-scheme') ||
+        trimmed.contains('inverted-colors')) {
+      continue;
+    }
+    if (trimmed.startsWith('(')) return true;
+    final firstWord = RegExp(
+      r'^(?:(?:only|not)\s+)?([a-z-]+)',
+    ).firstMatch(trimmed);
+    if (firstWord == null) continue;
+    final mediaType = firstWord.group(1);
+    final isNegated = trimmed.startsWith('not ');
+    if (mediaType == 'all' || mediaType == 'screen') {
+      if (!isNegated) return true;
+    } else if (mediaType == 'amzn-mobi' ||
+        mediaType == 'amzn-kf8' ||
+        mediaType == 'print' ||
+        mediaType == 'speech' ||
+        mediaType == 'aural' ||
+        mediaType == 'braille' ||
+        mediaType == 'tty' ||
+        mediaType == 'tv' ||
+        mediaType == 'projection') {
+      if (isNegated) return true;
+    }
+  }
+  return false;
+}
+
+List<String> _splitTopLevel(String input, String separator) {
+  final result = <String>[];
+  var quote = '';
+  var parenDepth = 0;
+  var bracketDepth = 0;
+  var start = 0;
+  for (var i = 0; i < input.length; i++) {
+    final ch = input[i];
+    if (quote.isNotEmpty) {
+      if (ch == r'\' && i + 1 < input.length) {
+        i++;
+        continue;
+      }
+      if (ch == quote) quote = '';
+      continue;
+    }
+    if (ch == '"' || ch == "'") {
+      quote = ch;
+    } else if (ch == '(') {
+      parenDepth++;
+    } else if (ch == ')' && parenDepth > 0) {
+      parenDepth--;
+    } else if (ch == '[') {
+      bracketDepth++;
+    } else if (ch == ']' && bracketDepth > 0) {
+      bracketDepth--;
+    } else if (ch == separator && parenDepth == 0 && bracketDepth == 0) {
+      result.add(input.substring(start, i));
+      start = i + 1;
+    }
+  }
+  result.add(input.substring(start));
+  return result;
+}
+
+int _indexOfTopLevelColon(String part) {
+  var quote = '';
+  var parenDepth = 0;
+  for (var i = 0; i < part.length; i++) {
+    final ch = part[i];
+    if (quote.isNotEmpty) {
+      if (ch == r'\' && i + 1 < part.length) {
+        i++;
+        continue;
+      }
+      if (ch == quote) quote = '';
+      continue;
+    }
+    if (ch == '"' || ch == "'") {
+      quote = ch;
+    } else if (ch == '(') {
+      parenDepth++;
+    } else if (ch == ')' && parenDepth > 0) {
+      parenDepth--;
+    } else if (ch == ':' && parenDepth == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+List<_CssDeclaration> _parseDeclarationList(String body) {
+  final declarations = <_CssDeclaration>[];
+  for (final part in _splitTopLevel(body, ';')) {
+    final colon = _indexOfTopLevelColon(part);
+    if (colon <= 0) continue;
+    final property = part.substring(0, colon).trim().toLowerCase();
+    var value = part.substring(colon + 1).trim();
+    final importantPattern = RegExp(
+      r'\s*!\s*important\s*$',
+      caseSensitive: false,
+    );
+    final important = importantPattern.hasMatch(value);
+    if (important) {
+      value = value.replaceFirst(importantPattern, '').trim();
+    }
+    if (property.isNotEmpty && value.isNotEmpty) {
+      declarations.add((
+        property: property,
+        value: value,
+        important: important,
+      ));
+    }
+  }
+  return declarations;
 }
 
 Map<String, String> _parseDeclarations(String body) {
   final declarations = <String, String>{};
-  for (final part in body.split(';')) {
-    final colon = part.indexOf(':');
-    if (colon <= 0) continue;
-    final property = part.substring(0, colon).trim().toLowerCase();
-    final value = part
-        .substring(colon + 1)
-        .trim()
-        .replaceAll(RegExp(r'\s*!important\s*$', caseSensitive: false), '');
-    if (property.isNotEmpty && value.isNotEmpty) declarations[property] = value;
+  for (final entry in _parseDeclarationList(body)) {
+    declarations[entry.property] = entry.value;
   }
   return declarations;
 }
@@ -252,36 +564,80 @@ int _selectorSpecificity(String selector) {
 }
 
 bool _matchesSelector(Element element, String rawSelector) {
-  if (rawSelector.contains('+') || rawSelector.contains('~')) return false;
-  // Keep :first-child: a table row's chapter/section styling uses it to indent
-  // only the first cell. Every other pseudo-class is still ignored, exactly as
-  // before, so the ordinary cascade is unchanged.
-  final selector = rawSelector
-      .replaceAll(RegExp(r'::[\w-]+(?:\([^)]*\))?'), '')
-      .replaceAll(RegExp(r':(?!first-child\b)[\w-]+(?:\([^)]*\))?'), '')
-      .replaceAll(RegExp(r'\[[^\]]+\]'), '')
-      .trim();
+  final selector = rawSelector.trim();
   if (selector.isEmpty) return false;
-  final tokens = selector
-      .replaceAllMapped(RegExp(r'\s*>\s*'), (_) => ' > ')
-      .split(RegExp(r'\s+'))
-      .where((part) => part.isNotEmpty)
-      .toList();
   final parts = <String>[];
   final childRelations = <bool>[];
-  var nextIsChild = false;
-  for (final token in tokens) {
-    if (token == '>') {
-      nextIsChild = true;
+  final buffer = StringBuffer();
+  var quote = '';
+  var bracketDepth = 0;
+  var parenDepth = 0;
+  var pendingChild = false;
+
+  void flushPart() {
+    final token = buffer.toString().trim();
+    buffer.clear();
+    if (token.isEmpty) return;
+    if (parts.isNotEmpty) childRelations.add(pendingChild);
+    parts.add(token);
+    pendingChild = false;
+  }
+
+  for (var i = 0; i < selector.length; i++) {
+    final ch = selector[i];
+    if (quote.isNotEmpty) {
+      buffer.write(ch);
+      if (ch == r'\' && i + 1 < selector.length) {
+        i++;
+        buffer.write(selector[i]);
+      } else if (ch == quote) {
+        quote = '';
+      }
       continue;
     }
-    if (parts.isNotEmpty) childRelations.add(nextIsChild);
-    parts.add(token);
-    nextIsChild = false;
+    if (ch == '"' || ch == "'") {
+      quote = ch;
+      buffer.write(ch);
+      continue;
+    }
+    if (ch == '[') {
+      bracketDepth++;
+      buffer.write(ch);
+      continue;
+    }
+    if (ch == ']' && bracketDepth > 0) {
+      bracketDepth--;
+      buffer.write(ch);
+      continue;
+    }
+    if (ch == '(') {
+      parenDepth++;
+      buffer.write(ch);
+      continue;
+    }
+    if (ch == ')' && parenDepth > 0) {
+      parenDepth--;
+      buffer.write(ch);
+      continue;
+    }
+    if (bracketDepth == 0 && parenDepth == 0) {
+      if (ch == '+' || ch == '~') return false;
+      if (ch == '>') {
+        flushPart();
+        pendingChild = true;
+        continue;
+      }
+      if (_isCssWhitespace(ch.codeUnitAt(0))) {
+        flushPart();
+        continue;
+      }
+    }
+    buffer.write(ch);
   }
-  if (parts.isEmpty || !_matchesCompoundSelector(element, parts.last)) {
-    return false;
-  }
+  flushPart();
+  if (pendingChild || parts.isEmpty) return false;
+  if (!_matchesCompoundSelector(element, parts.last)) return false;
+
   var matchedElement = element;
   for (var index = parts.length - 2; index >= 0; index--) {
     Element? candidate = matchedElement.parent;
@@ -304,22 +660,228 @@ bool _matchesSelector(Element element, String rawSelector) {
 
 bool _matchesCompoundSelector(Element element, String selector) {
   if (selector == '*') return true;
-  if (selector.contains(':first-child')) {
-    final parent = element.parent;
-    if (parent == null || parent.children.isEmpty) return false;
-    if (!identical(parent.children.first, element)) return false;
+  var index = 0;
+
+  bool readTagOrUniversal() {
+    final start = index;
+    if (selector[index] == '*') {
+      index++;
+      if (index < selector.length && selector[index] == '|') {
+        index++;
+        return readTagOrUniversal();
+      }
+      return true;
+    }
+    while (index < selector.length) {
+      final ch = selector[index];
+      if (ch == '#' ||
+          ch == '.' ||
+          ch == '[' ||
+          ch == ':' ||
+          ch == '*') {
+        break;
+      }
+      index++;
+    }
+    var tagName = selector.substring(start, index);
+    if (index < selector.length && selector[index] == '|') {
+      index++;
+      return readTagOrUniversal();
+    }
+    final pipe = tagName.indexOf('|');
+    if (pipe >= 0) tagName = tagName.substring(pipe + 1);
+    return tagName == '*' ||
+        (element.localName ?? '').toLowerCase() == tagName.toLowerCase();
   }
-  final tag = RegExp(r'^[a-zA-Z][\w-]*').firstMatch(selector)?.group(0);
-  if (tag != null &&
-      (element.localName ?? '').toLowerCase() != tag.toLowerCase()) {
-    return false;
+
+  String readIdent() {
+    final start = index;
+    while (index < selector.length) {
+      final ch = selector[index];
+      if (ch == '#' ||
+          ch == '.' ||
+          ch == '[' ||
+          ch == ':' ||
+          ch == '(' ||
+          ch == ')' ||
+          _isCssWhitespace(ch.codeUnitAt(0))) {
+        break;
+      }
+      index++;
+    }
+    return selector.substring(start, index);
   }
-  final id = RegExp(r'#([\w-]+)').firstMatch(selector)?.group(1);
-  if (id != null && element.id != id) return false;
-  for (final match in RegExp(r'\.([\w-]+)').allMatches(selector)) {
-    if (!element.classes.contains(match.group(1))) return false;
+
+  final first = selector[0];
+  if (first != '#' && first != '.' && first != '[' && first != ':') {
+    if (!readTagOrUniversal()) return false;
+  }
+
+  while (index < selector.length) {
+    final marker = selector[index];
+    if (marker == '#') {
+      index++;
+      final id = readIdent();
+      if (id.isEmpty || element.id != id) return false;
+    } else if (marker == '.') {
+      index++;
+      final cls = readIdent();
+      if (cls.isEmpty || !element.classes.contains(cls)) return false;
+    } else if (marker == '[') {
+      final close = _findClosingDelimiter(selector, index + 1, '[', ']');
+      if (close < 0) return false;
+      final expr = selector.substring(index + 1, close);
+      index = close + 1;
+      if (!_matchesAttributeSelector(element, expr)) return false;
+    } else if (marker == ':') {
+      index++;
+      if (index < selector.length && selector[index] == ':') {
+        // Pseudo-elements (::first-letter, ::before, etc.) cannot be modeled
+        // on the enclosing block without corrupting the entire paragraph style.
+        return false;
+      }
+      final pseudo = readIdent().toLowerCase();
+      String? argument;
+      if (index < selector.length && selector[index] == '(') {
+        final close = _findClosingDelimiter(selector, index + 1, '(', ')');
+        if (close < 0) return false;
+        argument = selector.substring(index + 1, close).trim();
+        index = close + 1;
+      }
+      if (pseudo.isEmpty) return false;
+      if (!_matchesPseudoClass(element, pseudo, argument)) return false;
+    } else {
+      return false;
+    }
   }
   return true;
+}
+
+int _findClosingDelimiter(
+  String input,
+  int start,
+  String open,
+  String close,
+) {
+  var depth = 1;
+  var quote = '';
+  for (var i = start; i < input.length; i++) {
+    final ch = input[i];
+    if (quote.isNotEmpty) {
+      if (ch == r'\' && i + 1 < input.length) {
+        i++;
+        continue;
+      }
+      if (ch == quote) quote = '';
+      continue;
+    }
+    if (ch == '"' || ch == "'") {
+      quote = ch;
+    } else if (ch == open) {
+      depth++;
+    } else if (ch == close) {
+      depth--;
+      if (depth == 0) return i;
+    }
+  }
+  return -1;
+}
+
+bool _matchesPseudoClass(Element element, String rawName, String? argument) {
+  switch (rawName) {
+    case 'first-child':
+      final parent = element.parent;
+      return parent != null &&
+          parent.children.isNotEmpty &&
+          identical(parent.children.first, element);
+    case 'last-child':
+      final parent = element.parent;
+      return parent != null &&
+          parent.children.isNotEmpty &&
+          identical(parent.children.last, element);
+    case 'only-child':
+      final parent = element.parent;
+      return parent != null &&
+          parent.children.length == 1 &&
+          identical(parent.children.single, element);
+    case 'root':
+      return element.parent == null;
+    case 'link':
+    case 'any-link':
+      return element.localName == 'a' && element.attributes.containsKey('href');
+    case 'not':
+      if (argument == null || argument.isEmpty) return false;
+      for (final sub in _splitTopLevel(argument, ',')) {
+        final trimmed = sub.trim();
+        if (trimmed.isNotEmpty && _matchesSelector(element, trimmed)) {
+          return false;
+        }
+      }
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool _matchesAttributeSelector(Element element, String expr) {
+  final match = RegExp(
+    r'^\s*([^\s=~|^$*\]]+)\s*(?:([~|^$*]?=)\s*(.+?)\s*)?$',
+  ).firstMatch(expr);
+  if (match == null) return false;
+  var attrName = match.group(1)!;
+  final pipe = attrName.indexOf('|');
+  if (pipe >= 0) attrName = attrName.substring(pipe + 1);
+  final op = match.group(2);
+  var rawExpected = match.group(3);
+  final actual = _htmlAttributeCaseInsensitive(element, attrName);
+  if (op == null) return actual != null;
+  if (actual == null || rawExpected == null) return false;
+  var caseInsensitive = false;
+  if (rawExpected.length > 2 &&
+      (rawExpected.endsWith(' i') || rawExpected.endsWith(' I'))) {
+    final beforeFlag = rawExpected.substring(0, rawExpected.length - 1).trim();
+    if ((beforeFlag.startsWith('"') && beforeFlag.endsWith('"')) ||
+        (beforeFlag.startsWith("'") && beforeFlag.endsWith("'"))) {
+      rawExpected = beforeFlag;
+      caseInsensitive = true;
+    }
+  }
+  if (rawExpected.length >= 2 &&
+      ((rawExpected.startsWith('"') && rawExpected.endsWith('"')) ||
+          (rawExpected.startsWith("'") && rawExpected.endsWith("'")))) {
+    rawExpected = rawExpected.substring(1, rawExpected.length - 1);
+  }
+  final lhs = caseInsensitive ? actual.toLowerCase() : actual;
+  final rhs = caseInsensitive ? rawExpected.toLowerCase() : rawExpected;
+  switch (op) {
+    case '=':
+      return lhs == rhs;
+    case '~=':
+      return rhs.isNotEmpty &&
+          !rhs.contains(RegExp(r'\s')) &&
+          lhs.split(RegExp(r'\s+')).contains(rhs);
+    case '|=':
+      return lhs == rhs || lhs.startsWith('$rhs-');
+    case '^=':
+      return rhs.isNotEmpty && lhs.startsWith(rhs);
+    case r'$=':
+      return rhs.isNotEmpty && lhs.endsWith(rhs);
+    case '*=':
+      return rhs.isNotEmpty && lhs.contains(rhs);
+    default:
+      return false;
+  }
+}
+
+String? _htmlAttributeCaseInsensitive(Element element, String name) {
+  final direct = element.attributes[name];
+  if (direct != null) return direct;
+  final lower = name.toLowerCase();
+  for (final entry in element.attributes.entries) {
+    final key = entry.key.toString().toLowerCase();
+    if (key == lower || key.endsWith(':$lower')) return entry.value;
+  }
+  return null;
 }
 
 double _fontScale(String? value, double inherited) {
@@ -503,4 +1065,48 @@ String? _cssUrl(String? value) {
     r'''url\(\s*["']?([^"')]+)["']?\s*\)''',
     caseSensitive: false,
   ).firstMatch(value)?.group(1)?.trim();
+}
+
+int? _parseBackgroundColor(String value) {
+  final tokens = <String>[];
+  final buffer = StringBuffer();
+  var quote = '';
+  var parenDepth = 0;
+  for (var i = 0; i < value.length; i++) {
+    final ch = value[i];
+    if (quote.isNotEmpty) {
+      buffer.write(ch);
+      if (ch == r'\' && i + 1 < value.length) {
+        i++;
+        buffer.write(value[i]);
+      } else if (ch == quote) {
+        quote = '';
+      }
+      continue;
+    }
+    if (ch == '"' || ch == "'") {
+      quote = ch;
+      buffer.write(ch);
+    } else if (ch == '(') {
+      parenDepth++;
+      buffer.write(ch);
+    } else if (ch == ')' && parenDepth > 0) {
+      parenDepth--;
+      buffer.write(ch);
+    } else if (_isCssWhitespace(ch.codeUnitAt(0)) && parenDepth == 0) {
+      if (buffer.isNotEmpty) {
+        tokens.add(buffer.toString());
+        buffer.clear();
+      }
+    } else {
+      buffer.write(ch);
+    }
+  }
+  if (buffer.isNotEmpty) tokens.add(buffer.toString());
+  for (final token in tokens) {
+    if (token.toLowerCase().startsWith('url(')) continue;
+    final parsed = _parseCssColor(token);
+    if (parsed != null) return parsed;
+  }
+  return null;
 }
